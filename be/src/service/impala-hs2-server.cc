@@ -102,6 +102,9 @@ DECLARE_int32(max_hs2_sessions_per_user);
 DECLARE_bool(ping_expose_webserver_url);
 DECLARE_string(anonymous_user_name);
 
+DEFINE_int64(hive_server2_thrift_resultset_default_fetch_size, 1000,
+ "Default fetch size for HiveServer2 thrift resultset");
+
 namespace impala {
 
 const string IMPALA_RESULT_CACHING_OPT = "impala.resultset.cache.size";
@@ -109,6 +112,8 @@ const string IMPALA_RESULT_CACHING_OPT = "impala.resultset.cache.size";
 const string SET_HIVECONF_PREFIX = "set:hiveconf:";
 
 const int SET_HIVECONF_PREFIX_LEN = SET_HIVECONF_PREFIX.length();
+
+const string HIVE_SERVER2_THRIFT_RESULTSET_FETCH_SIZE_KEY = "hive.server2.thrift.resultset.default.fetch.size";
 
 void ImpalaServer::ExecuteMetadataOp(const THandleIdentifier& session_handle,
     TMetadataOpRequest* request, TOperationHandle* handle, thrift::TStatus* status) {
@@ -453,6 +458,11 @@ void ImpalaServer::OpenSession(TOpenSessionResp& return_val,
   const string& http_addr = TNetworkAddressToString(MakeNetworkAddress(
       FLAGS_hostname, FLAGS_webserver_port));
   return_val.configuration.insert(make_pair("http_addr", http_addr));
+
+  // Add hive.server2.thrift.resultset.default.fetch.size to the response configuration
+  // HIVE-23005(4.0.0), Hive JDBC driver supposes that server always returns this conf
+  const string fetch_size_value = std::to_string(FLAGS_hive_server2_thrift_resultset_default_fetch_size);
+  return_val.configuration.insert(make_pair(HIVE_SERVER2_THRIFT_RESULTSET_FETCH_SIZE_KEY, fetch_size_value));
 
   {
     lock_guard<mutex> l(connection_to_sessions_map_lock_);
