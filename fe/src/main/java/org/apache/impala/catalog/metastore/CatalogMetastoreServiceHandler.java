@@ -31,6 +31,7 @@ import org.apache.hadoop.hive.metastore.api.AlterPartitionsRequest;
 import org.apache.hadoop.hive.metastore.api.AlterPartitionsResponse;
 import org.apache.hadoop.hive.metastore.api.AlterTableRequest;
 import org.apache.hadoop.hive.metastore.api.AlterTableResponse;
+import org.apache.hadoop.hive.metastore.api.CompactionMetricsDataRequest;
 import org.apache.hadoop.hive.metastore.api.CreateTableRequest;
 import org.apache.hadoop.hive.metastore.api.Database;
 import org.apache.hadoop.hive.metastore.api.DropDatabaseRequest;
@@ -63,6 +64,7 @@ import org.apache.hadoop.hive.metastore.api.TruncateTableResponse;
 import org.apache.hadoop.hive.metastore.utils.MetaStoreUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.impala.catalog.CatalogHmsAPIHelper;
+import org.apache.impala.catalog.MetaStoreClientPool.MetaStoreClient;
 import org.apache.impala.catalog.events.DeleteEventLog;
 import org.apache.impala.catalog.events.MetastoreEvents;
 import org.apache.impala.catalog.events.MetastoreEventsProcessor;
@@ -111,8 +113,8 @@ public class CatalogMetastoreServiceHandler extends MetastoreServiceHandler {
     }
 
     try {
-      LOG.trace("Received get_Table_req for {}. File metadata is {}",
-          getTableRequest.getTblName(), getTableRequest.isGetFileMetadata());
+      LOG.trace("Received get_Table_req for {}.",
+          getTableRequest.getTblName());
       return CatalogHmsAPIHelper.getTableReq(catalog_, defaultCatalogName_,
           getTableRequest);
     } catch (Exception e) {

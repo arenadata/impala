@@ -141,9 +141,9 @@ public class CatalogHmsAPIHelper {
     }
     // if the client request has getFileMetadata flag set,
     // we retrieve file descriptors too
-    if (getTableRequest.isGetFileMetadata()) {
-      reqBuilder.wantFiles();
-    }
+
+    reqBuilder.wantFiles();
+
     if (getTableRequest.isSetValidWriteIdList()) {
       reqBuilder.writeId(getTableRequest.getValidWriteIdList());
     }
@@ -175,32 +175,31 @@ public class CatalogHmsAPIHelper {
       }
       retTable.setColStats(columnStatistics);
     }
-    if (getTableRequest.isGetFileMetadata()) {
       // set the file-metadata in the response
-      checkCondition(response.table_info.partitions != null,
-          "File metadata was not returned by catalog");
-      checkCondition(response.table_info.partitions.size() == 1,
-          "Retrieving file-metadata for partitioned tables must use partition level"
-              + " fetch APIs");
-      FileMetadata fileMetadata = new FileMetadata();
-      if (response.table_info.partitions.get(0).insert_file_descriptors.size() == 0) {
-        for (THdfsFileDesc fd : response.table_info.partitions.get(0).file_descriptors) {
-          fileMetadata.addToData(fd.file_desc_data);
-        }
-      } else {
-        for (THdfsFileDesc fd :
-            response.table_info.partitions.get(0).insert_file_descriptors) {
-          fileMetadata.addToData(fd.file_desc_data);
-        }
-        for (THdfsFileDesc fd :
-            response.table_info.partitions.get(0).delete_file_descriptors) {
-          fileMetadata.addToData(fd.file_desc_data);
-        }
+    checkCondition(response.table_info.partitions != null,
+        "File metadata was not returned by catalog");
+    checkCondition(response.table_info.partitions.size() == 1,
+        "Retrieving file-metadata for partitioned tables must use partition level"
+            + " fetch APIs");
+    FileMetadata fileMetadata = new FileMetadata();
+    if (response.table_info.partitions.get(0).insert_file_descriptors.size() == 0) {
+      for (THdfsFileDesc fd : response.table_info.partitions.get(0).file_descriptors) {
+        fileMetadata.addToData(fd.file_desc_data);
       }
-      retTable.setFileMetadata(fileMetadata);
-      retTable.setDictionary(getSerializedNetworkAddress(
-          response.table_info.network_addresses));
+    } else {
+      for (THdfsFileDesc fd :
+          response.table_info.partitions.get(0).insert_file_descriptors) {
+        fileMetadata.addToData(fd.file_desc_data);
+      }
+      for (THdfsFileDesc fd :
+          response.table_info.partitions.get(0).delete_file_descriptors) {
+        fileMetadata.addToData(fd.file_desc_data);
+      }
     }
+    retTable.setFileMetadata(fileMetadata);
+    retTable.setDictionary(getSerializedNetworkAddress(
+        response.table_info.network_addresses));
+
     return new GetTableResult(retTable);
   }
 

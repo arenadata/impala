@@ -253,8 +253,8 @@ export APACHE_KNOX_VERSION=1.6.1
 export APACHE_PARQUET_VERSION=1.12.3
 export APACHE_RANGER_VERSION=2.4.0
 export APACHE_TEZ_VERSION=0.10.2
-export APACHE_HIVE_VERSION=3.1.3
-export APACHE_HIVE_STORAGE_API_VERSION=2.7.0
+export APACHE_HIVE_VERSION=4.0.1
+export APACHE_HIVE_STORAGE_API_VERSION=4.0.1
 export APACHE_OZONE_VERSION=1.4.0
 
 # Java dependencies that are not also runtime components. Declaring versions here allows
@@ -439,8 +439,8 @@ export IMPALA_THRIFT_CPP_VERSION=0.16.0-p7
 unset IMPALA_THRIFT_CPP_URL
 if $USE_APACHE_HIVE; then
   # Apache Hive 3 clients can't run on thrift versions >= 0.14 (IMPALA-11801)
-  export IMPALA_THRIFT_POM_VERSION=0.11.0
-  export IMPALA_THRIFT_JAVA_VERSION=${IMPALA_THRIFT_POM_VERSION}-p5
+  export IMPALA_THRIFT_POM_VERSION=0.16.0
+  export IMPALA_THRIFT_JAVA_VERSION=${IMPALA_THRIFT_POM_VERSION}-p7
 else
   export IMPALA_THRIFT_POM_VERSION=0.16.0
   export IMPALA_THRIFT_JAVA_VERSION=${IMPALA_THRIFT_POM_VERSION}-p7
@@ -699,7 +699,7 @@ else
 fi
 # Set the path to the hive_metastore.thrift which is used to build thrift code
 export HIVE_METASTORE_THRIFT_DIR=${HIVE_METASTORE_THRIFT_DIR_OVERRIDE:-\
-"$HIVE_SRC_DIR/standalone-metastore/src/main/thrift"}
+"$HIVE_SRC_DIR/standalone-metastore/metastore-common/src/main/thrift"}
 if $USE_APACHE_TEZ; then
   export TEZ_HOME="$APACHE_COMPONENTS_HOME/apache-tez-${IMPALA_TEZ_VERSION}-bin"
 else

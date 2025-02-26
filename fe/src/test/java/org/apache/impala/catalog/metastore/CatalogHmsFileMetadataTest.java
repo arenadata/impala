@@ -32,6 +32,7 @@ import java.util.Map;
 import org.apache.hadoop.hive.common.ValidWriteIdList;
 import org.apache.hadoop.hive.metastore.api.GetPartitionsByNamesRequest;
 import org.apache.hadoop.hive.metastore.api.GetPartitionsByNamesResult;
+import org.apache.hadoop.hive.metastore.api.GetTableRequest;
 import org.apache.hadoop.hive.metastore.api.Partition;
 import org.apache.hadoop.hive.metastore.api.Table;
 import org.apache.hadoop.hive.metastore.utils.MetaStoreUtils;
@@ -183,8 +184,7 @@ public class CatalogHmsFileMetadataTest extends AbstractCatalogMetastoreTest {
    */
   @Test
   public void testFileMetadataForTable() throws Exception {
-    Table tbl = catalogHmsClient_
-        .getTable(null, "functional", "zipcode_incomes", null, false, null, true);
+    Table tbl = catalogHmsClient_.getTable(new GetTableRequest("functional", "zipcode_incomes"));
     assertNotNull(tbl.getFileMetadata());
     HdfsTable catTbl = (HdfsTable) catalog_
         .getOrLoadTable("functional", "zipcode_incomes", "test", null);

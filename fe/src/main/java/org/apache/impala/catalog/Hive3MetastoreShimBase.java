@@ -57,6 +57,7 @@ import org.apache.hadoop.hive.metastore.api.TxnAbortedException;
 import org.apache.hadoop.hive.metastore.conf.MetastoreConf;
 import org.apache.hadoop.hive.metastore.utils.FileUtils;
 import org.apache.hadoop.hive.metastore.utils.MetaStoreUtils;
+import org.apache.hadoop.hive.metastore.utils.MetaStoreServerUtils;
 import org.apache.hadoop.hive.ql.metadata.ForeignKeyInfo;
 import org.apache.hadoop.hive.ql.metadata.PrimaryKeyInfo;
 import org.apache.hive.service.rpc.thrift.TGetColumnsReq;
@@ -79,7 +80,6 @@ import org.apache.impala.util.HiveMetadataFormatUtils;
 import org.apache.thrift.TException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.apache.hadoop.hive.metastore.utils.MetaStoreUtils;
 
 /**
  * Base class for Hive 3 MetastoreShim.
@@ -203,7 +203,7 @@ public class Hive3MetastoreShimBase {
    */
   public static void updatePartitionStatsFast(Partition partition, Table tbl,
       Warehouse warehouse) throws MetaException {
-    MetaStoreUtils.updatePartitionStatsFast(partition, tbl, warehouse, /*madeDir*/false,
+    MetaStoreServerUtils.updatePartitionStatsFast(partition, tbl, warehouse, /*madeDir*/false,
         /*forceRecompute*/false,
         /*environmentContext*/null, /*isCreate*/false);
   }
@@ -836,6 +836,6 @@ public class Hive3MetastoreShimBase {
    * At the Metadata level there are no restrictions on column names.
    */
   public static boolean validateColumnName(String name) {
-    return MetaStoreUtils.validateColumnName(name);
+    return MetaStoreServerUtils.validateColumnName(name);
   }
 }

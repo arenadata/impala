@@ -60,23 +60,23 @@ function apply_patch {
 }
 
 # 1. Fix HIVE-22915
-echo "Fix HIVE-22915"
-rm $HIVE_HOME/lib/guava-*jar
-cp $HADOOP_HOME/share/hadoop/hdfs/lib/guava-*.jar $HIVE_HOME/lib/
+#echo "Fix HIVE-22915"
+#rm $HIVE_HOME/lib/guava-*jar
+#cp $HADOOP_HOME/share/hadoop/hdfs/lib/guava-*.jar $HIVE_HOME/lib/
 
 # 2. Apply patches
-pushd "$HIVE_SRC_DIR"
-for file in `ls ${HIVE_PARCH_DIR}/patch*.diff | sort`
-do
-  p=$(basename $file)
-  apply_patch $p
-done
+#pushd "$HIVE_SRC_DIR"
+#for file in `ls ${HIVE_PARCH_DIR}/patch*.diff | sort`
+#do
+#  p=$(basename $file)
+#  apply_patch $p
+#done
 
 # 3. Repackage the hive submodules affected by the patch
-if [[ "${HIVE_REBUILD}" = "true" ]]; then
-  echo "Repackage the hive-exec module"
-  ${IMPALA_HOME}/bin/mvn-quiet.sh -pl ql,standalone-metastore clean package \
-      -Dmaven.test.skip
-  cp $HIVE_SRC_DIR/ql/target/hive-exec-${APACHE_HIVE_VERSION}.jar $HIVE_HOME/lib/
-fi
-popd
+#if [[ "${HIVE_REBUILD}" = "true" ]]; then
+#  echo "Repackage the hive-exec module"
+#  ${IMPALA_HOME}/bin/mvn-quiet.sh -pl ql,standalone-metastore clean package \
+#      -Dmaven.test.skip
+#  cp $HIVE_SRC_DIR/ql/target/hive-exec-${APACHE_HIVE_VERSION}.jar $HIVE_HOME/lib/
+#fi
+#popd

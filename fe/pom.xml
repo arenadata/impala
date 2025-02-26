@@ -505,6 +505,7 @@ under the License.
         </exclusion>
       </exclusions>
     </dependency>
+
     <dependency>
       <groupId>org.apache.hive</groupId>
       <artifactId>hive-classification</artifactId>
@@ -513,9 +514,50 @@ under the License.
 
     <dependency>
       <groupId>org.apache.hive</groupId>
-      <artifactId>hive-standalone-metastore</artifactId>
+      <artifactId>hive-standalone-metastore-common</artifactId>
       <version>${hive.version}</version>
       <exclusions>
+        <exclusion>
+          <groupId>org.springframework</groupId>
+          <artifactId>spring-jcl</artifactId>
+        </exclusion>
+        <!-- Impala uses log4j v1; avoid pulling in slf4j handling for log4j2 -->
+        <exclusion>
+          <groupId>org.apache.logging.log4j</groupId>
+          <artifactId>log4j-slf4j-impl</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.logging.log4j</groupId>
+          <artifactId>log4j-1.2-api</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.hive</groupId>
+          <artifactId>hive-serde</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.hive</groupId>
+          <artifactId>hive-shims</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.hadoop</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.cloudera</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
+    <dependency>
+      <groupId>org.apache.hive</groupId>
+      <artifactId>hive-standalone-metastore-server</artifactId>
+      <version>${hive.version}</version>
+      <exclusions>
+        <exclusion>
+          <groupId>org.springframework</groupId>
+          <artifactId>spring-jcl</artifactId>
+        </exclusion>
         <!-- Impala uses log4j v1; avoid pulling in slf4j handling for log4j2 -->
         <exclusion>
           <groupId>org.apache.logging.log4j</groupId>
@@ -1132,22 +1174,6 @@ under the License.
       </activation>
       <build>
         <plugins>
-          <plugin>
-            <groupId>org.apache.maven.plugins</groupId>
-            <artifactId>maven-compiler-plugin</artifactId>
-            <version>3.11.0</version>
-            <configuration>
-              <excludes>
-                <exclude>**/org/apache/impala/catalog/metastore/*.java</exclude>
-                <exclude>**/org/apache/impala/catalog/CatalogHmsAPIHelper.java</exclude>
-                <exclude>**/org/apache/impala/catalog/CompactionInfoLoader.java</exclude>
-              </excludes>
-              <testExcludes>
-                <testExclude>**/org/apache/impala/catalog/metastore/*.java</testExclude>
-                <testExclude>**/org/apache/impala/testutil/Catalog*.java</testExclude>
-              </testExcludes>
-            </configuration>
-          </plugin>
         </plugins>
       </build>
     </profile>
