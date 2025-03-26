@@ -248,14 +248,14 @@ export APACHE_MIRROR
 export APACHE_AVRO_JAVA_VERSION=1.8.2
 export APACHE_HADOOP_VERSION=3.3.6
 export APACHE_HBASE_VERSION=2.6.0
-export APACHE_ICEBERG_VERSION=1.4.3
-export APACHE_KNOX_VERSION=1.6.1
+export APACHE_ICEBERG_VERSION=1.6.1
+export APACHE_KNOX_VERSION=2.0.0
 export APACHE_PARQUET_VERSION=1.12.3
-export APACHE_RANGER_VERSION=2.4.0
+export APACHE_RANGER_VERSION=2.6.0
 export APACHE_TEZ_VERSION=0.10.2
 export APACHE_HIVE_VERSION=4.0.1
 export APACHE_HIVE_STORAGE_API_VERSION=4.0.1
-export APACHE_OZONE_VERSION=1.4.0
+export APACHE_OZONE_VERSION=1.4.1
 
 # Java dependencies that are not also runtime components. Declaring versions here allows
 # other branches to override them in impala-config-branch.sh for cleaner patches.

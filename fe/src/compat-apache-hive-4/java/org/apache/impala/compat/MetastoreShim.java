@@ -32,6 +32,7 @@ import com.google.common.collect.Iterables;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -104,6 +105,7 @@ import org.apache.impala.catalog.TableWriteId;
 import org.apache.impala.catalog.events.MetastoreEvents.MetastoreEvent;
 import org.apache.impala.catalog.events.MetastoreEvents.MetastoreEventType;
 import org.apache.impala.catalog.events.MetastoreEventsProcessor;
+import org.apache.impala.catalog.events.MetastoreEventsProcessor.MetaDataFilter;
 import org.apache.impala.catalog.events.MetastoreNotificationException;
 import org.apache.impala.catalog.events.MetastoreNotificationNeedsInvalidateException;
 import org.apache.impala.catalog.events.SelfEventContext;
@@ -1051,5 +1053,23 @@ public class MetastoreShim extends Hive3MetastoreShimBase {
       return new DataSource(name, location, className, apiVersion);
     }
     return null;
+  }
+
+  public static void setNotificationEventRequestWithFilter(
+      NotificationEventRequest eventRequest, MetaDataFilter metaDataFilter) {
+    if (metaDataFilter != null) {
+      if (metaDataFilter.getCatName() != null &&
+          !metaDataFilter.getCatName().isEmpty()) {
+        eventRequest.setCatName(metaDataFilter.getCatName());
+      }
+      if (metaDataFilter.getDbName() != null &&
+          !metaDataFilter.getDbName().isEmpty()) {
+        eventRequest.setDbName(metaDataFilter.getDbName());
+      }
+      if (metaDataFilter.getTableName() != null &&
+          !metaDataFilter.getTableName().isEmpty()) {
+        eventRequest.setTableNames(Arrays.asList(metaDataFilter.getTableName()));
+      }
+    }
   }
 }

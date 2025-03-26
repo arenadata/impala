@@ -25,7 +25,7 @@ import org.apache.impala.thrift.TKillQueryReq;
 import org.apache.impala.thrift.TUniqueId;
 import org.apache.impala.util.TUniqueIdUtil;
 
-import hiveexec.com.google.common.base.Preconditions;
+import com.google.common.base.Preconditions;
 
 public final class KillQueryStmt extends StatementBase {
   private final String queryIdString_;

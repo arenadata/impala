@@ -198,6 +198,9 @@ import org.apache.hadoop.hive.metastore.api.PropertyGetResponse;
 import org.apache.hadoop.hive.metastore.api.PropertySetRequest;
 import org.apache.hadoop.hive.metastore.api.PutFileMetadataRequest;
 import org.apache.hadoop.hive.metastore.api.PutFileMetadataResult;
+import org.apache.hadoop.hive.metastore.api.DropPartitionRequest;
+import org.apache.hadoop.hive.metastore.api.DropTableRequest;
+import org.apache.hadoop.hive.metastore.api.AppendPartitionsRequest;
 import org.apache.hadoop.hive.metastore.api.RenamePartitionRequest;
 import org.apache.hadoop.hive.metastore.api.RenamePartitionResponse;
 import org.apache.hadoop.hive.metastore.api.ReplicationMetricList;
@@ -284,6 +287,13 @@ import org.apache.hadoop.hive.metastore.api.WriteNotificationLogBatchRequest;
 import org.apache.hadoop.hive.metastore.api.WriteNotificationLogRequest;
 import org.apache.hadoop.hive.metastore.api.WriteNotificationLogBatchResponse;
 import org.apache.hadoop.hive.metastore.api.WriteNotificationLogResponse;
+import org.apache.hadoop.hive.metastore.api.DataConnector;
+import org.apache.hadoop.hive.metastore.api.CreateDataConnectorRequest;
+import org.apache.hadoop.hive.metastore.api.GetDataConnectorRequest;
+import org.apache.hadoop.hive.metastore.api.DropDataConnectorRequest;
+import org.apache.hadoop.hive.metastore.api.AlterDataConnectorRequest;
+import org.apache.hadoop.hive.metastore.api.AlterDatabaseRequest;
+import org.apache.hadoop.hive.metastore.api.CreateDatabaseRequest;
 import org.apache.hadoop.hive.metastore.conf.MetastoreConf;
 import org.apache.hadoop.hive.metastore.conf.MetastoreConf.ConfVars;
 import org.apache.hadoop.hive.metastore.utils.MetaStoreUtils;
@@ -855,23 +865,6 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<String> get_all_tables(String dbname) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       return client.getHiveClient().getThriftClient().get_all_tables(dbname);
-    }
-  }
-
-  @Override
-  public Table get_table(String dbname, String tblname)
-      throws MetaException, NoSuchObjectException, TException {
-    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_table(dbname, tblname);
-    }
-  }
-
-  @Override
-  public List<Table> get_table_objects_by_name(String dbname, List<String> list)
-      throws TException {
-    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_table_objects_by_name(dbname,
-          list);
     }
   }
 
@@ -3142,6 +3135,88 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public boolean set_properties(PropertySetRequest propertySetRequest)
       throws MetaException, NoSuchObjectException, TException {
     return false;
+  }
+
+  @Override
+  public List<String> fetch_partition_names_req(PartitionsRequest req)
+      throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      return client.getHiveClient().getThriftClient().fetch_partition_names_req(req);
+    }
+  }
+
+  @Override
+  public void drop_table_req(DropTableRequest dropTableRequest)
+      throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      client.getHiveClient().getThriftClient().drop_table_req(dropTableRequest);
+    }
+  }
+
+  @Override
+  public boolean drop_partition_req(DropPartitionRequest dropPartitionReq)
+      throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      return client.getHiveClient().getThriftClient().drop_partition_req(dropPartitionReq);
+    }
+  }
+
+  @Override
+  public Partition append_partition_req(AppendPartitionsRequest appendPartitionReq)
+      throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      return client.getHiveClient().getThriftClient().append_partition_req(appendPartitionReq);
+    }
+  }
+
+  @Override
+  public void create_dataconnector_req(CreateDataConnectorRequest connectorReq) throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      client.getHiveClient().getThriftClient().create_dataconnector_req(connectorReq);
+    }
+  }
+
+  @Override
+  public DataConnector get_dataconnector_req(GetDataConnectorRequest request) throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      return client.getHiveClient().getThriftClient().get_dataconnector_req(request);
+    }
+  }
+
+  @Override
+  public void drop_dataconnector_req(DropDataConnectorRequest dropDcReq) throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      client.getHiveClient().getThriftClient().drop_dataconnector_req(dropDcReq);
+    }
+  }
+
+  @Override
+  public List<String> get_dataconnectors()
+      throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      return client.getHiveClient().getThriftClient().get_dataconnectors();
+    }
+  }
+
+  @Override
+  public void alter_dataconnector_req(AlterDataConnectorRequest alterReq) throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      client.getHiveClient().getThriftClient().alter_dataconnector_req(alterReq);
+    }
+  }
+
+  @Override
+  public void alter_database_req(AlterDatabaseRequest alterDbReq) throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      client.getHiveClient().getThriftClient().alter_database_req(alterDbReq);
+    }
+  }
+
+  @Override
+  public void create_database_req(CreateDatabaseRequest createDatabaseRequest) throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      client.getHiveClient().getThriftClient().create_database_req(createDatabaseRequest);
+    }
   }
 
   /**
