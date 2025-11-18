@@ -369,6 +369,13 @@ under the License.
         <version>${log4j2.version}</version>
       </dependency>
 
+      <dependency>
+        <groupId>org.apache.impala</groupId>
+        <artifactId>impala-iceberg-runtime</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+
+
       <!-- Pin Dropwizard Metrics versions. We directly use metrics-core, and
            metrics-jvm/metrics-json are imported via HMS. -->
       <dependency>
@@ -407,6 +414,7 @@ under the License.
     <module>calcite-planner</module>
     <module>query-event-hook-api</module>
     <module>shaded-deps/hive-exec</module>
+    <module>shaded-deps/impala-iceberg-runtime</module>
     <module>shaded-deps/s3a-aws-sdk</module>
     <module>TableFlattener</module>
     <module>test-hive-udfs</module>

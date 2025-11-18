@@ -650,6 +650,9 @@ public class CreateTableStmt extends StatementBase {
     putGeneratedProperty(IcebergTable.KEY_STORAGE_HANDLER,
         IcebergTable.ICEBERG_STORAGE_HANDLER);
     putGeneratedProperty(TableProperties.ENGINE_HIVE_ENABLED, "true");
+    if (!getTblProperties().containsKey("write.parquet.compression-codec")) {
+      putGeneratedProperty("write.parquet.compression-codec", "snappy");
+    }
     addMergeOnReadPropertiesIfNeeded();
 
     String fileformat = getTblProperties().get(IcebergTable.ICEBERG_FILE_FORMAT);
