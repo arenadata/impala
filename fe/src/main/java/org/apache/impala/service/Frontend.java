@@ -2113,12 +2113,21 @@ public class Frontend {
 
     // Executor groups exist in the cluster. Identify those that can be used.
     for (TExecutorGroupSet e : executorGroupSets) {
-      // If defined, request_pool can be a suffix of the group name prefix. For example
-      //   group_set_prefix = root.queue1
-      //   request_pool = queue1
-      if (StringUtils.isNotEmpty(request_pool)
-          && !e.getExec_group_name_prefix().endsWith(request_pool)) {
-        continue;
+      if (StringUtils.isNotEmpty(request_pool)) {
+        // If defined, request_pool can be a suffix of the group name prefix. For example
+        //   group_set_prefix = root.queue1
+        //   request_pool = queue1
+        if (!e.getExec_group_name_prefix().endsWith(request_pool)
+          && e.getExpected_num_executors() >= 0) {
+            continue;
+        }
+        // in case of automation (we set expected_num_executors == -1 in that case) we will have
+        //   group_set_prefix = queue1-1-2-3
+        //   request_pool = queue1
+        if (!e.getExec_group_name_prefix().startsWith(request_pool)
+          && e.getExpected_num_executors() < 0) {
+            continue;
+        }
       }
       TExecutorGroupSet new_entry = new TExecutorGroupSet(e);
       if (poolService != null) {

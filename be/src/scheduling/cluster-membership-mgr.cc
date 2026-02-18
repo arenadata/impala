@@ -737,6 +737,17 @@ void PopulateExecutorMembershipRequest(const ClusterMembershipMgr::SnapshotPtr& 
       }
     }
   } else {
+    if (FLAGS_expected_executor_group_sets == "*") {
+      LOG(INFO) <<
+        "Special case handling for FLAGS_expected_executor_group_sets == \"*\"";
+      for (const auto& it : snapshot->executor_groups) {
+        // order does not matter
+        exec_group_sets.emplace_back();
+        exec_group_sets.back().__set_exec_group_name_prefix(it.first);
+        // We set expected_num_executors to -1 to identify automation from Frontend
+        exec_group_sets.back().__set_expected_num_executors(-1);
+      }
+    } else
     if (expected_exec_group_sets.empty()) {
       // Add a default exec group set if no expected group sets were specified.
       exec_group_sets.emplace_back();
@@ -745,6 +756,7 @@ void PopulateExecutorMembershipRequest(const ClusterMembershipMgr::SnapshotPtr& 
       exec_group_sets.insert(exec_group_sets.begin(), expected_exec_group_sets.begin(),
           expected_exec_group_sets.end());
     }
+
     int matching_exec_groups_found = 0;
     for (auto& set : exec_group_sets) {
       int max_num_executors = -1;
@@ -788,6 +800,11 @@ Status ClusterMembershipMgr::PopulateExpectedExecGroupSets(
   expected_exec_group_sets.clear();
   std::unordered_set<string> parsed_group_prefixes;
   vector<StringPiece> groups;
+
+  if (FLAGS_expected_executor_group_sets == "*") {
+    return Status::OK();
+  }
+
   groups = strings::Split(FLAGS_expected_executor_group_sets, ",", strings::SkipEmpty());
   if (groups.empty()) return Status::OK();
 

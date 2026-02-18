@@ -707,6 +707,13 @@ TEST(ClusterMembershipMgrUnitTest, TestPopulateExpectedExecGroupSets) {
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.msg().GetFullMessageDetails(),
       "Executor group set prefix specified multiple times: group-prefix1:10\n");
+
+  // Case 10: Star in FLAGS_expected_executor_group_sets
+  FLAGS_expected_executor_group_sets = "*";
+  expected_exec_group_sets.clear();
+  status = ClusterMembershipMgr::PopulateExpectedExecGroupSets(expected_exec_group_sets);
+  EXPECT_TRUE(status.ok());
+  EXPECT_EQ(expected_exec_group_sets.size(), 0);
 }
 
 /// This ensures that all executor group configuration scenarios possible using available
@@ -836,6 +843,30 @@ TEST(ClusterMembershipMgrUnitTest, PopulateExecutorMembershipRequest) {
     EXPECT_EQ(update_req.exec_group_sets[1].curr_num_executors, 0);
     EXPECT_EQ(update_req.exec_group_sets[1].expected_num_executors, 10);
     EXPECT_EQ(update_req.exec_group_sets[1].exec_group_name_prefix, "bar");
+    snapshot_ptr->executor_groups.clear();
+  }
+
+  // Case 3: Using executor groups, expected_exec_group_sets is *
+  {
+    FLAGS_expected_executor_group_sets = "*";
+
+    ExecutorGroup exec_group("foo-group1", 1);
+    exec_group.AddExecutor(MakeBackendDescriptor(1, exec_group, 0));
+    snapshot_ptr->executor_groups.insert({exec_group.name(), exec_group});
+    ExecutorGroup exec_group2("bar-group1", 1);
+    exec_group2.AddExecutor(MakeBackendDescriptor(1, exec_group2, 1));
+    exec_group2.AddExecutor(MakeBackendDescriptor(2, exec_group2, 2));
+    snapshot_ptr->executor_groups.insert({exec_group2.name(), exec_group2});
+    ClusterMembershipMgr::SnapshotPtr ptr = snapshot_ptr;
+    PopulateExecutorMembershipRequest(ptr, empty_exec_group_sets, update_req);
+    EXPECT_EQ(update_req.exec_group_sets.size(), 2);
+    // reverse order is ok
+    EXPECT_EQ(update_req.exec_group_sets[1].curr_num_executors, 1);
+    EXPECT_EQ(update_req.exec_group_sets[1].expected_num_executors, -1);
+    EXPECT_EQ(update_req.exec_group_sets[1].exec_group_name_prefix, "foo-group1");
+    EXPECT_EQ(update_req.exec_group_sets[0].curr_num_executors, 2);
+    EXPECT_EQ(update_req.exec_group_sets[0].expected_num_executors, -1);
+    EXPECT_EQ(update_req.exec_group_sets[0].exec_group_name_prefix, "bar-group1");
     snapshot_ptr->executor_groups.clear();
   }
 }
