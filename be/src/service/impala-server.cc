@@ -311,7 +311,8 @@ DEFINE_string(expected_executor_group_sets, "",
     "prefix1-group1, prefix1-group2, etc. The expected group size (number of executors "
     "in each group) is used during planning when no healthy executor group is available. "
     "If this flag is used then any executor groups that do not map to the specified group"
-    " sets will never be used to schedule queries.");
+    " sets will never be used to schedule queries. If this flag set to “*“ will populate "
+    "all healthy resource groups.");
 
 // TODO: can we automatically choose a startup grace period based on the max admission
 // control queue timeout + some margin for error?
