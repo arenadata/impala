@@ -101,6 +101,17 @@ under the License.
     and s3 buckets without trying the mirror first, while still
     getting other artifacts from the mirror.
     -->
+    <repository>
+      <id>arenadata</id>
+      <name>Arenadata ADH GitHub Packages</name>
+      <url>https://maven.pkg.github.com/arenadata/*</url>
+      <releases>
+        <enabled>true</enabled>
+      </releases>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
+    </repository>
     <!-- Local/S3 repositories -->
     <repository>
       <id>impala.toolchain.kudu.repo</id>
@@ -124,6 +135,9 @@ under the License.
       <id>impala.cdp.repo</id>
       <url>${env.CDP_MAVEN_REPOSITORY}</url>
       <name>Impala CDP Repository</name>
+      <releases>
+        <enabled>false</enabled>
+      </releases>
       <snapshots>
         <enabled>false</enabled>
       </snapshots>
