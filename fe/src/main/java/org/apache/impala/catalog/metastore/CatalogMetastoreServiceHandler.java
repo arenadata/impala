@@ -31,6 +31,7 @@ import org.apache.hadoop.hive.metastore.api.AlterPartitionsRequest;
 import org.apache.hadoop.hive.metastore.api.AlterPartitionsResponse;
 import org.apache.hadoop.hive.metastore.api.AlterTableRequest;
 import org.apache.hadoop.hive.metastore.api.AlterTableResponse;
+import org.apache.hadoop.hive.metastore.api.AsyncOperationResp;
 import org.apache.hadoop.hive.metastore.api.CompactionMetricsDataRequest;
 import org.apache.hadoop.hive.metastore.api.CreateTableRequest;
 import org.apache.hadoop.hive.metastore.api.Database;
@@ -274,22 +275,22 @@ public class CatalogMetastoreServiceHandler extends MetastoreServiceHandler {
   }
 
   @Override
-  public void drop_database_req(final DropDatabaseRequest dropDatabaseRequest)
+  public AsyncOperationResp drop_database_req(final DropDatabaseRequest dropDatabaseRequest)
       throws NoSuchObjectException, InvalidOperationException, MetaException {
     if (!BackendConfig.INSTANCE.enableCatalogdHMSCache() ||
         !BackendConfig.INSTANCE.enableSyncToLatestEventOnDdls()) {
-      super.drop_database_req(dropDatabaseRequest);
-      return;
+      return super.drop_database_req(dropDatabaseRequest);
     }
     String apiName = HmsApiNameEnum.DROP_DATABASE_REQ.apiName();
     String dbName =
         MetaStoreUtils.parseDbName(dropDatabaseRequest.getName(), serverConf_)[1];
     long currentEventId = -1;
+    AsyncOperationResp resp = null;
     catalogOpExecutor_.getMetastoreDdlLock().lock();
     try  {
       try {
         currentEventId = super.get_current_notificationEventId().getEventId();
-        super.drop_database_req(dropDatabaseRequest);
+        resp = super.drop_database_req(dropDatabaseRequest);
       } catch (NoSuchObjectException e) {
         // db does not exist in metastore, remove it from
         // catalog if exists
@@ -310,6 +311,7 @@ public class CatalogMetastoreServiceHandler extends MetastoreServiceHandler {
     } finally {
       catalogOpExecutor_.getMetastoreDdlLock().unlock();
     }
+    return resp;
   }
 
   @Override

@@ -383,7 +383,7 @@ under the License.
     <dependency>
       <groupId>com.google.flatbuffers</groupId>
       <artifactId>flatbuffers-java</artifactId>
-      <version>1.9.0</version>
+      <version>23.5.26</version>
     </dependency>
 
     <dependency>
@@ -666,6 +666,12 @@ under the License.
       <groupId>org.bouncycastle</groupId>
       <artifactId>bcpkix-jdk18on</artifactId>
     </dependency>
+    <dependency>
+      <groupId>org.apache.kerby</groupId>
+      <artifactId>kerb-simplekdc</artifactId>
+      <version>2.0.3</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <reporting>
@@ -947,34 +953,21 @@ under the License.
                     <exclude>org.bouncycastle:bcpkix-jdk15to18:*</exclude>
                   </excludes>
                   <includes>
-                    <!-- ranger-plugins-audit depends on jetty-client, which in turn pulls in jetty-http and jetty-io. -->
-                    <include>org.eclipse.jetty:jetty-client</include>
-                    <include>org.eclipse.jetty:jetty-http</include>
-                    <include>org.eclipse.jetty:jetty-io</include>
-                    <!-- jetty-security is needed by jetty-servlet. -->
-                    <include>org.eclipse.jetty:jetty-security</include>
-                    <!-- jetty-servlet is required by hive-standalone-metastore after HIVE-26071. -->
-￼                    <include>org.eclipse.jetty:jetty-servlet</include>
-                    <!-- jetty-server is required when HiveMetaStoreClient is instantiated after HIVE-21456. -->
-                    <include>org.eclipse.jetty:jetty-server</include>
-                    <!-- hadoop-yarn-common depends on some Jetty utilities. -->
-                    <include>org.eclipse.jetty:jetty-util</include>
-                    <include>org.eclipse.jetty:jetty-util-ajax</include>
-                    <!-- Include the allowed versions specifically -->
+                    <include>org.eclipse.jetty:*:9.4.58.v20250814</include>
                     <include>org.apache.hadoop:*:${hadoop.version}</include>
                     <include>org.apache.hadoop:*:${ozone.version}</include>
                     <include>org.apache.hbase:*:${hbase.version}</include>
                     <include>org.apache.hive:*:${hive.version}</include>
                     <include>org.apache.hive:hive-storage-api:${hive.storage.api.version}</include>
+                    <include>org.apache.hive:hive-storage-api:4.0.1</include>
                     <include>org.apache.kudu:*:${kudu.version}</include>
                     <include>org.apache.avro:*:${avro.version}</include>
                     <include>org.apache.parquet:*:${parquet.version}</include>
                     <include>org.apache.orc:*:${orc.version}</include>
                     <include>org.apache.ozone:*:${ozone.version}</include>
-                    <!-- orc-format does not match orc version -->
                     <include>org.apache.orc:orc-format:1.0</include>
-                    <include>org.apache.logging.log4j:log4j-core:${log4j2.version}</include>
-                    <include>org.apache.logging.log4j:log4j-api:${log4j2.version}</include>
+                    <include>org.apache.logging.log4j:*:${log4j2.version}</include>
+                    <include>org.apache.logging.log4j:*:2.17.2</include>
                   </includes>
                 </bannedDependencies>
               </rules>

@@ -32,6 +32,14 @@ import org.apache.hadoop.hive.metastore.PartFilterExprUtil;
 import org.apache.hadoop.hive.metastore.PartitionExpressionProxy;
 import org.apache.hadoop.hive.metastore.api.AbortCompactResponse;
 import org.apache.hadoop.hive.metastore.api.AbortCompactionRequest;
+import org.apache.hadoop.hive.metastore.api.AsyncOperationResp;
+import org.apache.hadoop.hive.metastore.api.DeleteColumnStatisticsRequest;
+import org.apache.hadoop.hive.metastore.api.GetDatabaseObjectsRequest;
+import org.apache.hadoop.hive.metastore.api.GetDatabaseObjectsResponse;
+import org.apache.hadoop.hive.metastore.api.GetFunctionsRequest;
+import org.apache.hadoop.hive.metastore.api.GetFunctionsResponse;
+import org.apache.hadoop.hive.metastore.api.LockMaterializationRebuildRequest;
+import org.apache.hadoop.hive.metastore.api.TableParamsUpdate;
 import org.apache.hadoop.hive.metastore.api.AbortTxnRequest;
 import org.apache.hadoop.hive.metastore.api.AbortTxnsRequest;
 import org.apache.hadoop.hive.metastore.api.AddCheckConstraintRequest;
@@ -415,7 +423,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   @Override
   public String getMetaConf(String configKey) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().getMetaConf(configKey);
+      return client.getHiveClient().getThriftClient().getClient().getMetaConf(configKey);
     }
   }
 
@@ -423,7 +431,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void setMetaConf(String configKey, String configValue)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().setMetaConf(configKey, configValue);
+      client.getHiveClient().getThriftClient().getClient().setMetaConf(configKey, configValue);
     }
   }
 
@@ -431,7 +439,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void create_catalog(CreateCatalogRequest createCatalogRequest)
       throws AlreadyExistsException, InvalidObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().create_catalog(createCatalogRequest);
+      client.getHiveClient().getThriftClient().getClient().create_catalog(createCatalogRequest);
     }
   }
 
@@ -439,7 +447,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void alter_catalog(AlterCatalogRequest alterCatalogRequest)
       throws NoSuchObjectException, InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().alter_catalog(alterCatalogRequest);
+      client.getHiveClient().getThriftClient().getClient().alter_catalog(alterCatalogRequest);
     }
   }
 
@@ -447,14 +455,14 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public GetCatalogResponse get_catalog(GetCatalogRequest getCatalogRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_catalog(getCatalogRequest);
+      return client.getHiveClient().getThriftClient().getClient().get_catalog(getCatalogRequest);
     }
   }
 
   @Override
   public GetCatalogsResponse get_catalogs() throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_catalogs();
+      return client.getHiveClient().getThriftClient().getClient().get_catalogs();
     }
   }
 
@@ -462,7 +470,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void drop_catalog(DropCatalogRequest dropCatalogRequest)
       throws NoSuchObjectException, InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().drop_catalog(dropCatalogRequest);
+      client.getHiveClient().getThriftClient().getClient().drop_catalog(dropCatalogRequest);
     }
   }
 
@@ -471,7 +479,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws AlreadyExistsException, InvalidObjectException, MetaException, TException {
     catalogOpExecutor_.getMetastoreDdlLock().lock();
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().create_database(database);
+      client.getHiveClient().getThriftClient().getClient().create_database(database);
     } finally {
       catalogOpExecutor_.getMetastoreDdlLock().unlock();
     }
@@ -481,7 +489,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public Database get_database(String databaseName)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_database(databaseName);
+      return client.getHiveClient().getThriftClient().getClient().get_database(databaseName);
     }
   }
 
@@ -489,7 +497,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public Database get_database_req(GetDatabaseRequest getDatabaseRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_database_req(getDatabaseRequest);
     }
   }
@@ -510,13 +518,14 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   }
 
   @Override
-  public void drop_database_req(final DropDatabaseRequest dropDatabaseRequest)
+  public AsyncOperationResp drop_database_req(final DropDatabaseRequest dropDatabaseRequest)
       throws NoSuchObjectException, InvalidOperationException, MetaException {
     long currentEventId = -1;
+    AsyncOperationResp resp = null;
     catalogOpExecutor_.getMetastoreDdlLock().lock();
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       currentEventId = getCurrentEventId(client);
-      client.getHiveClient().getThriftClient().drop_database_req(dropDatabaseRequest);
+      resp = client.getHiveClient().getThriftClient().getClient().drop_database_req(dropDatabaseRequest);
       // TODO: We should add TException to method signature in hive and we can remove
       // following two catch blocks.
     } catch (NoSuchObjectException|InvalidOperationException|MetaException e) {
@@ -528,23 +537,24 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
     }
     if (!BackendConfig.INSTANCE.invalidateCatalogdHMSCacheOnDDLs() ||
         !BackendConfig.INSTANCE.enableCatalogdHMSCache()) {
-      return;
+      return resp;
     }
     dropDbIfExists(dropDatabaseRequest.getName(), dropDatabaseRequest.isIgnoreUnknownDb(),
         currentEventId, "drop_database");
+    return resp;
   }
 
   @Override
   public List<String> get_databases(String pattern) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_databases(pattern);
+      return client.getHiveClient().getThriftClient().getClient().get_databases(pattern);
     }
   }
 
   @Override
   public List<String> get_all_databases() throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_all_databases();
+      return client.getHiveClient().getThriftClient().getClient().get_all_databases();
     }
   }
 
@@ -552,7 +562,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void alter_database(String dbname, Database database)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().alter_database(dbname, database);
+      client.getHiveClient().getThriftClient().getClient().alter_database(dbname, database);
     }
   }
 
@@ -560,7 +570,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public Type get_type(String name) throws MetaException, NoSuchObjectException,
       TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_type(name);
+      return client.getHiveClient().getThriftClient().getClient().get_type(name);
     }
   }
 
@@ -568,7 +578,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public boolean create_type(Type type)
       throws AlreadyExistsException, InvalidObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().create_type(type);
+      return client.getHiveClient().getThriftClient().getClient().create_type(type);
     }
   }
 
@@ -576,14 +586,14 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public boolean drop_type(String type)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().drop_type(type);
+      return client.getHiveClient().getThriftClient().getClient().drop_type(type);
     }
   }
 
   @Override
   public Map<String, Type> get_type_all(String s) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_type_all(s);
+      return client.getHiveClient().getThriftClient().getClient().get_type_all(s);
     }
   }
 
@@ -591,7 +601,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<FieldSchema> get_fields(String dbname, String tblname)
       throws MetaException, UnknownTableException, UnknownDBException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_fields(dbname, tblname);
+      return client.getHiveClient().getThriftClient().getClient().get_fields(dbname, tblname);
     }
   }
 
@@ -600,7 +610,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       String tblName, EnvironmentContext environmentContext)
       throws MetaException, UnknownTableException, UnknownDBException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_fields_with_environment_context(dbName, tblName, environmentContext);
     }
   }
@@ -609,7 +619,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<FieldSchema> get_schema(String dbname, String tblname)
       throws MetaException, UnknownTableException, UnknownDBException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_schema(dbname, tblname);
+      return client.getHiveClient().getThriftClient().getClient().get_schema(dbname, tblname);
     }
   }
 
@@ -618,7 +628,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       String tblname, EnvironmentContext environmentContext)
       throws MetaException, UnknownTableException, UnknownDBException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_schema_with_environment_context(dbname, tblname, environmentContext);
     }
   }
@@ -628,7 +638,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws TException {
     catalogOpExecutor_.getMetastoreDdlLock().lock();
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().create_table(table);
+      client.getHiveClient().getThriftClient().getClient().create_table(table);
     } finally {
       catalogOpExecutor_.getMetastoreDdlLock().unlock();
     }
@@ -640,7 +650,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws TException {
     catalogOpExecutor_.getMetastoreDdlLock().lock();
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .create_table_with_environment_context(table, environmentContext);
     } finally {
       catalogOpExecutor_.getMetastoreDdlLock().unlock();
@@ -657,7 +667,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws TException {
     catalogOpExecutor_.getMetastoreDdlLock().lock();
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().create_table_with_constraints(table,
+      client.getHiveClient().getThriftClient().getClient().create_table_with_constraints(table,
           sqlPrimaryKeys, sqlForeignKeys, sqlUniqueConstraints, sqlNotNullConstraints,
           sqlDefaultConstraints, sqlCheckConstraints);
     } finally {
@@ -670,7 +680,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws TException {
     catalogOpExecutor_.getMetastoreDdlLock().lock();
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().create_table_req(createTableRequest);
+      client.getHiveClient().getThriftClient().getClient().create_table_req(createTableRequest);
     } finally {
       catalogOpExecutor_.getMetastoreDdlLock().unlock();
     }
@@ -680,7 +690,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void drop_constraint(DropConstraintRequest dropConstraintRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().drop_constraint(dropConstraintRequest);
+      client.getHiveClient().getThriftClient().getClient().drop_constraint(dropConstraintRequest);
     }
   }
 
@@ -688,7 +698,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void add_primary_key(AddPrimaryKeyRequest addPrimaryKeyRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().add_primary_key(addPrimaryKeyRequest);
+      client.getHiveClient().getThriftClient().getClient().add_primary_key(addPrimaryKeyRequest);
     }
   }
 
@@ -696,7 +706,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void add_foreign_key(AddForeignKeyRequest addForeignKeyRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().add_foreign_key(addForeignKeyRequest);
+      client.getHiveClient().getThriftClient().getClient().add_foreign_key(addForeignKeyRequest);
     }
   }
 
@@ -704,7 +714,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void add_unique_constraint(AddUniqueConstraintRequest addUniqueConstraintRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .add_unique_constraint(addUniqueConstraintRequest);
     }
   }
@@ -714,7 +724,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       AddNotNullConstraintRequest addNotNullConstraintRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .add_not_null_constraint(addNotNullConstraintRequest);
     }
   }
@@ -724,7 +734,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       AddDefaultConstraintRequest addDefaultConstraintRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .add_default_constraint(addDefaultConstraintRequest);
     }
   }
@@ -733,7 +743,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void add_check_constraint(AddCheckConstraintRequest addCheckConstraintRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .add_check_constraint(addCheckConstraintRequest);
     }
   }
@@ -743,7 +753,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       AlreadyExistsException, InvalidObjectException, MetaException,
       NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .translate_table_dryrun(createTableRequest);
     }
   }
@@ -757,7 +767,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       eventId = getCurrentEventId(client);
       // TODO: Handle NoSuchObjectException
-      client.getHiveClient().getThriftClient().drop_table(dbname,
+      client.getHiveClient().getThriftClient().getClient().drop_table(dbname,
               tblname, deleteData);
       if (!BackendConfig.INSTANCE.invalidateCatalogdHMSCacheOnDDLs() ||
               !BackendConfig.INSTANCE.enableCatalogdHMSCache()) {
@@ -780,7 +790,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
     long eventId = -1;
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       eventId = getCurrentEventId(client);
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .drop_table_with_environment_context(dbname, tblname, deleteData,
               environmentContext);
       if (!BackendConfig.INSTANCE.invalidateCatalogdHMSCacheOnDDLs() ||
@@ -798,7 +808,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void truncate_table(String dbName, String tblName, List<String> partNames)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().truncate_table(dbName, tblName, partNames);
+      client.getHiveClient().getThriftClient().getClient().truncate_table(dbName, tblName, partNames);
       invalidateNonTransactionalTableIfExists(dbName, tblName, "truncate_table");
     }
   }
@@ -807,7 +817,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public TruncateTableResponse truncate_table_req(
       TruncateTableRequest req) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      TruncateTableResponse resp = client.getHiveClient().getThriftClient()
+      TruncateTableResponse resp = client.getHiveClient().getThriftClient().getClient()
           .truncate_table_req(req);
       invalidateNonTransactionalTableIfExists(req.getDbName(),
           req.getTableName(), "truncate_table_req");
@@ -819,7 +829,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<String> get_tables(String dbname, String tblName)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_tables(dbname, tblName);
+      return client.getHiveClient().getThriftClient().getClient().get_tables(dbname, tblName);
     }
   }
 
@@ -828,7 +838,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       String tableType)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_tables_by_type(dbname,
+      return client.getHiveClient().getThriftClient().getClient().get_tables_by_type(dbname,
           tablePattern, tableType);
     }
   }
@@ -837,7 +847,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<Table> get_all_materialized_view_objects_for_rewriting()
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_all_materialized_view_objects_for_rewriting();
     }
   }
@@ -846,7 +856,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<String> get_materialized_views_for_rewriting(String dbName)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_materialized_views_for_rewriting(dbName);
     }
   }
@@ -856,7 +866,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       List<String> tableTypes)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_table_meta(dbnamePattern,
+      return client.getHiveClient().getThriftClient().getClient().get_table_meta(dbnamePattern,
           tblNamePattern, tableTypes);
     }
   }
@@ -864,7 +874,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   @Override
   public List<String> get_all_tables(String dbname) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_all_tables(dbname);
+      return client.getHiveClient().getThriftClient().getClient().get_all_tables(dbname);
     }
   }
 
@@ -872,7 +882,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<ExtendedTableInfo> get_tables_ext(GetTablesExtRequest getTablesExtRequest)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_tables_ext(getTablesExtRequest);
+      return client.getHiveClient().getThriftClient().getClient().get_tables_ext(getTablesExtRequest);
     }
   }
 
@@ -893,7 +903,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
     ValidWriteIdList writeIdList = null;
     String requestWriteIdList = getTableRequest.getValidWriteIdList();
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      result = client.getHiveClient().getThriftClient()
+      result = client.getHiveClient().getThriftClient().getClient()
           .get_table_req(getTableRequest);
       Table tbl = result.getTable();
       // we need to get the current ValidTxnIdList to avoid returning
@@ -916,7 +926,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public GetTablesResult get_table_objects_by_name_req(GetTablesRequest getTablesRequest)
       throws MetaException, InvalidOperationException, UnknownDBException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_table_objects_by_name_req(getTablesRequest);
     }
   }
@@ -926,7 +936,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       CreationMetadata creationMetadata, String validTxnList)
       throws MetaException, InvalidOperationException, UnknownDBException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_materialization_invalidation_info(creationMetadata, validTxnList);
     }
   }
@@ -936,7 +946,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       CreationMetadata creationMetadata)
       throws MetaException, InvalidOperationException, UnknownDBException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().update_creation_metadata(catName,
+      client.getHiveClient().getThriftClient().getClient().update_creation_metadata(catName,
           dbName, tblName, creationMetadata);
     }
   }
@@ -946,7 +956,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       short maxParts)
       throws MetaException, InvalidOperationException, UnknownDBException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_table_names_by_filter(dbname,
+      return client.getHiveClient().getThriftClient().getClient().get_table_names_by_filter(dbname,
           tblname, maxParts);
     }
   }
@@ -955,7 +965,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void alter_table(String dbname, String tblName, Table newTable)
       throws InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().alter_table(dbname, tblName, newTable);
+      client.getHiveClient().getThriftClient().getClient().alter_table(dbname, tblName, newTable);
       renameNonTransactionalTableIfExists(dbname, tblName, newTable.getDbName(),
           newTable.getTableName(),"alter_table");
     }
@@ -967,7 +977,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       EnvironmentContext environmentContext)
       throws InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .alter_table_with_environment_context(dbname,
               tblName, table, environmentContext);
       renameNonTransactionalTableIfExists(dbname, tblName, table.getDbName(),
@@ -980,7 +990,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       boolean cascade)
       throws InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().alter_table_with_cascade(dbname, tblName,
+      client.getHiveClient().getThriftClient().getClient().alter_table_with_cascade(dbname, tblName,
           table, cascade);
       renameNonTransactionalTableIfExists(dbname, tblName, table.getDbName(),
           table.getTableName(),"alter_table_with_cascade");
@@ -992,7 +1002,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       AlterTableResponse response =
-              client.getHiveClient().getThriftClient().alter_table_req(alterTableRequest);
+              client.getHiveClient().getThriftClient().getClient().alter_table_req(alterTableRequest);
       renameNonTransactionalTableIfExists(alterTableRequest.getDbName(),
           alterTableRequest.getTableName(), alterTableRequest.getTable().getDbName(),
           alterTableRequest.getTable().getTableName(),"alter_table_req");
@@ -1005,7 +1015,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws InvalidObjectException, AlreadyExistsException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       Partition addedPartition =
-          client.getHiveClient().getThriftClient().add_partition(partition);
+          client.getHiveClient().getThriftClient().getClient().add_partition(partition);
       invalidateNonTransactionalTableIfExists(partition.getDbName(),
           partition.getTableName(), "add_partition");
       return addedPartition;
@@ -1017,7 +1027,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       EnvironmentContext environmentContext)
       throws InvalidObjectException, AlreadyExistsException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      Partition addedPartition = client.getHiveClient().getThriftClient()
+      Partition addedPartition = client.getHiveClient().getThriftClient().getClient()
               .add_partition_with_environment_context(partition, environmentContext);
       invalidateNonTransactionalTableIfExists(partition.getDbName(),
           partition.getTableName(),
@@ -1031,7 +1041,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws InvalidObjectException, AlreadyExistsException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       int numPartitionsAdded =
-          client.getHiveClient().getThriftClient().add_partitions(partitionList);
+          client.getHiveClient().getThriftClient().getClient().add_partitions(partitionList);
       if (numPartitionsAdded > 0) {
         Partition partition = partitionList.get(0);
         invalidateNonTransactionalTableIfExists(partition.getDbName(),
@@ -1046,7 +1056,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws InvalidObjectException, AlreadyExistsException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       int numPartitionsAdded =  client.getHiveClient()
-              .getThriftClient().add_partitions_pspec(list);
+              .getThriftClient().getClient().add_partitions_pspec(list);
       if (numPartitionsAdded > 0) {
         PartitionSpec partitionSpec = list.get(0);
         invalidateNonTransactionalTableIfExists(partitionSpec.getDbName(),
@@ -1060,7 +1070,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public Partition append_partition(String dbname, String tblName, List<String> partVals)
       throws InvalidObjectException, AlreadyExistsException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      Partition partition = client.getHiveClient().getThriftClient()
+      Partition partition = client.getHiveClient().getThriftClient().getClient()
               .append_partition(dbname, tblName, partVals);
       invalidateNonTransactionalTableIfExists(dbname, tblName,
           "append_partition");
@@ -1072,7 +1082,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public AddPartitionsResult add_partitions_req(AddPartitionsRequest addPartitionsRequest)
       throws InvalidObjectException, AlreadyExistsException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      AddPartitionsResult result =  client.getHiveClient().getThriftClient()
+      AddPartitionsResult result =  client.getHiveClient().getThriftClient().getClient()
               .add_partitions_req(addPartitionsRequest);
       invalidateNonTransactionalTableIfExists(addPartitionsRequest.getDbName(),
           addPartitionsRequest.getTblName(), "add_partitions_req");
@@ -1086,7 +1096,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       List<String> partVals, EnvironmentContext environmentContext)
       throws InvalidObjectException, AlreadyExistsException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      Partition partition =  client.getHiveClient().getThriftClient()
+      Partition partition =  client.getHiveClient().getThriftClient().getClient()
               .append_partition_with_environment_context(dbname, tblname,
                   partVals, environmentContext);
       invalidateNonTransactionalTableIfExists(dbname, tblname,
@@ -1100,7 +1110,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       String partName)
       throws InvalidObjectException, AlreadyExistsException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      Partition partition = client.getHiveClient().getThriftClient()
+      Partition partition = client.getHiveClient().getThriftClient().getClient()
               .append_partition_by_name(dbname, tblname, partName);
       invalidateNonTransactionalTableIfExists(dbname, tblname,
           "append_partition_by_name");
@@ -1113,7 +1123,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       String tblname, String partName, EnvironmentContext environmentContext)
       throws InvalidObjectException, AlreadyExistsException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      Partition partition =  client.getHiveClient().getThriftClient()
+      Partition partition =  client.getHiveClient().getThriftClient().getClient()
               .append_partition_by_name_with_environment_context(dbname, tblname,
                   partName, environmentContext);
       invalidateNonTransactionalTableIfExists(dbname, tblname,
@@ -1127,7 +1137,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       boolean deleteData)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      boolean partitionDropped = client.getHiveClient().getThriftClient()
+      boolean partitionDropped = client.getHiveClient().getThriftClient().getClient()
               .drop_partition(dbname, tblname, partVals, deleteData);
       invalidateNonTransactionalTableIfExists(dbname, tblname,
           "drop_partition");
@@ -1140,7 +1150,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       List<String> partNames, boolean deleteData, EnvironmentContext environmentContext)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      boolean partitionsDropped =  client.getHiveClient().getThriftClient()
+      boolean partitionsDropped =  client.getHiveClient().getThriftClient().getClient()
               .drop_partition_with_environment_context(dbname, tblname,
                   partNames, deleteData, environmentContext);
       invalidateNonTransactionalTableIfExists(dbname, tblname,
@@ -1155,7 +1165,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       boolean partitionsDropped =
-          client.getHiveClient().getThriftClient().drop_partition_by_name(dbname,
+          client.getHiveClient().getThriftClient().getClient().drop_partition_by_name(dbname,
               tblname, partName, deleteData);
       invalidateNonTransactionalTableIfExists(dbname, tblname,
           "drop_partition_by_name");
@@ -1169,7 +1179,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       String partName, boolean deleteData, EnvironmentContext envContext)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      boolean partitionsDropped = client.getHiveClient().getThriftClient()
+      boolean partitionsDropped = client.getHiveClient().getThriftClient().getClient()
               .drop_partition_by_name_with_environment_context(dbName, tableName,
                   partName, deleteData, envContext);
       invalidateNonTransactionalTableIfExists(dbName, tableName,
@@ -1184,7 +1194,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       DropPartitionsResult result =
-          client.getHiveClient().getThriftClient()
+          client.getHiveClient().getThriftClient().getClient()
               .drop_partitions_req(dropPartitionsRequest);
       invalidateNonTransactionalTableIfExists(dropPartitionsRequest.getDbName(),
           dropPartitionsRequest.getTblName(), "drop_partitions_req");
@@ -1196,7 +1206,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public Partition get_partition(String dbName, String tblName, List<String> values)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_partition(dbName, tblName,
+      return client.getHiveClient().getThriftClient().getClient().get_partition(dbName, tblName,
           values);
     }
   }
@@ -1207,7 +1217,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       String destDb, String destTbl)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      Partition partition = client.getHiveClient().getThriftClient()
+      Partition partition = client.getHiveClient().getThriftClient().getClient()
           .exchange_partition(partitionSpecMap, sourcedb, sourceTbl, destDb,
               destTbl);
       String apiName = "exchange_partition";
@@ -1224,7 +1234,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       List<Partition> partitions =
-          client.getHiveClient().getThriftClient()
+          client.getHiveClient().getThriftClient().getClient()
               .exchange_partitions(partitionSpecs, sourceDb,
                   sourceTable, destDb, destinationTableName);
       String apiName = "exchange_partitions";
@@ -1240,7 +1250,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       String user, List<String> groups)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_partition_with_auth(dbname,
+      return client.getHiveClient().getThriftClient().getClient().get_partition_with_auth(dbname,
           tblName, values, user,
           groups);
     }
@@ -1251,7 +1261,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       String partitionName)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_partition_by_name(dbName,
+      return client.getHiveClient().getThriftClient().getClient().get_partition_by_name(dbName,
           tblName, partitionName);
     }
   }
@@ -1260,7 +1270,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<Partition> get_partitions(String dbName, String tblName, short maxLimit)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_partitions(dbName, tblName, maxLimit);
     }
   }
@@ -1270,7 +1280,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       short maxParts, String username,
       List<String> groups) throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_partitions_with_auth(dbName,
+      return client.getHiveClient().getThriftClient().getClient().get_partitions_with_auth(dbName,
           tblName, maxParts, username,
           groups);
     }
@@ -1281,7 +1291,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       int maxParts)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_partitions_pspec(dbName, tblName, maxParts);
     }
   }
@@ -1290,7 +1300,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public GetPartitionsResponse get_partitions_with_specs(GetPartitionsRequest request)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_partitions_with_specs(request);
     }
   }
@@ -1299,7 +1309,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<String> get_partition_names(String dbName, String tblName, short maxParts)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_partition_names(dbName,
+      return client.getHiveClient().getThriftClient().getClient().get_partition_names(dbName,
           tblName, maxParts);
     }
   }
@@ -1309,7 +1319,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       PartitionValuesRequest partitionValuesRequest)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_partition_values(partitionValuesRequest);
     }
   }
@@ -1319,7 +1329,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       List<String> partValues,
       short maxParts) throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_partitions_ps(dbName, tblName, partValues, maxParts);
     }
   }
@@ -1329,7 +1339,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       List<String> partVals, short maxParts, String user, List<String> groups)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_partitions_ps_with_auth(dbName, tblName
               , partVals, maxParts, user, groups);
     }
@@ -1340,7 +1350,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       List<String> partitionNames,
       short maxParts) throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_partition_names_ps(dbName, tblName,
               partitionNames, maxParts);
     }
@@ -1351,7 +1361,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       String filter, short maxParts)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_partitions_by_filter(dbName, tblName,
               filter, maxParts);
     }
@@ -1362,7 +1372,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       String filter,
       int maxParts) throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_part_specs_by_filter(dbName, tblName, filter
               , maxParts);
     }
@@ -1372,7 +1382,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public GetFieldsResponse get_fields_req(GetFieldsRequest req)
       throws MetaException, UnknownTableException, UnknownDBException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      List<FieldSchema> fields = client.getHiveClient().getThriftClient()
+      List<FieldSchema> fields = client.getHiveClient().getThriftClient().getClient()
           .get_fields_with_environment_context(MetaStoreUtils
                   .prependCatalogToDbName(req.getCatName(), req.getDbName(), serverConf_),
               req.getTblName(), req.getEnvContext());
@@ -1387,7 +1397,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws MetaException, UnknownTableException, UnknownDBException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       // TODO Remove the usage of old API here once this API is ported to cdpd-master
-      List<FieldSchema> fields = client.getHiveClient().getThriftClient()
+      List<FieldSchema> fields = client.getHiveClient().getThriftClient().getClient()
           .get_schema_with_environment_context(MetaStoreUtils
                   .prependCatalogToDbName(req.getCatName(), req.getDbName(), serverConf_),
               req.getTblName(), req.getEnvContext());
@@ -1402,7 +1412,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       Partition p =
-          client.getHiveClient().getThriftClient().get_partition(
+          client.getHiveClient().getThriftClient().getClient().get_partition(
               MetaStoreUtils
                   .prependCatalogToDbName(req.getCatName(), req.getDbName(), serverConf_),
               req.getTblName(), req.getPartVals());
@@ -1417,7 +1427,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
       List<Partition> partitions =
-          client.getHiveClient().getThriftClient().get_partitions(MetaStoreUtils
+          client.getHiveClient().getThriftClient().getClient().get_partitions(MetaStoreUtils
                   .prependCatalogToDbName(req.getCatName(), req.getDbName(), serverConf_),
               req.getTblName(), req.getMaxParts());
       PartitionsResponse res = new PartitionsResponse();
@@ -1431,7 +1441,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       GetPartitionNamesPsRequest req)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      List<String> names = client.getHiveClient().getThriftClient()
+      List<String> names = client.getHiveClient().getThriftClient().getClient()
           .get_partition_names_ps(MetaStoreUtils
                   .prependCatalogToDbName(req.getCatName(), req.getDbName(), serverConf_),
               req.getTblName(), req.getPartValues(), req.getMaxParts());
@@ -1446,7 +1456,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
      GetPartitionsPsWithAuthRequest req)
      throws MetaException, NoSuchObjectException, TException {
    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-     return client.getHiveClient().getThriftClient().get_partitions_ps_with_auth_req(req);
+     return client.getHiveClient().getThriftClient().getClient().get_partitions_ps_with_auth_req(req);
    }
  }
 
@@ -1454,7 +1464,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public PartitionsByExprResult get_partitions_by_expr(
       PartitionsByExprRequest partitionsByExprRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_partitions_by_expr(partitionsByExprRequest);
     }
   }
@@ -1463,7 +1473,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public int get_num_partitions_by_filter(String dbName, String tblName, String filter)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_num_partitions_by_filter(dbName,
+      return client.getHiveClient().getThriftClient().getClient().get_num_partitions_by_filter(dbName,
           tblName, filter);
     }
   }
@@ -1473,7 +1483,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       List<String> partitionNames)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_partitions_by_names(dbName, tblName,
               partitionNames);
     }
@@ -1523,7 +1533,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
     ValidWriteIdList validWriteIdList = null;
     ValidTxnList validTxnList = null;
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      result = client.getHiveClient().getThriftClient()
+      result = client.getHiveClient().getThriftClient().getClient()
           .get_partitions_by_names_req(getPartitionsByNamesRequest);
       // if file-metadata is not request; return early
       if (!getFileMetadata) return result;
@@ -1535,7 +1545,8 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
           .parseDbName(getPartitionsByNamesRequest.getDb_name(), serverConf_);
       Table tbl = client.getHiveClient().getTable(parsedCatDbName[0], parsedCatDbName[1],
           getPartitionsByNamesRequest.getTbl_name(),
-          getPartitionsByNamesRequest.getValidWriteIdList());
+          getPartitionsByNamesRequest.getValidWriteIdList(),
+          false, null);
       boolean isTransactional = tbl.getParameters() != null && AcidUtils
           .isTransactionalTable(tbl.getParameters());
       if (isTransactional) {
@@ -1559,7 +1570,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void alter_partition(String dbName, String tblName, Partition partition)
       throws InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
               .alter_partition(dbName, tblName, partition);
       invalidateNonTransactionalTableIfExists(dbName, tblName,
           "alter_partition");
@@ -1570,7 +1581,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void alter_partitions(String dbName, String tblName, List<Partition> partitions)
       throws InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
               .alter_partitions(dbName, tblName, partitions);
       invalidateNonTransactionalTableIfExists(dbName, tblName,
           "alter_partitions");
@@ -1582,7 +1593,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       List<Partition> list, EnvironmentContext environmentContext)
       throws InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
               .alter_partitions_with_environment_context(dbName, tblName,
                   list, environmentContext);
       invalidateNonTransactionalTableIfExists(dbName, tblName,
@@ -1595,7 +1606,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       AlterPartitionsRequest alterPartitionsRequest)
       throws InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      AlterPartitionsResponse response =  client.getHiveClient().getThriftClient()
+      AlterPartitionsResponse response =  client.getHiveClient().getThriftClient().getClient()
               .alter_partitions_req(alterPartitionsRequest);
       invalidateNonTransactionalTableIfExists(alterPartitionsRequest.getDbName(),
               alterPartitionsRequest.getTableName(), "alter_partitions_req");
@@ -1608,7 +1619,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       Partition partition, EnvironmentContext environmentContext)
       throws InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .alter_partition_with_environment_context(dbName, tblName, partition,
               environmentContext);
       invalidateNonTransactionalTableIfExists(dbName, tblName,
@@ -1620,7 +1631,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void rename_partition(String dbName, String tblName, List<String> list,
       Partition partition) throws InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .rename_partition(dbName, tblName, list, partition);
       invalidateNonTransactionalTableIfExists(dbName, tblName,
           "rename_partition");
@@ -1632,7 +1643,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       RenamePartitionRequest renamePartitionRequest)
       throws InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      RenamePartitionResponse response = client.getHiveClient().getThriftClient()
+      RenamePartitionResponse response = client.getHiveClient().getThriftClient().getClient()
           .rename_partition_req(renamePartitionRequest);
       invalidateNonTransactionalTableIfExists(renamePartitionRequest.getDbName(),
           renamePartitionRequest.getTableName(), "rename_partition_req");
@@ -1644,7 +1655,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public boolean partition_name_has_valid_characters(List<String> list, boolean b)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .partition_name_has_valid_characters(list, b);
     }
   }
@@ -1653,7 +1664,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public String get_config_value(String key, String defaultVal)
       throws ConfigValSecurityException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_config_value(key, defaultVal);
+      return client.getHiveClient().getThriftClient().getClient().get_config_value(key, defaultVal);
     }
   }
 
@@ -1661,7 +1672,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<String> partition_name_to_vals(String name)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().partition_name_to_vals(name);
+      return client.getHiveClient().getThriftClient().getClient().partition_name_to_vals(name);
     }
   }
 
@@ -1669,7 +1680,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public Map<String, String> partition_name_to_spec(String name)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().partition_name_to_spec(name);
+      return client.getHiveClient().getThriftClient().getClient().partition_name_to_spec(name);
     }
   }
 
@@ -1677,7 +1688,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void markPartitionForEvent(String s, String s1, Map<String, String> map,
       PartitionEventType partitionEventType) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .markPartitionForEvent(s, s1, map, partitionEventType);
     }
   }
@@ -1686,7 +1697,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public boolean isPartitionMarkedForEvent(String s, String s1, Map<String, String> map,
       PartitionEventType partitionEventType) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().isPartitionMarkedForEvent(s, s1,
+      return client.getHiveClient().getThriftClient().getClient().isPartitionMarkedForEvent(s, s1,
           map, partitionEventType);
     }
   }
@@ -1695,7 +1706,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public PrimaryKeysResponse get_primary_keys(PrimaryKeysRequest primaryKeysRequest)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_primary_keys(primaryKeysRequest);
     }
   }
@@ -1704,7 +1715,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public ForeignKeysResponse get_foreign_keys(ForeignKeysRequest foreignKeysRequest)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_foreign_keys(foreignKeysRequest);
     }
   }
@@ -1714,7 +1725,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       UniqueConstraintsRequest uniqueConstraintsRequest)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_unique_constraints(uniqueConstraintsRequest);
     }
   }
@@ -1724,7 +1735,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       NotNullConstraintsRequest notNullConstraintsRequest)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_not_null_constraints(notNullConstraintsRequest);
     }
   }
@@ -1734,7 +1745,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       DefaultConstraintsRequest defaultConstraintsRequest)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_default_constraints(defaultConstraintsRequest);
     }
   }
@@ -1744,7 +1755,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       CheckConstraintsRequest checkConstraintsRequest)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_check_constraints(checkConstraintsRequest);
     }
   }
@@ -1754,7 +1765,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
           AllTableConstraintsRequest request) throws TException, MetaException,
           NoSuchObjectException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_all_table_constraints(request);
     }
   }
@@ -1764,7 +1775,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws NoSuchObjectException, InvalidObjectException, MetaException,
       InvalidInputException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .update_table_column_statistics(columnStatistics);
     }
   }
@@ -1774,7 +1785,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws NoSuchObjectException, InvalidObjectException, MetaException,
       InvalidInputException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .update_partition_column_statistics(columnStatistics);
     }
   }
@@ -1785,7 +1796,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws NoSuchObjectException, InvalidObjectException, MetaException,
       InvalidInputException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .update_table_column_statistics_req(setPartitionsStatsRequest);
     }
   }
@@ -1796,7 +1807,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws NoSuchObjectException, InvalidObjectException, MetaException,
       InvalidInputException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .update_partition_column_statistics_req(setPartitionsStatsRequest);
     }
   }
@@ -1806,7 +1817,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws NoSuchObjectException, MetaException, InvalidInputException,
       InvalidObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_table_column_statistics(s, s1
+      return client.getHiveClient().getThriftClient().getClient().get_table_column_statistics(s, s1
           , s2);
     }
   }
@@ -1817,7 +1828,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws NoSuchObjectException, MetaException, InvalidInputException,
       InvalidObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_partition_column_statistics(s
+      return client.getHiveClient().getThriftClient().getClient().get_partition_column_statistics(s
           , s1, s2, s3);
     }
   }
@@ -1826,7 +1837,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public TableStatsResult get_table_statistics_req(TableStatsRequest tableStatsRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_table_statistics_req(tableStatsRequest);
     }
   }
@@ -1836,7 +1847,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       PartitionsStatsRequest partitionsStatsRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_partitions_statistics_req(partitionsStatsRequest);
     }
   }
@@ -1845,7 +1856,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public AggrStats get_aggr_stats_for(PartitionsStatsRequest partitionsStatsRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_aggr_stats_for(partitionsStatsRequest);
     }
   }
@@ -1855,7 +1866,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws NoSuchObjectException, InvalidObjectException, MetaException,
       InvalidInputException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .set_aggr_stats_for(setPartitionsStatsRequest);
     }
   }
@@ -1867,7 +1878,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws NoSuchObjectException, MetaException, InvalidObjectException,
       InvalidInputException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .delete_partition_column_statistics(dbName, tblName
               , partName, colName, engine);
     }
@@ -1879,7 +1890,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws NoSuchObjectException, MetaException, InvalidObjectException,
       InvalidInputException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .delete_table_column_statistics(dbName,
               tblName, columnName, engien);
     }
@@ -1890,7 +1901,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws AlreadyExistsException, InvalidObjectException, MetaException,
       NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().create_function(function);
+      client.getHiveClient().getThriftClient().getClient().create_function(function);
     }
   }
 
@@ -1898,7 +1909,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void drop_function(String dbName, String funcName)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().drop_function(dbName, funcName);
+      client.getHiveClient().getThriftClient().getClient().drop_function(dbName, funcName);
     }
   }
 
@@ -1906,7 +1917,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void alter_function(String s, String s1, Function function)
       throws InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().alter_function(s, s1, function);
+      client.getHiveClient().getThriftClient().getClient().alter_function(s, s1, function);
     }
   }
 
@@ -1914,7 +1925,39 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<String> get_functions(String s, String s1)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_functions(s, s1);
+      return client.getHiveClient().getThriftClient().getClient().get_functions(s, s1);
+    }
+  }
+
+  @Override
+  public GetFunctionsResponse get_functions_req(GetFunctionsRequest req)
+      throws MetaException, TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      return client.getHiveClient().getThriftClient().getClient().get_functions_req(req);
+    }
+  }
+
+  @Override
+  public GetDatabaseObjectsResponse get_databases_req(GetDatabaseObjectsRequest req)
+      throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      return client.getHiveClient().getThriftClient().getClient().get_databases_req(req);
+    }
+  }
+
+  @Override
+  public void update_table_params(List<TableParamsUpdate> updates) throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      client.getHiveClient().getThriftClient().getClient().update_table_params(updates);
+    }
+  }
+
+  @Override
+  public boolean delete_column_statistics_req(DeleteColumnStatisticsRequest req)
+      throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      return client.getHiveClient().getThriftClient().getClient()
+          .delete_column_statistics_req(req);
     }
   }
 
@@ -1922,35 +1965,35 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public Function get_function(String s, String s1)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_function(s, s1);
+      return client.getHiveClient().getThriftClient().getClient().get_function(s, s1);
     }
   }
 
   @Override
   public GetAllFunctionsResponse get_all_functions() throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_all_functions();
+      return client.getHiveClient().getThriftClient().getClient().get_all_functions();
     }
   }
 
   @Override
   public boolean create_role(Role role) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().create_role(role);
+      return client.getHiveClient().getThriftClient().getClient().create_role(role);
     }
   }
 
   @Override
   public boolean drop_role(String s) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().drop_role(s);
+      return client.getHiveClient().getThriftClient().getClient().drop_role(s);
     }
   }
 
   @Override
   public List<String> get_role_names() throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_role_names();
+      return client.getHiveClient().getThriftClient().getClient().get_role_names();
     }
   }
 
@@ -1959,7 +2002,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       String grantor,
       PrincipalType grantorType, boolean grantOption) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .grant_role(roleName, userName, principalType,
               grantor, grantorType, grantOption);
     }
@@ -1969,7 +2012,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public boolean revoke_role(String s, String s1, PrincipalType principalType)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().revoke_role(s, s1, principalType);
+      return client.getHiveClient().getThriftClient().getClient().revoke_role(s, s1, principalType);
     }
   }
 
@@ -1977,7 +2020,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<Role> list_roles(String s, PrincipalType principalType)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().list_roles(s, principalType);
+      return client.getHiveClient().getThriftClient().getClient().list_roles(s, principalType);
     }
   }
 
@@ -1985,7 +2028,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public GrantRevokeRoleResponse grant_revoke_role(
       GrantRevokeRoleRequest grantRevokeRoleRequest) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .grant_revoke_role(grantRevokeRoleRequest);
     }
   }
@@ -1995,7 +2038,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       GetPrincipalsInRoleRequest getPrincipalsInRoleRequest)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_principals_in_role(getPrincipalsInRoleRequest);
     }
   }
@@ -2005,7 +2048,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       GetRoleGrantsForPrincipalRequest getRoleGrantsForPrincipalRequest)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_role_grants_for_principal(getRoleGrantsForPrincipalRequest);
     }
   }
@@ -2014,7 +2057,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public PrincipalPrivilegeSet get_privilege_set(HiveObjectRef hiveObjectRef, String s,
       List<String> list) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_privilege_set(hiveObjectRef,
+      return client.getHiveClient().getThriftClient().getClient().get_privilege_set(hiveObjectRef,
           s, list);
     }
   }
@@ -2023,7 +2066,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<HiveObjectPrivilege> list_privileges(String s, PrincipalType principalType,
       HiveObjectRef hiveObjectRef) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().list_privileges(s, principalType,
+      return client.getHiveClient().getThriftClient().getClient().list_privileges(s, principalType,
           hiveObjectRef);
     }
   }
@@ -2032,7 +2075,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public boolean grant_privileges(PrivilegeBag privilegeBag)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().grant_privileges(privilegeBag);
+      return client.getHiveClient().getThriftClient().getClient().grant_privileges(privilegeBag);
     }
   }
 
@@ -2040,7 +2083,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public boolean revoke_privileges(PrivilegeBag privilegeBag)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().revoke_privileges(privilegeBag);
+      return client.getHiveClient().getThriftClient().getClient().revoke_privileges(privilegeBag);
     }
   }
 
@@ -2049,7 +2092,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       GrantRevokePrivilegeRequest grantRevokePrivilegeRequest)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .grant_revoke_privileges(grantRevokePrivilegeRequest);
     }
   }
@@ -2059,7 +2102,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       String s, GrantRevokePrivilegeRequest grantRevokePrivilegeRequest)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().refresh_privileges(hiveObjectRef, s,
+      return client.getHiveClient().getThriftClient().getClient().refresh_privileges(hiveObjectRef, s,
           grantRevokePrivilegeRequest);
     }
   }
@@ -2068,7 +2111,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<String> set_ugi(String s, List<String> list)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().set_ugi(s, list);
+      return client.getHiveClient().getThriftClient().getClient().set_ugi(s, list);
     }
   }
 
@@ -2076,21 +2119,21 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public String get_delegation_token(String s, String s1)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_delegation_token(s, s1);
+      return client.getHiveClient().getThriftClient().getClient().get_delegation_token(s, s1);
     }
   }
 
   @Override
   public long renew_delegation_token(String s) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().renew_delegation_token(s);
+      return client.getHiveClient().getThriftClient().getClient().renew_delegation_token(s);
     }
   }
 
   @Override
   public void cancel_delegation_token(String s) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().cancel_delegation_token(s);
+      client.getHiveClient().getThriftClient().getClient().cancel_delegation_token(s);
     }
   }
 
@@ -2098,7 +2141,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public boolean add_token(String tokenIdentifier, String delegationToken)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .add_token(tokenIdentifier, delegationToken);
     }
   }
@@ -2106,28 +2149,28 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   @Override
   public boolean remove_token(String tokenIdentifier) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().remove_token(tokenIdentifier);
+      return client.getHiveClient().getThriftClient().getClient().remove_token(tokenIdentifier);
     }
   }
 
   @Override
   public String get_token(String s) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_token(s);
+      return client.getHiveClient().getThriftClient().getClient().get_token(s);
     }
   }
 
   @Override
   public List<String> get_all_token_identifiers() throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_all_token_identifiers();
+      return client.getHiveClient().getThriftClient().getClient().get_all_token_identifiers();
     }
   }
 
   @Override
   public int add_master_key(String s) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().add_master_key(s);
+      return client.getHiveClient().getThriftClient().getClient().add_master_key(s);
     }
   }
 
@@ -2135,28 +2178,28 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void update_master_key(int i, String s)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().update_master_key(i, s);
+      client.getHiveClient().getThriftClient().getClient().update_master_key(i, s);
     }
   }
 
   @Override
   public boolean remove_master_key(int i) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().remove_master_key(i);
+      return client.getHiveClient().getThriftClient().getClient().remove_master_key(i);
     }
   }
 
   @Override
   public List<String> get_master_keys() throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_master_keys();
+      return client.getHiveClient().getThriftClient().getClient().get_master_keys();
     }
   }
 
   @Override
   public GetOpenTxnsResponse get_open_txns() throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_open_txns();
+      return client.getHiveClient().getThriftClient().getClient().get_open_txns();
     }
   }
 
@@ -2164,7 +2207,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public GetOpenTxnsResponse get_open_txns_req(GetOpenTxnsRequest getOpenTxnsRequest)
      throws TException {
      try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-       return client.getHiveClient().getThriftClient()
+       return client.getHiveClient().getThriftClient().getClient()
                .get_open_txns_req(getOpenTxnsRequest);
     }
   }
@@ -2172,7 +2215,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void create_stored_procedure(StoredProcedure proc)
           throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().create_stored_procedure(proc);
+      client.getHiveClient().getThriftClient().getClient().create_stored_procedure(proc);
     }
   }
 
@@ -2180,7 +2223,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public StoredProcedure get_stored_procedure(StoredProcedureRequest request)
           throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_stored_procedure(request);
+      return client.getHiveClient().getThriftClient().getClient().get_stored_procedure(request);
     }
   }
 
@@ -2188,7 +2231,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void drop_stored_procedure(StoredProcedureRequest request)
           throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().drop_stored_procedure(request);
+      client.getHiveClient().getThriftClient().getClient().drop_stored_procedure(request);
     }
   }
 
@@ -2196,14 +2239,14 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public Package find_package(GetPackageRequest request)
           throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().find_package(request);
+      return client.getHiveClient().getThriftClient().getClient().find_package(request);
     }
   }
 
   @Override
   public void add_package(AddPackageRequest request) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().add_package(request);
+      client.getHiveClient().getThriftClient().getClient().add_package(request);
     }
   }
 
@@ -2211,28 +2254,28 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<String> get_all_packages(ListPackageRequest request)
           throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_all_packages(request);
+      return client.getHiveClient().getThriftClient().getClient().get_all_packages(request);
     }
   }
 
   @Override
   public void drop_package(DropPackageRequest request) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().drop_package(request);
+      client.getHiveClient().getThriftClient().getClient().drop_package(request);
     }
   }
 
   @Override
   public GetOpenTxnsInfoResponse get_open_txns_info() throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_open_txns_info();
+      return client.getHiveClient().getThriftClient().getClient().get_open_txns_info();
     }
   }
 
   @Override
   public OpenTxnsResponse open_txns(OpenTxnRequest openTxnRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().open_txns(openTxnRequest);
+      return client.getHiveClient().getThriftClient().getClient().open_txns(openTxnRequest);
     }
   }
 
@@ -2240,7 +2283,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void abort_txn(AbortTxnRequest abortTxnRequest)
       throws NoSuchTxnException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().abort_txn(abortTxnRequest);
+      client.getHiveClient().getThriftClient().getClient().abort_txn(abortTxnRequest);
     }
   }
 
@@ -2248,7 +2291,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void abort_txns(AbortTxnsRequest abortTxnsRequest)
       throws NoSuchTxnException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().abort_txns(abortTxnsRequest);
+      client.getHiveClient().getThriftClient().getClient().abort_txns(abortTxnsRequest);
     }
   }
 
@@ -2256,7 +2299,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void commit_txn(CommitTxnRequest commitTxnRequest)
       throws NoSuchTxnException, TxnAbortedException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().commit_txn(commitTxnRequest);
+      client.getHiveClient().getThriftClient().getClient().commit_txn(commitTxnRequest);
     }
   }
 
@@ -2264,7 +2307,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void repl_tbl_writeid_state(
       ReplTblWriteIdStateRequest replTblWriteIdStateRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .repl_tbl_writeid_state(replTblWriteIdStateRequest);
     }
   }
@@ -2274,7 +2317,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       GetValidWriteIdsRequest getValidWriteIdsRequest)
       throws NoSuchTxnException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_valid_write_ids(getValidWriteIdsRequest);
     }
   }
@@ -2284,7 +2327,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       AllocateTableWriteIdsRequest allocateTableWriteIdsRequest)
       throws NoSuchTxnException, TxnAbortedException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .allocate_table_write_ids(allocateTableWriteIdsRequest);
     }
   }
@@ -2293,7 +2336,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public LockResponse lock(LockRequest lockRequest)
       throws NoSuchTxnException, TxnAbortedException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().lock(lockRequest);
+      return client.getHiveClient().getThriftClient().getClient().lock(lockRequest);
     }
   }
 
@@ -2301,7 +2344,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public LockResponse check_lock(CheckLockRequest checkLockRequest)
       throws NoSuchTxnException, TxnAbortedException, NoSuchLockException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().check_lock(checkLockRequest);
+      return client.getHiveClient().getThriftClient().getClient().check_lock(checkLockRequest);
     }
   }
 
@@ -2309,7 +2352,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void unlock(UnlockRequest unlockRequest)
       throws NoSuchLockException, TxnOpenException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().unlock(unlockRequest);
+      client.getHiveClient().getThriftClient().getClient().unlock(unlockRequest);
     }
   }
 
@@ -2317,7 +2360,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public ShowLocksResponse show_locks(ShowLocksRequest showLocksRequest)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().show_locks(showLocksRequest);
+      return client.getHiveClient().getThriftClient().getClient().show_locks(showLocksRequest);
     }
   }
 
@@ -2325,7 +2368,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void heartbeat(HeartbeatRequest heartbeatRequest)
       throws NoSuchLockException, NoSuchTxnException, TxnAbortedException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().heartbeat(heartbeatRequest);
+      client.getHiveClient().getThriftClient().getClient().heartbeat(heartbeatRequest);
     }
   }
 
@@ -2333,7 +2376,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public HeartbeatTxnRangeResponse heartbeat_txn_range(
       HeartbeatTxnRangeRequest heartbeatTxnRangeRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .heartbeat_txn_range(heartbeatTxnRangeRequest);
     }
   }
@@ -2341,7 +2384,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   @Override
   public void compact(CompactionRequest compactionRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().compact(compactionRequest);
+      client.getHiveClient().getThriftClient().getClient().compact(compactionRequest);
     }
   }
 
@@ -2349,7 +2392,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public CompactionResponse compact2(CompactionRequest compactionRequest)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().compact2(compactionRequest);
+      return client.getHiveClient().getThriftClient().getClient().compact2(compactionRequest);
     }
   }
 
@@ -2357,7 +2400,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public ShowCompactResponse show_compact(ShowCompactRequest showCompactRequest)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().show_compact(showCompactRequest);
+      return client.getHiveClient().getThriftClient().getClient().show_compact(showCompactRequest);
     }
   }
 
@@ -2365,7 +2408,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public GetLatestCommittedCompactionInfoResponse get_latest_committed_compaction_info(
       GetLatestCommittedCompactionInfoRequest request) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_latest_committed_compaction_info(request);
     }
   }
@@ -2374,7 +2417,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void add_dynamic_partitions(AddDynamicPartitions addDynamicPartitions)
       throws NoSuchTxnException, TxnAbortedException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .add_dynamic_partitions(addDynamicPartitions);
     }
   }
@@ -2383,7 +2426,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public OptionalCompactionInfoStruct find_next_compact(String s)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().find_next_compact(s);
+      return client.getHiveClient().getThriftClient().getClient().find_next_compact(s);
     }
   }
 
@@ -2391,7 +2434,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public OptionalCompactionInfoStruct find_next_compact2(FindNextCompactRequest rqst)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().find_next_compact2(rqst);
+      return client.getHiveClient().getThriftClient().getClient().find_next_compact2(rqst);
     }
   }
 
@@ -2399,7 +2442,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public WriteNotificationLogBatchResponse add_write_notification_log_in_batch(
       WriteNotificationLogBatchRequest batchRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .add_write_notification_log_in_batch(batchRequest);
     }
   }
@@ -2408,7 +2451,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void update_compactor_state(CompactionInfoStruct compactionInfoStruct, long l)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .update_compactor_state(compactionInfoStruct, l);
     }
   }
@@ -2417,7 +2460,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<String> find_columns_with_stats(CompactionInfoStruct compactionInfoStruct)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .find_columns_with_stats(compactionInfoStruct);
     }
   }
@@ -2426,7 +2469,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void mark_cleaned(CompactionInfoStruct compactionInfoStruct)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().mark_cleaned(compactionInfoStruct);
+      client.getHiveClient().getThriftClient().getClient().mark_cleaned(compactionInfoStruct);
     }
   }
 
@@ -2442,7 +2485,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void mark_failed(CompactionInfoStruct compactionInfoStruct)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().mark_failed(compactionInfoStruct);
+      client.getHiveClient().getThriftClient().getClient().mark_failed(compactionInfoStruct);
     }
   }
 
@@ -2451,7 +2494,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       MaxAllocatedTableWriteIdRequest rqst)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_max_allocated_table_write_id(rqst);
     }
   }
@@ -2460,7 +2503,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void seed_write_id(SeedTableWriteIdsRequest rqst)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().seed_write_id(rqst);
+      client.getHiveClient().getThriftClient().getClient().seed_write_id(rqst);
     }
   }
 
@@ -2468,14 +2511,14 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void seed_txn_id(SeedTxnIdRequest rqst)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().seed_txn_id(rqst);
+      client.getHiveClient().getThriftClient().getClient().seed_txn_id(rqst);
     }
   }
 
   @Override
   public void set_hadoop_jobid(String s, long l) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().set_hadoop_jobid(s, l);
+      client.getHiveClient().getThriftClient().getClient().set_hadoop_jobid(s, l);
     }
   }
 
@@ -2483,7 +2526,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public NotificationEventResponse get_next_notification(
       NotificationEventRequest notificationEventRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_next_notification(notificationEventRequest);
     }
   }
@@ -2491,7 +2534,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   @Override
   public CurrentNotificationEventId get_current_notificationEventId() throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_current_notificationEventId();
+      return client.getHiveClient().getThriftClient().getClient().get_current_notificationEventId();
     }
   }
 
@@ -2499,7 +2542,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public NotificationEventsCountResponse get_notification_events_count(
       NotificationEventsCountRequest notificationEventsCountRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_notification_events_count(notificationEventsCountRequest);
     }
   }
@@ -2508,7 +2551,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public FireEventResponse fire_listener_event(FireEventRequest fireEventRequest)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .fire_listener_event(fireEventRequest);
     }
   }
@@ -2516,7 +2559,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   @Override
   public void flushCache() throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().flushCache();
+      client.getHiveClient().getThriftClient().getClient().flushCache();
     }
   }
 
@@ -2524,7 +2567,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public WriteNotificationLogResponse add_write_notification_log(
       WriteNotificationLogRequest writeNotificationLogRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .add_write_notification_log(writeNotificationLogRequest);
     }
   }
@@ -2533,7 +2576,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void update_transaction_statistics(UpdateTransactionalStatsRequest req)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().update_transaction_statistics(req);
+      client.getHiveClient().getThriftClient().getClient().update_transaction_statistics(req);
     }
   }
 
@@ -2541,7 +2584,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public CmRecycleResponse cm_recycle(CmRecycleRequest cmRecycleRequest)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().cm_recycle(cmRecycleRequest);
+      return client.getHiveClient().getThriftClient().getClient().cm_recycle(cmRecycleRequest);
     }
   }
 
@@ -2549,7 +2592,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public GetFileMetadataByExprResult get_file_metadata_by_expr(
       GetFileMetadataByExprRequest getFileMetadataByExprRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_file_metadata_by_expr(getFileMetadataByExprRequest);
     }
   }
@@ -2558,7 +2601,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public GetFileMetadataResult get_file_metadata(
       GetFileMetadataRequest getFileMetadataRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_file_metadata(getFileMetadataRequest);
     }
   }
@@ -2567,7 +2610,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public PutFileMetadataResult put_file_metadata(
       PutFileMetadataRequest putFileMetadataRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .put_file_metadata(putFileMetadataRequest);
     }
   }
@@ -2576,7 +2619,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public ClearFileMetadataResult clear_file_metadata(
       ClearFileMetadataRequest clearFileMetadataRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .clear_file_metadata(clearFileMetadataRequest);
     }
   }
@@ -2585,7 +2628,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public CacheFileMetadataResult cache_file_metadata(
       CacheFileMetadataRequest cacheFileMetadataRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .cache_file_metadata(cacheFileMetadataRequest);
     }
   }
@@ -2593,7 +2636,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   @Override
   public String get_metastore_db_uuid() throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_metastore_db_uuid();
+      return client.getHiveClient().getThriftClient().getClient().get_metastore_db_uuid();
     }
   }
 
@@ -2602,7 +2645,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       WMCreateResourcePlanRequest wmCreateResourcePlanRequest)
       throws AlreadyExistsException, InvalidObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .create_resource_plan(wmCreateResourcePlanRequest);
     }
   }
@@ -2612,7 +2655,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       WMGetResourcePlanRequest wmGetResourcePlanRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_resource_plan(wmGetResourcePlanRequest);
     }
   }
@@ -2622,7 +2665,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       WMGetActiveResourcePlanRequest wmGetActiveResourcePlanRequest)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_active_resource_plan(wmGetActiveResourcePlanRequest);
     }
   }
@@ -2632,7 +2675,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       WMGetAllResourcePlanRequest wmGetAllResourcePlanRequest)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_all_resource_plans(wmGetAllResourcePlanRequest);
     }
   }
@@ -2642,7 +2685,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       WMAlterResourcePlanRequest wmAlterResourcePlanRequest)
       throws NoSuchObjectException, InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .alter_resource_plan(wmAlterResourcePlanRequest);
     }
   }
@@ -2652,7 +2695,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       WMValidateResourcePlanRequest wmValidateResourcePlanRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .validate_resource_plan(wmValidateResourcePlanRequest);
     }
   }
@@ -2662,7 +2705,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       WMDropResourcePlanRequest wmDropResourcePlanRequest)
       throws NoSuchObjectException, InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .drop_resource_plan(wmDropResourcePlanRequest);
     }
   }
@@ -2673,7 +2716,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws AlreadyExistsException, NoSuchObjectException, InvalidObjectException,
       MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .create_wm_trigger(wmCreateTriggerRequest);
     }
   }
@@ -2683,7 +2726,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       WMAlterTriggerRequest wmAlterTriggerRequest)
       throws NoSuchObjectException, InvalidObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .alter_wm_trigger(wmAlterTriggerRequest);
     }
   }
@@ -2692,7 +2735,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public WMDropTriggerResponse drop_wm_trigger(WMDropTriggerRequest wmDropTriggerRequest)
       throws NoSuchObjectException, InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .drop_wm_trigger(wmDropTriggerRequest);
     }
   }
@@ -2702,7 +2745,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       WMGetTriggersForResourePlanRequest wmGetTriggersForResourePlanRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_triggers_for_resourceplan(wmGetTriggersForResourePlanRequest);
     }
   }
@@ -2712,7 +2755,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws AlreadyExistsException, NoSuchObjectException, InvalidObjectException,
       MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .create_wm_pool(wmCreatePoolRequest);
     }
   }
@@ -2722,7 +2765,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws AlreadyExistsException, NoSuchObjectException, InvalidObjectException,
       MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().alter_wm_pool(wmAlterPoolRequest);
+      return client.getHiveClient().getThriftClient().getClient().alter_wm_pool(wmAlterPoolRequest);
     }
   }
 
@@ -2730,7 +2773,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public WMDropPoolResponse drop_wm_pool(WMDropPoolRequest wmDropPoolRequest)
       throws NoSuchObjectException, InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().drop_wm_pool(wmDropPoolRequest);
+      return client.getHiveClient().getThriftClient().getClient().drop_wm_pool(wmDropPoolRequest);
     }
   }
 
@@ -2740,7 +2783,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws AlreadyExistsException, NoSuchObjectException, InvalidObjectException,
       MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .create_or_update_wm_mapping(wmCreateOrUpdateMappingRequest);
     }
   }
@@ -2749,7 +2792,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public WMDropMappingResponse drop_wm_mapping(WMDropMappingRequest wmDropMappingRequest)
       throws NoSuchObjectException, InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .drop_wm_mapping(wmDropMappingRequest);
     }
   }
@@ -2761,7 +2804,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws AlreadyExistsException, NoSuchObjectException, InvalidObjectException,
       MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .create_or_drop_wm_trigger_to_pool_mapping(
               wmCreateOrDropTriggerToPoolMappingRequest);
     }
@@ -2771,7 +2814,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void create_ischema(ISchema iSchema)
       throws AlreadyExistsException, NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().create_ischema(iSchema);
+      client.getHiveClient().getThriftClient().getClient().create_ischema(iSchema);
     }
   }
 
@@ -2779,7 +2822,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void alter_ischema(AlterISchemaRequest alterISchemaRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().alter_ischema(alterISchemaRequest);
+      client.getHiveClient().getThriftClient().getClient().alter_ischema(alterISchemaRequest);
     }
   }
 
@@ -2787,7 +2830,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public ISchema get_ischema(ISchemaName iSchemaName)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_ischema(iSchemaName);
+      return client.getHiveClient().getThriftClient().getClient().get_ischema(iSchemaName);
     }
   }
 
@@ -2795,7 +2838,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void drop_ischema(ISchemaName iSchemaName)
       throws NoSuchObjectException, InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().drop_ischema(iSchemaName);
+      client.getHiveClient().getThriftClient().getClient().drop_ischema(iSchemaName);
     }
   }
 
@@ -2803,7 +2846,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void add_schema_version(SchemaVersion schemaVersion)
       throws AlreadyExistsException, NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().add_schema_version(schemaVersion);
+      client.getHiveClient().getThriftClient().getClient().add_schema_version(schemaVersion);
     }
   }
 
@@ -2811,7 +2854,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public SchemaVersion get_schema_version(SchemaVersionDescriptor schemaVersionDescriptor)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_schema_version(schemaVersionDescriptor);
     }
   }
@@ -2820,7 +2863,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public SchemaVersion get_schema_latest_version(ISchemaName iSchemaName)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_schema_latest_version(iSchemaName);
     }
   }
@@ -2829,7 +2872,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<SchemaVersion> get_schema_all_versions(ISchemaName iSchemaName)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_schema_all_versions(iSchemaName);
     }
   }
@@ -2838,7 +2881,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void drop_schema_version(SchemaVersionDescriptor schemaVersionDescriptor)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .drop_schema_version(schemaVersionDescriptor);
     }
   }
@@ -2847,7 +2890,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public FindSchemasByColsResp get_schemas_by_cols(
       FindSchemasByColsRqst findSchemasByColsRqst) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_schemas_by_cols(findSchemasByColsRqst);
     }
   }
@@ -2857,7 +2900,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       MapSchemaVersionToSerdeRequest mapSchemaVersionToSerdeRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .map_schema_version_to_serde(mapSchemaVersionToSerdeRequest);
     }
   }
@@ -2867,7 +2910,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       SetSchemaVersionStateRequest setSchemaVersionStateRequest)
       throws NoSuchObjectException, InvalidOperationException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .set_schema_version_state(setSchemaVersionStateRequest);
     }
   }
@@ -2876,7 +2919,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void add_serde(SerDeInfo serDeInfo)
       throws AlreadyExistsException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().add_serde(serDeInfo);
+      client.getHiveClient().getThriftClient().getClient().add_serde(serDeInfo);
     }
   }
 
@@ -2884,7 +2927,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public SerDeInfo get_serde(GetSerdeRequest getSerdeRequest)
       throws NoSuchObjectException, MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_serde(getSerdeRequest);
+      return client.getHiveClient().getThriftClient().getClient().get_serde(getSerdeRequest);
     }
   }
 
@@ -2892,7 +2935,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public LockResponse get_lock_materialization_rebuild(String s, String s1, long l)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_lock_materialization_rebuild(s, s1, l);
     }
   }
@@ -2901,8 +2944,26 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public boolean heartbeat_lock_materialization_rebuild(String s, String s1, long l)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .heartbeat_lock_materialization_rebuild(s, s1, l);
+    }
+  }
+
+  @Override
+  public LockResponse get_lock_materialization_rebuild_req(
+      LockMaterializationRebuildRequest req) throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      return client.getHiveClient().getThriftClient().getClient()
+          .get_lock_materialization_rebuild_req(req);
+    }
+  }
+
+  @Override
+  public boolean heartbeat_lock_materialization_rebuild_req(
+      LockMaterializationRebuildRequest req) throws TException {
+    try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
+      return client.getHiveClient().getThriftClient().getClient()
+          .heartbeat_lock_materialization_rebuild_req(req);
     }
   }
 
@@ -2910,7 +2971,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void add_runtime_stats(RuntimeStat runtimeStat)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().add_runtime_stats(runtimeStat);
+      client.getHiveClient().getThriftClient().getClient().add_runtime_stats(runtimeStat);
     }
   }
 
@@ -2918,7 +2979,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<RuntimeStat> get_runtime_stats(
       GetRuntimeStatsRequest getRuntimeStatsRequest) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_runtime_stats(getRuntimeStatsRequest);
     }
   }
@@ -2928,7 +2989,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       ScheduledQueryPollRequest scheduledQueryPollRequest)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .scheduled_query_poll(scheduledQueryPollRequest);
     }
   }
@@ -2939,7 +3000,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       throws MetaException, NoSuchObjectException, AlreadyExistsException,
       InvalidInputException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .scheduled_query_maintenance(scheduledQueryMaintenanceRequest);
     }
   }
@@ -2949,7 +3010,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       ScheduledQueryProgressInfo scheduledQueryProgressInfo)
       throws MetaException, InvalidOperationException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .scheduled_query_progress(scheduledQueryProgressInfo);
     }
   }
@@ -2958,7 +3019,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public ScheduledQuery get_scheduled_query(ScheduledQueryKey scheduledQueryKey)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_scheduled_query(scheduledQueryKey);
     }
   }
@@ -2967,7 +3028,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void add_replication_metrics(ReplicationMetricList replicationMetricList)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient()
+      client.getHiveClient().getThriftClient().getClient()
           .add_replication_metrics(replicationMetricList);
     }
   }
@@ -2977,7 +3038,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       GetReplicationMetricsRequest getReplicationMetricsRequest)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_replication_metrics(getReplicationMetricsRequest);
     }
   }
@@ -2985,7 +3046,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   @Override
   public long get_latest_txnid_in_conflict(long txnId) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_latest_txnid_in_conflict(txnId);
+      return client.getHiveClient().getThriftClient().getClient().get_latest_txnid_in_conflict(txnId);
     }
   }
 
@@ -3072,7 +3133,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<WriteEventInfo> get_all_write_event_info(
       GetAllWriteEventInfoRequest request) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_all_write_event_info(request);
+      return client.getHiveClient().getThriftClient().getClient().get_all_write_event_info(request);
     }
   }
 
@@ -3080,7 +3141,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void remove_compaction_metrics_data(
       CompactionMetricsDataRequest request) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().remove_compaction_metrics_data(request);
+      client.getHiveClient().getThriftClient().getClient().remove_compaction_metrics_data(request);
     }
   }
 
@@ -3088,7 +3149,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public boolean update_compaction_metrics_data(
       CompactionMetricsDataStruct request) throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().update_compaction_metrics_data(request);
+      return client.getHiveClient().getThriftClient().getClient().update_compaction_metrics_data(request);
     }
   }
 
@@ -3096,14 +3157,14 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public AbortCompactResponse abort_Compactions(AbortCompactionRequest request)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().abort_Compactions(request);
+      return client.getHiveClient().getThriftClient().getClient().abort_Compactions(request);
     }
   }
   @Override
   public void add_write_ids_to_min_history(long l, Map<String, Long> map)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-       client.getHiveClient().getThriftClient().add_write_ids_to_min_history(l, map);
+       client.getHiveClient().getThriftClient().getClient().add_write_ids_to_min_history(l, map);
     }
   }
 
@@ -3111,7 +3172,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public boolean submit_for_cleanup(CompactionRequest compactionRequest, long l, long l1)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().submit_for_cleanup(compactionRequest, l, l1);
+      return client.getHiveClient().getThriftClient().getClient().submit_for_cleanup(compactionRequest, l, l1);
     }
   }
 
@@ -3119,7 +3180,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public void mark_refused(CompactionInfoStruct compactionInfoStruct)
       throws MetaException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().mark_refused(compactionInfoStruct);
+      client.getHiveClient().getThriftClient().getClient().mark_refused(compactionInfoStruct);
     }
   }
 
@@ -3127,7 +3188,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public PropertyGetResponse get_properties(PropertyGetRequest propertyGetRequest)
       throws MetaException, NoSuchObjectException, TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_properties(propertyGetRequest);
+      return client.getHiveClient().getThriftClient().getClient().get_properties(propertyGetRequest);
     }
   }
 
@@ -3141,15 +3202,15 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<String> fetch_partition_names_req(PartitionsRequest req)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().fetch_partition_names_req(req);
+      return client.getHiveClient().getThriftClient().getClient().fetch_partition_names_req(req);
     }
   }
 
   @Override
-  public void drop_table_req(DropTableRequest dropTableRequest)
+  public AsyncOperationResp drop_table_req(DropTableRequest dropTableRequest)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().drop_table_req(dropTableRequest);
+      return client.getHiveClient().getThriftClient().getClient().drop_table_req(dropTableRequest);
     }
   }
 
@@ -3157,7 +3218,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public boolean drop_partition_req(DropPartitionRequest dropPartitionReq)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().drop_partition_req(dropPartitionReq);
+      return client.getHiveClient().getThriftClient().getClient().drop_partition_req(dropPartitionReq);
     }
   }
 
@@ -3165,28 +3226,28 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public Partition append_partition_req(AppendPartitionsRequest appendPartitionReq)
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().append_partition_req(appendPartitionReq);
+      return client.getHiveClient().getThriftClient().getClient().append_partition_req(appendPartitionReq);
     }
   }
 
   @Override
   public void create_dataconnector_req(CreateDataConnectorRequest connectorReq) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().create_dataconnector_req(connectorReq);
+      client.getHiveClient().getThriftClient().getClient().create_dataconnector_req(connectorReq);
     }
   }
 
   @Override
   public DataConnector get_dataconnector_req(GetDataConnectorRequest request) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_dataconnector_req(request);
+      return client.getHiveClient().getThriftClient().getClient().get_dataconnector_req(request);
     }
   }
 
   @Override
   public void drop_dataconnector_req(DropDataConnectorRequest dropDcReq) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().drop_dataconnector_req(dropDcReq);
+      client.getHiveClient().getThriftClient().getClient().drop_dataconnector_req(dropDcReq);
     }
   }
 
@@ -3194,28 +3255,28 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
   public List<String> get_dataconnectors()
       throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      return client.getHiveClient().getThriftClient().get_dataconnectors();
+      return client.getHiveClient().getThriftClient().getClient().get_dataconnectors();
     }
   }
 
   @Override
   public void alter_dataconnector_req(AlterDataConnectorRequest alterReq) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().alter_dataconnector_req(alterReq);
+      client.getHiveClient().getThriftClient().getClient().alter_dataconnector_req(alterReq);
     }
   }
 
   @Override
   public void alter_database_req(AlterDatabaseRequest alterDbReq) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().alter_database_req(alterDbReq);
+      client.getHiveClient().getThriftClient().getClient().alter_database_req(alterDbReq);
     }
   }
 
   @Override
   public void create_database_req(CreateDatabaseRequest createDatabaseRequest) throws TException {
     try (MetaStoreClient client = catalog_.getMetaStoreClient()) {
-      client.getHiveClient().getThriftClient().create_database_req(createDatabaseRequest);
+      client.getHiveClient().getThriftClient().getClient().create_database_req(createDatabaseRequest);
     }
   }
 
@@ -3263,17 +3324,7 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       return;
     }
 
-    String dbName = dbNameWithCatalog;
-    try {
-      // Parse db name. Throw error if parsing fails.
-      dbName = MetaStoreUtils.parseDbName(dbNameWithCatalog, serverConf_)[1];
-    } catch (MetaException ex) {
-      LOG.error("Successfully executed HMS api: {} but encountered error " +
-              "when trying to invalidate table {}.{} from cache with " +
-              "error message: {}", apiName, dbNameWithCatalog, tableName,
-          ex.getMessage());
-      throw ex;
-    }
+    String dbName = MetaStoreUtils.parseDbName(dbNameWithCatalog, serverConf_)[1];
     org.apache.impala.catalog.Table catalogTbl= null;
     try {
       catalogTbl = catalog_.getTable(dbName, tableName);
@@ -3374,19 +3425,8 @@ public abstract class MetastoreServiceHandler extends AbstractThriftHiveMetastor
       return;
     }
 
-    String toParse = null, oldDbName, newDbName;
-    // Parse old and new db names. Throw error if parsing fails
-    try {
-      toParse = oldDbNameWithCatalog;
-      oldDbName = MetaStoreUtils.parseDbName(toParse, serverConf_)[1];
-      toParse = newDbNameWithCatalog;
-      newDbName = MetaStoreUtils.parseDbName(toParse, serverConf_)[1];
-    } catch (MetaException ex) {
-      LOG.error("Successfully executed metastore api: {} but encountered " +
-              "error when parsing dbName {}" + "with error message: {}",
-          apiName, toParse, ex.getMessage());
-      throw ex;
-    }
+    String oldDbName = MetaStoreUtils.parseDbName(oldDbNameWithCatalog, serverConf_)[1];
+    String newDbName = MetaStoreUtils.parseDbName(newDbNameWithCatalog, serverConf_)[1];
     TTableName oldTable = new TTableName(oldDbName, oldTableName);
     TTableName newTable = new TTableName(newDbName, newTableName);
     String tableInfo = "old table " + oldDbName + "." + oldTableName +

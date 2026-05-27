@@ -253,9 +253,9 @@ export APACHE_KNOX_VERSION=2.0.0
 export APACHE_PARQUET_VERSION=1.17.0
 export APACHE_RANGER_VERSION=2.6.0.4-2.2.0-1
 export APACHE_TEZ_VERSION=0.10.5.1-4.3.0-0
-export APACHE_HIVE_VERSION=4.3.0.1-4.3.0-2
-export APACHE_HIVE_STORAGE_API_VERSION=4.3.0.1-4.3.0-2
-export APACHE_OZONE_VERSION=1.4.1
+export APACHE_HIVE_VERSION=4.3.0.1-4.3.0-3
+export APACHE_HIVE_STORAGE_API_VERSION=4.3.0.1-4.3.0-3
+export APACHE_OZONE_VERSION=2.1.0.1-4.3.0-0
 
 # Java dependencies that are not also runtime components. Declaring versions here allows
 # other branches to override them in impala-config-branch.sh for cleaner patches.
@@ -1098,7 +1098,7 @@ fi
 # overall build type) and does not apply when using a local Kudu build.
 export USE_KUDU_DEBUG_BUILD=${USE_KUDU_DEBUG_BUILD-false}
 
-export IMPALA_KUDU_VERSION=${IMPALA_KUDU_VERSION-"e742f86f6d"}
+export IMPALA_KUDU_VERSION=${IMPALA_KUDU_VERSION-"1.17.0"}
 export IMPALA_KUDU_HOME=${IMPALA_TOOLCHAIN_PACKAGES_HOME}/kudu-$IMPALA_KUDU_VERSION
 export IMPALA_KUDU_JAVA_HOME=\
 ${IMPALA_TOOLCHAIN_PACKAGES_HOME}/kudu-${IMPALA_KUDU_VERSION}/java

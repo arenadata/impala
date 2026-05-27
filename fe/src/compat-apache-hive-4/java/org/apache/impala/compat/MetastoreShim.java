@@ -603,7 +603,7 @@ public class MetastoreShim extends Hive3MetastoreShimBase {
     if (eventTypeSkipList != null) {
       eventRequest.setEventTypeSkipList(eventTypeSkipList);
     }
-    return msClient.getThriftClient().get_next_notification(eventRequest);
+    return msClient.getThriftClient().getClient().get_next_notification(eventRequest);
   }
 
   /**
