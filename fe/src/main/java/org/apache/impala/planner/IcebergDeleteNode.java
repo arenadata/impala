@@ -29,7 +29,7 @@ import org.apache.impala.analysis.JoinOperator;
 import org.apache.impala.catalog.Type;
 import org.apache.impala.common.ImpalaException;
 import org.apache.impala.common.Pair;
-import org.apache.impala.thrift.TEqJoinCondition;
+import org.apache.impala.common.ThriftSerializationCtx;
 import org.apache.impala.thrift.TExplainLevel;
 import org.apache.impala.thrift.TIcebergDeleteNode;
 import org.apache.impala.thrift.TPlanNode;
@@ -120,26 +120,12 @@ public class IcebergDeleteNode extends JoinNode {
   }
 
   @Override
-  protected void toThrift(TPlanNode msg) {
+  protected void toThrift(TPlanNode msg, ThriftSerializationCtx serialCtx) {
     msg.node_type = TPlanNodeType.ICEBERG_DELETE_NODE;
-    msg.join_node = joinNodeToThrift();
+    msg.join_node = joinNodeToThrift(serialCtx);
     msg.join_node.iceberg_delete_node = new TIcebergDeleteNode();
-    msg.join_node.iceberg_delete_node.setEq_join_conjuncts(getThriftEquiJoinConjuncts());
-  }
-
-  /**
-   * Helper to get the equi-join conjuncts in a thrift representation.
-   */
-  public List<TEqJoinCondition> getThriftEquiJoinConjuncts() {
-    List<TEqJoinCondition> equiJoinConjuncts = new ArrayList<>(eqJoinConjuncts_.size());
-    for (BinaryPredicate bp : eqJoinConjuncts_) {
-      TEqJoinCondition eqJoinCondition = new TEqJoinCondition(
-          bp.getChild(0).treeToThrift(), bp.getChild(1).treeToThrift(),
-          bp.getOp() == BinaryPredicate.Operator.NOT_DISTINCT);
-
-      equiJoinConjuncts.add(eqJoinCondition);
-    }
-    return equiJoinConjuncts;
+    msg.join_node.iceberg_delete_node.setEq_join_conjuncts(
+        getThriftEquiJoinConjuncts(serialCtx));
   }
 
   @Override
@@ -192,7 +178,11 @@ public class IcebergDeleteNode extends JoinNode {
     // which have delete files and roaring bitmaps that store the positions. Roaring
     // bitmaps store bitmaps in a compressed format, so 2 bytes per position is a
     // conservative estimate (actual mem usage is expected to be lower).
-    int numberOfDataFilesWithDelete = ((IcebergScanNode) getChild(0))
+    PlanNode lhsNode = getChild(0);
+    // Tuple caching can place a TupleCacheNode above the scan, so look past a
+    // TupleCacheNode if it is present
+    if (lhsNode instanceof TupleCacheNode) lhsNode = lhsNode.getChild(0);
+    int numberOfDataFilesWithDelete = ((IcebergScanNode) lhsNode)
         .getFileDescriptorsWithLimit(null, false, -1).size();
     double avgFilePathLen = getChild(1).getAvgRowSize();
     long filePathsSize = (long) Math.ceil(numberOfDataFilesWithDelete * avgFilePathLen);

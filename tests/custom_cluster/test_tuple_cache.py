@@ -18,12 +18,13 @@
 from __future__ import absolute_import, division, print_function
 
 import os
-import pytest
 import random
 import re
 import string
+import time
 
 from tests.common.custom_cluster_test_suite import CustomClusterTestSuite
+from tests.common.skip import SkipIfDockerizedCluster, SkipIf
 from tests.common.test_dimensions import (
     add_exec_option_dimension, add_mandatory_exec_option)
 from tests.util.parse_util import (
@@ -61,6 +62,7 @@ def getCounterValues(profile, key):
 def assertCounterOrder(profile, key, vals):
   values = getCounterValues(profile, key)
   assert values == vals, values
+
 
 def assertCounter(profile, key, val, num_matches):
   if not isinstance(num_matches, list):
@@ -528,7 +530,7 @@ class TestTupleCacheCluster(TestTupleCacheBase):
     # Prime the cache
     base_result = self.execute_query(query)
     base_cache_keys = get_cache_keys(base_result.runtime_profile)
-    assert len(base_cache_keys) == 2
+    assert len(base_cache_keys) == 3
 
     # Drop and reload the table
     self.execute_query("DROP TABLE {0}".format(fq_table))
@@ -542,6 +544,108 @@ class TestTupleCacheCluster(TestTupleCacheBase):
     assert base_result.data == reload_result.data
     assert base_cache_keys == reload_cache_keys
     # Skips verifying cache hits as fragments may not be assigned to the same nodes.
+
+  def test_join_modifications(self, vector, unique_database):
+    """
+    This tests caching above a join without runtime filters and verifies that changes
+    to the build side table results in a different cache key.
+    """
+    fq_table = "{0}.join_modifications".format(unique_database)
+    query = "select straight_join probe.id from functional.alltypes probe join " \
+      "/* +broadcast */ {0} build on (probe.id = build.age) ".format(fq_table) + \
+      "order by probe.id"
+    # Create an empty table
+    self.create_table(fq_table, scale=0)
+    probe_id = 6
+    build_id = 7
+    above_join_id = 8
+
+    # Run without runtime filters to verify the regular path works
+    no_runtime_filters = dict(vector.get_value('exec_option'))
+    no_runtime_filters['runtime_filter_mode'] = 'off'
+
+    # Establish a baseline
+    empty_result = self.execute_query(query, no_runtime_filters)
+    empty_cache_keys = get_cache_keys(empty_result.runtime_profile)
+    # The build side is on one node. The probe side is on three nodes.
+    assert len(empty_cache_keys) == 3
+    assert len(empty_cache_keys[probe_id]) == 3
+    assert len(empty_cache_keys[build_id]) == 1
+    assert len(empty_cache_keys[above_join_id]) == 3
+    empty_build_key = empty_cache_keys[build_id][0]
+    empty_build_compile_key, empty_build_finst_key = empty_build_key.split("_")
+    assert empty_build_finst_key == "0"
+    assert len(empty_result.data) == 0
+    empty_join_compile_key = empty_cache_keys[above_join_id][0].split("_")[0]
+
+    # Insert a row, which creates a file / scan range
+    self.execute_query("INSERT INTO {0} VALUES ({1})".format(fq_table, table_value(0)))
+
+    # There is a build-side scan range, so the fragment instance key should be non-zero.
+    one_file_result = self.execute_query(query, no_runtime_filters)
+    assert len(one_file_result.data) == 1
+    one_cache_keys = get_cache_keys(one_file_result.runtime_profile)
+    assert len(one_cache_keys) == 3
+    assert len(one_cache_keys[probe_id]) == 3
+    assert len(one_cache_keys[build_id]) == 1
+    assert len(one_cache_keys[above_join_id]) == 3
+    one_build_key = one_cache_keys[build_id][0]
+    one_build_compile_key, one_build_finst_key = one_build_key.split("_")
+    assert one_build_finst_key != "0"
+    assert one_build_compile_key == empty_build_compile_key
+    # This should be a cache miss for the build side and above the join, but a cache
+    # hit for the probe side (3 instances).
+    assertCounter(one_file_result.runtime_profile, NUM_HITS, 1, 3)
+    assertCounter(one_file_result.runtime_profile, NUM_HALTED, 0, 7)
+    assertCounter(one_file_result.runtime_profile, NUM_SKIPPED, 0, 7)
+    # The above join compile time key should have changed, because it incorporates the
+    # build side scan ranges.
+    one_join_compile_key = one_cache_keys[above_join_id][0].split("_")[0]
+    assert one_join_compile_key != empty_join_compile_key
+
+  def test_join_timing(self, vector):
+    """
+    This verifies that a very short query with a cache hit above a join can complete
+    below a certain threshold. This should be sensitive to issues with synchronization
+    with the shared join builder.
+    """
+    query = "select straight_join probe.id from functional.alltypes probe join " \
+      "/* +broadcast */ functional.alltypes build on (probe.id = build.id) " \
+      "order by probe.id"
+
+    # To avoid interaction with cache entries from previous tests, set an unrelated
+    # query option to keep the key different.
+    custom_options = dict(vector.get_value('exec_option'))
+    custom_options['batch_size'] = '1234'
+
+    first_run_result = self.execute_query(query, custom_options)
+    assert len(first_run_result.data) == 7300
+    assertCounter(first_run_result.runtime_profile, NUM_HITS, 0, 9)
+    assertCounter(first_run_result.runtime_profile, NUM_HALTED, 0, 9)
+    assertCounter(first_run_result.runtime_profile, NUM_SKIPPED, 0, 9)
+    start_time = time.time()
+    second_run_result = self.execute_query(query, custom_options)
+    end_time = time.time()
+    # The location above the join hits and the location on the build side hits,
+    # but the probe location is below the join and doesn't hit.
+    assertCounter(second_run_result.runtime_profile, NUM_HITS, 1, 6)
+    assertCounter(second_run_result.runtime_profile, NUM_HALTED, 0, 9)
+    assertCounter(second_run_result.runtime_profile, NUM_SKIPPED, 0, 9)
+    # As a sanity check for the synchronization pieces, verify that this runs in less
+    # than 750 milliseconds.
+    assert end_time - start_time < 0.75
+
+  def test_iceberg_v2_deletes(self, vector, unique_database):
+    """
+    This is a regression test for IMPALA-14951 where an Iceberg delete with a
+    IcebergDeleteNode hangs with tuple caching. This scenario consistently hangs without
+    the necessary logic.
+    """
+    # The scenario requires mt_dop > 1, because it depends on cache hits across different
+    # fragment instances inside the same delete statement.
+    vector.set_exec_option('mt_dop', '8')
+    self.run_test_case('QueryTest/tuple-cache-iceberg-v2-deletes', vector,
+        use_db=unique_database)
 
 
 @CustomClusterTestSuite.with_args(start_args=CACHE_START_ARGS, cluster_size=1)
@@ -765,6 +869,25 @@ class TestTupleCacheFullCluster(TestTupleCacheBase):
     assert len(before_result_set) + 1 == len(after_insert_result_set)
     different_rows = before_result_set.symmetric_difference(after_insert_result_set)
     assert len(different_rows) == 1
+
+  @SkipIfDockerizedCluster.internal_hostname
+  @SkipIf.hardcoded_uris
+  def test_iceberg_deletes(self, vector):  # noqa: U100
+    """
+    Test basic Iceberg v2 deletes, which relies on the directed mode and looking
+    past TupleCacheNodes to find the scan nodes.
+    """
+
+    # This query tests both equality deletes and positional deletes.
+    query = "select * from functional_parquet.iceberg_v2_delete_both_eq_and_pos " + \
+        "order by i"
+    result1 = self.execute_query(query)
+    result2 = self.execute_query(query)
+    assert result1.success and result2.success
+
+    assert result1.data == result2.data
+    assert result1.data[0].split("\t") == ["2", "str2_updated", "2023-12-13"]
+    assert result1.data[1].split("\t") == ["3", "str3", "2023-12-23"]
 
 
 @CustomClusterTestSuite.with_args(start_args=CACHE_START_ARGS, cluster_size=1)

@@ -161,6 +161,7 @@ Status PartitionedHashJoinNode::Prepare(RuntimeState* state) {
 
   num_probe_rows_partitioned_ =
       ADD_COUNTER(runtime_profile(), "ProbeRowsPartitioned", TUnit::UNIT);
+  prepare_succeeded_ = true;
   return Status::OK();
 }
 
@@ -298,20 +299,19 @@ void PartitionedHashJoinNode::Close(RuntimeState* state) {
   if (build_batch_ != nullptr) build_batch_->Reset();
   if (probe_batch_ != nullptr) probe_batch_->Reset();
   CloseAndDeletePartitions(nullptr);
-  if (builder_ != nullptr) {
-    bool separate_build = UseSeparateBuild(state->query_options());
-    if (!separate_build || waited_for_build_) {
-      if (separate_build
-          && buffer_pool_client()->GetReservation() > resource_profile_.min_reservation) {
-        // Transfer back surplus reservation, which we may have borrowed from 'builder_'.
-        builder_->ReturnReservation(buffer_pool_client(),
-            buffer_pool_client()->GetReservation() - resource_profile_.min_reservation);
-      }
-      builder_->CloseFromProbe(state);
-      waited_for_build_ = false;
-    }
-
-    if (builder_->num_probe_threads() > 1) builder_->UnregisterThreadFromBarrier();
+  if (UseSeparateBuild(state->query_options()) && waited_for_build_
+      && buffer_pool_client()->GetReservation() > resource_profile_.min_reservation) {
+    DCHECK_NE(builder_, nullptr);
+    // Transfer back surplus reservation, which we may have borrowed from 'builder_'.
+    // Do this before unregistering from the builder to avoid race conditions.
+    builder_->ReturnReservation(buffer_pool_client(),
+        buffer_pool_client()->GetReservation() - resource_profile_.min_reservation);
+  }
+  UnregisterFromBuilder(state, &builder_);
+  // There is additional logic to unregister from the builder that is specific to
+  // partitioned hash joins.
+  if (builder_ != nullptr && builder_->num_probe_threads() > 1) {
+    builder_->UnregisterThreadFromBarrier();
   }
   ScalarExprEvaluator::Close(other_join_conjunct_evals_, state);
   if (probe_expr_results_pool_ != nullptr) probe_expr_results_pool_->FreeAll();

@@ -24,6 +24,7 @@
 
 #include "exec/exec-node.h"
 #include "exec/join-op.h"
+#include "runtime/runtime-state.h"
 #include "util/promise.h"
 #include "util/stopwatch.h"
 
@@ -115,6 +116,10 @@ class BlockingJoinNode : public ExecNode {
   /// separate join builder. This means that CloseFromProbe() needs to be called
   /// on the builder.
   bool waited_for_build_ = false;
+
+  /// True if Prepare() exited successfully. This is used to avoid deadlocks where
+  /// a thread calls WaitForPrepare() without having successfully finished Prepare().
+  bool prepare_succeeded_ = false;
 
   /// Store in node to avoid reallocating. Cleared after build completes.
   boost::scoped_ptr<RowBatch> build_batch_;
@@ -246,6 +251,49 @@ class BlockingJoinNode : public ExecNode {
   /// input from the second child node.
   bool UseSeparateBuild(const TQueryOptions& query_options) const {
     return plan_node().UseSeparateBuild(query_options);
+  }
+
+  /// Find the build sink for the separate builder fragment. This is only valid when
+  /// there is a separate builder fragment. Currently, this cannot be used during the
+  /// Prepare() phase, because it uses QueryState::WaitForPrepare(), which waits for
+  /// Prepare() to finish for all fragment instances.
+  Status LookupSeparateJoinBuilder(RuntimeState* state, JoinBuilder** separate_builder);
+
+  /// Shared logic to properly unregister from the builder during Close(). This should
+  /// be called from the Close() function for all subclasses. Calling this function is
+  /// crucial for avoiding delays / hangs, particularly for cases where the probe side
+  /// can terminate early, like the tuple cache.
+  ///
+  /// This looks up the builder if needed (e.g. if this is called before starting probe),
+  /// then it unregisters itself from the builder. If this looked up the builder, it
+  /// returns it via the builder argument. This is useful for subclasses that need to
+  /// perform additional steps to unregister with the builder.
+  template<typename T>
+  void UnregisterFromBuilder(RuntimeState* state, T** builder) {
+    DCHECK(state != nullptr);
+    DCHECK(builder != nullptr);
+    bool separate_build = UseSeparateBuild(state->query_options());
+    if (prepare_succeeded_ && *builder == nullptr && separate_build) {
+      DCHECK(!waited_for_build_);
+      // Find the separate join builder. This can return an error status if the Prepare()
+      // phase failed. In that case, there is no need to notify the builder and it can
+      // be skipped.
+      JoinBuilder* separate_builder;
+      Status status = LookupSeparateJoinBuilder(state, &separate_builder);
+      if (status.ok()) {
+        *builder = dynamic_cast<T*>(separate_builder);
+        DCHECK(*builder != nullptr);
+      }
+    }
+    if (*builder != nullptr) {
+      if (separate_build && !waited_for_build_) {
+        // There is a separate build and we never reached the probe phase
+        (*builder)->CloseBeforeProbe(state);
+      } else {
+        (*builder)->CloseFromProbe(state);
+        waited_for_build_ = false;
+      }
+    }
   }
 
   const RowDescriptor& probe_row_desc() const {

@@ -150,6 +150,7 @@ Status NestedLoopJoinNode::Prepare(RuntimeState* state) {
       matching_build_rows_.reset(new Bitmap(0));
     }
   }
+  prepare_succeeded_ = true;
   return Status::OK();
 }
 
@@ -166,16 +167,13 @@ Status NestedLoopJoinNode::Reset(RuntimeState* state, RowBatch* row_batch) {
 void NestedLoopJoinNode::Close(RuntimeState* state) {
   if (is_closed()) return;
   ScalarExprEvaluator::Close(join_conjunct_evals_, state);
-  if (builder_ != NULL) {
+  if (builder_ != nullptr) {
     // IMPALA-6595: builder must be closed before child. The separate build case is
     // handled in FragmentInstanceState.
     DCHECK(UseSeparateBuild(state->query_options()) || builder_->is_closed()
         || !children_[1]->is_closed());
-    if (!UseSeparateBuild(state->query_options()) || waited_for_build_) {
-      builder_->CloseFromProbe(state);
-      waited_for_build_ = false;
-    }
   }
+  UnregisterFromBuilder(state, &builder_);
   build_batches_ = NULL;
   if (matching_build_rows_ != NULL) {
     mem_tracker()->Release(matching_build_rows_->MemUsage());
