@@ -215,11 +215,13 @@ under the License.
           <groupId>org.apache.hive</groupId>
           <artifactId>hive-exec</artifactId>
         </exclusion>
-        <!-- Exclude the aws-java-sdk-bundle dependency because the Impala minimal
-             version of this dependency is used instead. -->
         <exclusion>
           <groupId>com.amazonaws</groupId>
           <artifactId>aws-java-sdk-bundle</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>software.amazon.awssdk</groupId>
+          <artifactId>bundle</artifactId>
         </exclusion>
       </exclusions>
     </dependency>
@@ -901,6 +903,8 @@ under the License.
                          Jetty server -->
                     <exclude>ant:*</exclude>
                     <exclude>ant-contrib:*</exclude>
+                    <exclude>com.amazonaws:aws-java-sdk-bundle</exclude>
+                    <exclude>software.amazon.awssdk:bundle</exclude>
                     <exclude>org.apache.ant:*</exclude>
                     <exclude>org.eclipse.jetty:*</exclude>
                     <!-- We use reload4j, exclude log4j 1.x and 2.x -->
