@@ -4638,3 +4638,16 @@ SELECT id,
   case when id % 2 = 0 then date_add(DATE '2023-12-31', interval id days) else null end
 FROM functional.alltypessmall order by id;
 ====
+---- DATASET
+functional
+---- BASE_TABLE_NAME
+timestamp_with_tz_str
+---- COLUMNS
+id INT
+timestamp_str STRING
+---- ROW_FORMAT
+delimited fields terminated by ','
+---- DEPENDENT_LOAD
+insert overwrite table {db_name}{db_suffix}.{table_name}
+select id, concat(cast(timestamp_col as string format 'YYYY-MM-DD HH24:MM:SS'), ' +08:00') from functional.alltypestiny;
+====
