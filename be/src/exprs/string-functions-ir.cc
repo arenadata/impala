@@ -195,9 +195,21 @@ StringVal StringFunctions::Repeat(
   return result;
 }
 
+static int CountUtf8Chars(uint8_t* ptr, int len) {
+  if (ptr == nullptr) return 0;
+  int cnt = 0;
+  for (int i = 0; i < len; ++i) {
+    if (BitUtil::IsUtf8StartByte(ptr[i])) ++cnt;
+  }
+  return cnt;
+}
+
 StringVal StringFunctions::Lpad(FunctionContext* context, const StringVal& str,
     const BigIntVal& len, const StringVal& pad) {
   if (str.is_null || len.is_null || pad.is_null || len.val < 0) return StringVal::null();
+  if (context->impl()->GetConstFnAttr(FunctionContextImpl::UTF8_MODE)) {
+    return Utf8Lpad(context, str, len, pad);
+  }
   // Corner cases: Shrink the original string, or leave it alone.
   // TODO: Hive seems to go into an infinite loop if pad.len == 0,
   // so we should pay attention to Hive's future solution to be compatible.
@@ -229,6 +241,9 @@ StringVal StringFunctions::Lpad(FunctionContext* context, const StringVal& str,
 StringVal StringFunctions::Rpad(FunctionContext* context, const StringVal& str,
     const BigIntVal& len, const StringVal& pad) {
   if (str.is_null || len.is_null || pad.is_null || len.val < 0) return StringVal::null();
+  if (context->impl()->GetConstFnAttr(FunctionContextImpl::UTF8_MODE)) {
+    return Utf8Rpad(context, str, len, pad);
+  }
   // Corner cases: Shrink the original string, or leave it alone.
   // TODO: Hive seems to go into an infinite loop if pad->len == 0,
   // so we should pay attention to Hive's future solution to be compatible.
@@ -257,6 +272,104 @@ StringVal StringFunctions::Rpad(FunctionContext* context, const StringVal& str,
   return result;
 }
 
+// UTF-8 aware variants of Lpad()/Rpad(). The target length 'len' is interpreted as the
+// number of UTF-8 characters (not bytes) and the pad string is repeated character-wise,
+// so multi-byte characters are never torn apart.
+StringVal StringFunctions::Utf8Lpad(FunctionContext* context, const StringVal& str,
+    const BigIntVal& len, const StringVal& pad) {
+  DCHECK(!str.is_null && !len.is_null && !pad.is_null && len.val >= 0);
+  int str_chars = CountUtf8Chars(str.ptr, str.len);
+  // Corner cases: shrink the original string to 'len.val' UTF-8 characters, or leave
+  // it alone.
+  if (len.val <= str_chars || pad.len == 0) {
+    int byte_len = FindUtf8PosForward(str.ptr, str.len, static_cast<int>(len.val));
+    return StringVal(str.ptr, byte_len);
+  }
+  if (len.val > StringVal::MAX_LENGTH) {
+    context->SetError(Substitute(ERROR_CHARACTER_LIMIT_EXCEEDED,
+        "lpad() result",
+        PrettyPrinter::Print(StringVal::MAX_LENGTH, TUnit::BYTES)).c_str());
+    return StringVal::null();
+  }
+  // The result contains exactly 'len.val' UTF-8 characters. Each padding character
+  // occupies at most 4 bytes (the maximum size of a UTF-8 character).
+  int64_t pad_chars = len.val - str_chars;
+  int64_t max_result_bytes = pad_chars * std::min(pad.len, 4) + str.len;
+  if (max_result_bytes > StringVal::MAX_LENGTH) {
+    context->SetError(Substitute(ERROR_CHARACTER_LIMIT_EXCEEDED,
+        "lpad() result",
+        PrettyPrinter::Print(StringVal::MAX_LENGTH, TUnit::BYTES)).c_str());
+    return StringVal::null();
+  }
+  StringVal result(context, static_cast<int>(max_result_bytes));
+  if (UNLIKELY(result.is_null)) return StringVal::null();
+
+  // Prepend characters of pad.
+  uint8_t* ptr = result.ptr;
+  int pad_byte_pos = 0;
+  for (int64_t i = 0; i < pad_chars; ++i) {
+    int char_bytes = std::min<int>(
+        BitUtil::NumBytesInUtf8Encoding(pad.ptr[pad_byte_pos]), pad.len - pad_byte_pos);
+    memcpy(ptr, pad.ptr + pad_byte_pos, char_bytes);
+    ptr += char_bytes;
+    pad_byte_pos += char_bytes;
+    if (pad_byte_pos >= pad.len) pad_byte_pos = 0;
+  }
+
+  // Append given string.
+  memcpy(ptr, str.ptr, str.len);
+  ptr += str.len;
+  result.len = ptr - result.ptr;
+  return result;
+}
+
+StringVal StringFunctions::Utf8Rpad(FunctionContext* context, const StringVal& str,
+    const BigIntVal& len, const StringVal& pad) {
+  DCHECK(!str.is_null && !len.is_null && !pad.is_null && len.val >= 0);
+  int str_chars = CountUtf8Chars(str.ptr, str.len);
+  // Corner cases: shrink the original string to 'len.val' UTF-8 characters, or leave
+  // it alone.
+  if (len.val <= str_chars || pad.len == 0) {
+    int byte_len = FindUtf8PosForward(str.ptr, str.len, static_cast<int>(len.val));
+    return StringVal(str.ptr, byte_len);
+  }
+  if (len.val > StringVal::MAX_LENGTH) {
+    context->SetError(Substitute(ERROR_CHARACTER_LIMIT_EXCEEDED,
+        "rpad() result",
+        PrettyPrinter::Print(StringVal::MAX_LENGTH, TUnit::BYTES)).c_str());
+    return StringVal::null();
+  }
+  // The result contains exactly 'len.val' UTF-8 characters. Each padding character
+  // occupies at most 4 bytes (the maximum size of a UTF-8 character).
+  int64_t pad_chars = len.val - str_chars;
+  int64_t max_result_bytes = pad_chars * std::min(pad.len, 4) + str.len;
+  if (max_result_bytes > StringVal::MAX_LENGTH) {
+    context->SetError(Substitute(ERROR_CHARACTER_LIMIT_EXCEEDED,
+        "rpad() result",
+        PrettyPrinter::Print(StringVal::MAX_LENGTH, TUnit::BYTES)).c_str());
+    return StringVal::null();
+  }
+  StringVal result(context, static_cast<int>(max_result_bytes));
+  if (UNLIKELY(result.is_null)) return StringVal::null();
+
+  // Copy the given string.
+  memcpy(result.ptr, str.ptr, str.len);
+  uint8_t* ptr = result.ptr + str.len;
+
+  // Append characters of pad until desired character length is reached.
+  int pad_byte_pos = 0;
+  for (int64_t i = 0; i < pad_chars; ++i) {
+    int char_bytes = std::min<int>(
+        BitUtil::NumBytesInUtf8Encoding(pad.ptr[pad_byte_pos]), pad.len - pad_byte_pos);
+    memcpy(ptr, pad.ptr + pad_byte_pos, char_bytes);
+    ptr += char_bytes;
+    pad_byte_pos += char_bytes;
+    if (pad_byte_pos >= pad.len) pad_byte_pos = 0;
+  }
+  result.len = ptr - result.ptr;
+  return result;
+}
+
 IntVal StringFunctions::Length(FunctionContext* context, const StringVal& str) {
   if (str.is_null) return IntVal::null();
   if (context->impl()->GetConstFnAttr(FunctionContextImpl::UTF8_MODE)) {
@@ -274,15 +387,6 @@ IntVal StringFunctions::CharLength(FunctionContext* context, const StringVal& st
   const FunctionContext::TypeDesc* t = context->GetArgType(0);
   DCHECK_EQ(t->type, FunctionContext::TYPE_FIXED_BUFFER);
   return StringValue::UnpaddedCharLength(reinterpret_cast<char*>(str.ptr), t->len);
-}
-
-static int CountUtf8Chars(uint8_t* ptr, int len) {
-  if (ptr == nullptr) return 0;
-  int cnt = 0;
-  for (int i = 0; i < len; ++i) {
-    if (BitUtil::IsUtf8StartByte(ptr[i])) ++cnt;
-  }
-  return cnt;
 }
 
 IntVal StringFunctions::Utf8Length(FunctionContext* context, const StringVal& str) {

@@ -102,7 +102,11 @@ class StringFunctions {
   static StringVal Repeat(FunctionContext*, const StringVal& str, const BigIntVal& n);
   static StringVal Lpad(FunctionContext*, const StringVal& str, const BigIntVal& len,
       const StringVal& pad);
+  static StringVal Utf8Lpad(FunctionContext*, const StringVal& str, const BigIntVal& len,
+      const StringVal& pad);
   static StringVal Rpad(FunctionContext*, const StringVal& str, const BigIntVal&,
+      const StringVal& pad);
+  static StringVal Utf8Rpad(FunctionContext*, const StringVal& str, const BigIntVal&,
       const StringVal& pad);
   static IntVal Bytes(FunctionContext*, const StringVal& str);
   static IntVal Length(FunctionContext*, const StringVal& str);

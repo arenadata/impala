@@ -11272,6 +11272,35 @@ TEST_P(ExprTest, Utf8Test) {
   // There are 'Zero Width Joiner' between emojis.
   TestStringValue("btrim('👨‍👩‍👧‍👦', '👧‍👦')", "👨‍👩");
 
+  // Tests lpad()/rpad() with UTF-8 characters in UTF8_MODE. The target length is
+  // counted in UTF-8 characters and the pad string is repeated character-wise, so
+  // multi-byte characters are never torn apart (ADH-5777).
+  TestStringValue("lpad('ПрИвЕт.', 16, 'Ё')", "ЁЁЁЁЁЁЁЁЁПрИвЕт.");
+  TestStringValue("rpad('ПрИвЕт.', 16, 'Ё')", "ПрИвЕт.ЁЁЁЁЁЁЁЁЁ");
+  TestStringValue("lpad('HeLlO.', 16, 'f')", "ffffffffffHeLlO.");
+  TestStringValue("rpad('HeLlO.', 16, 'f')", "HeLlO.ffffffffff");
+  TestStringValue("lpad('你好', 5, 'ab')", "aba你好");
+  TestStringValue("rpad('你好', 5, 'ab')", "你好aba");
+  TestStringValue("lpad('hello', 10, '你好')", "你好你好你hello");
+  TestStringValue("rpad('hello', 10, '你好')", "hello你好你好你");
+  // The target length is smaller than the string: truncate character-wise.
+  TestStringValue("lpad('你好hello', 4, '好')", "你好he");
+  TestStringValue("rpad('你好hello', 4, '好')", "你好he");
+  TestStringValue("lpad('ПрИвЕт.', 3, 'Ё')", "ПрИ");
+  // The target length equals the string length: return the string as is.
+  TestStringValue("lpad('你好', 2, '好')", "你好");
+  TestStringValue("rpad('你好', 2, '好')", "你好");
+  TestStringValue("lpad('', 3, '你')", "你你你");
+  TestStringValue("rpad('', 3, '你')", "你你你");
+  TestIsNull("lpad(NULL, 5, 'ab')", TYPE_STRING);
+  TestIsNull("lpad('你好', NULL, 'ab')", TYPE_STRING);
+  TestIsNull("lpad('你好', 5, NULL)", TYPE_STRING);
+  TestIsNull("rpad(NULL, 5, 'ab')", TYPE_STRING);
+  TestIsNull("rpad('你好', NULL, 'ab')", TYPE_STRING);
+  TestIsNull("rpad('你好', 5, NULL)", TYPE_STRING);
+  TestIsNull("lpad('你好', cast(-1 as bigint), 'ab')", TYPE_STRING);
+  TestIsNull("rpad('你好', cast(-1 as bigint), 'ab')", TYPE_STRING);
+
   executor_->PopExecOption();
 }
 
