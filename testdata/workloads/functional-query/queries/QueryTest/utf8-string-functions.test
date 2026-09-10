@@ -577,3 +577,46 @@ select id, name, trim(name from name) from utf8_str_tiny;
 ---- TYPES
 INT,STRING,STRING
 ====
+---- QUERY
+set utf8_mode=true;
+select lpad('ПрИвЕт.', 16, 'Ё'), rpad('ПрИвЕт.', 16, 'Ё'),
+       lpad('HeLlO.', 16, 'f'), rpad('HeLlO.', 16, 'f');
+---- RESULTS: RAW_STRING
+'ЁЁЁЁЁЁЁЁЁПрИвЕт.','ПрИвЕт.ЁЁЁЁЁЁЁЁЁ','ffffffffffHeLlO.','HeLlO.ffffffffff'
+---- TYPES
+STRING,STRING,STRING,STRING
+====
+---- QUERY
+set utf8_mode=true;
+select lpad('hello', 10, '你好'), rpad('hello', 10, '你好'),
+       lpad('你好hello', 4, '好'), rpad('你好hello', 4, '好');
+---- RESULTS: RAW_STRING
+'你好你好你hello','hello你好你好你','你好he','你好he'
+---- TYPES
+STRING,STRING,STRING,STRING
+====
+---- QUERY
+set utf8_mode=false;
+select lpad('hello', 10, 'ab'), rpad('hello', 10, 'ab');
+---- RESULTS: RAW_STRING
+'ababahello','helloababa'
+---- TYPES
+STRING,STRING
+====
+---- QUERY
+set utf8_mode=true;
+select length(lpad(name, 12, '好')), lpad(name, 12, '好') from utf8_str_tiny;
+---- RESULTS: RAW_STRING
+1,12,'好好好好好好好好好好张三'
+2,12,'好好好好好好好好好好李四'
+3,12,'好好好好好好好好好好王五'
+4,12,'好好好好好好好好好李小龙'
+5,12,'好好好好好好好Alice'
+6,12,'好好好好好好好好陈Bob'
+7,12,'好好好好好好好Бopиc'
+8,12,'好好好好好好好好Jörg'
+9,12,'好好好好好好好好好ひなた'
+10,12,'好好好好好好好好好好서연'
+---- TYPES
+INT,STRING
+====
