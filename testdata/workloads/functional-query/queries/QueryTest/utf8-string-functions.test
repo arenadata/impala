@@ -604,8 +604,16 @@ select lpad('hello', 10, 'ab'), rpad('hello', 10, 'ab');
 STRING,STRING
 ====
 ---- QUERY
+set utf8_mode=false;
+select lpad('你好', 8, 'a'), rpad('你好', 8, 'a'), length(lpad('你好', 8, 'a'));
+---- RESULTS: RAW_STRING
+'aa你好','你好aa',8
+---- TYPES
+STRING,STRING,INT
+====
+---- QUERY
 set utf8_mode=true;
-select length(lpad(name, 12, '好')), lpad(name, 12, '好') from utf8_str_tiny;
+select id, length(lpad(name, 12, '好')), lpad(name, 12, '好') from utf8_str_tiny;
 ---- RESULTS: RAW_STRING
 1,12,'好好好好好好好好好好张三'
 2,12,'好好好好好好好好好好李四'
@@ -618,5 +626,5 @@ select length(lpad(name, 12, '好')), lpad(name, 12, '好') from utf8_str_tiny;
 9,12,'好好好好好好好好好ひなた'
 10,12,'好好好好好好好好好好서연'
 ---- TYPES
-INT,STRING
+INT,INT,STRING
 ====

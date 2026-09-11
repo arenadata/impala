@@ -11274,7 +11274,7 @@ TEST_P(ExprTest, Utf8Test) {
 
   // Tests lpad()/rpad() with UTF-8 characters in UTF8_MODE. The target length is
   // counted in UTF-8 characters and the pad string is repeated character-wise, so
-  // multi-byte characters are never torn apart (ADH-5777).
+  // multi-byte characters are never torn apart.
   TestStringValue("lpad('ПрИвЕт.', 16, 'Ё')", "ЁЁЁЁЁЁЁЁЁПрИвЕт.");
   TestStringValue("rpad('ПрИвЕт.', 16, 'Ё')", "ПрИвЕт.ЁЁЁЁЁЁЁЁЁ");
   TestStringValue("lpad('HeLlO.', 16, 'f')", "ffffffffffHeLlO.");
@@ -11292,6 +11292,11 @@ TEST_P(ExprTest, Utf8Test) {
   TestStringValue("rpad('你好', 2, '好')", "你好");
   TestStringValue("lpad('', 3, '你')", "你你你");
   TestStringValue("rpad('', 3, '你')", "你你你");
+  // Empty pad string: truncate to 'len' characters or return the string as is.
+  TestStringValue("lpad('你好hello', 4, '')", "你好he");
+  TestStringValue("rpad('你好hello', 4, '')", "你好he");
+  TestStringValue("lpad('你好', 5, '')", "你好");
+  TestStringValue("rpad('你好', 5, '')", "你好");
   TestIsNull("lpad(NULL, 5, 'ab')", TYPE_STRING);
   TestIsNull("lpad('你好', NULL, 'ab')", TYPE_STRING);
   TestIsNull("lpad('你好', 5, NULL)", TYPE_STRING);

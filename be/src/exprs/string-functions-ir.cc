@@ -280,11 +280,10 @@ StringVal StringFunctions::Utf8Lpad(FunctionContext* context, const StringVal& s
   DCHECK(!str.is_null && !len.is_null && !pad.is_null && len.val >= 0);
   int str_chars = CountUtf8Chars(str.ptr, str.len);
   // Corner cases: shrink the original string to 'len.val' UTF-8 characters, or leave
-  // it alone.
-  if (len.val <= str_chars || pad.len == 0) {
-    int byte_len = FindUtf8PosForward(str.ptr, str.len, static_cast<int>(len.val));
-    return StringVal(str.ptr, byte_len);
-  }
+  // it alone. 'len.val' can exceed INT_MAX when 'pad' is empty, so it is compared in
+  // int64 and the truncation is done by Utf8Substring() to avoid narrowing it to int.
+  if (len.val < str_chars) return Utf8Substring(context, str, BigIntVal(1), len);
+  if (len.val == str_chars || pad.len == 0) return StringVal(str.ptr, str.len);
   if (len.val > StringVal::MAX_LENGTH) {
     context->SetError(Substitute(ERROR_CHARACTER_LIMIT_EXCEEDED,
         "lpad() result",
@@ -304,7 +303,10 @@ StringVal StringFunctions::Utf8Lpad(FunctionContext* context, const StringVal& s
   StringVal result(context, static_cast<int>(max_result_bytes));
   if (UNLIKELY(result.is_null)) return StringVal::null();
 
-  // Prepend characters of pad.
+  // Prepend characters of pad. NOTE: if 'pad' is malformed UTF-8 (e.g. a start byte
+  // without its continuation bytes), one iteration may copy several logical
+  // characters, so the result is not guaranteed to contain exactly 'len.val' UTF-8
+  // characters. The allocation bound above still holds, so memory access stays safe.
   uint8_t* ptr = result.ptr;
   int pad_byte_pos = 0;
   for (int64_t i = 0; i < pad_chars; ++i) {
@@ -328,11 +330,10 @@ StringVal StringFunctions::Utf8Rpad(FunctionContext* context, const StringVal& s
   DCHECK(!str.is_null && !len.is_null && !pad.is_null && len.val >= 0);
   int str_chars = CountUtf8Chars(str.ptr, str.len);
   // Corner cases: shrink the original string to 'len.val' UTF-8 characters, or leave
-  // it alone.
-  if (len.val <= str_chars || pad.len == 0) {
-    int byte_len = FindUtf8PosForward(str.ptr, str.len, static_cast<int>(len.val));
-    return StringVal(str.ptr, byte_len);
-  }
+  // it alone. 'len.val' can exceed INT_MAX when 'pad' is empty, so it is compared in
+  // int64 and the truncation is done by Utf8Substring() to avoid narrowing it to int.
+  if (len.val < str_chars) return Utf8Substring(context, str, BigIntVal(1), len);
+  if (len.val == str_chars || pad.len == 0) return StringVal(str.ptr, str.len);
   if (len.val > StringVal::MAX_LENGTH) {
     context->SetError(Substitute(ERROR_CHARACTER_LIMIT_EXCEEDED,
         "rpad() result",
@@ -356,7 +357,9 @@ StringVal StringFunctions::Utf8Rpad(FunctionContext* context, const StringVal& s
   memcpy(result.ptr, str.ptr, str.len);
   uint8_t* ptr = result.ptr + str.len;
 
-  // Append characters of pad until desired character length is reached.
+  // Append characters of pad until desired character length is reached. See the
+  // NOTE in Utf8Lpad() about malformed 'pad' not guaranteeing exactly 'len.val'
+  // UTF-8 characters in the result (memory access stays safe either way).
   int pad_byte_pos = 0;
   for (int64_t i = 0; i < pad_chars; ++i) {
     int char_bytes = std::min<int>(
