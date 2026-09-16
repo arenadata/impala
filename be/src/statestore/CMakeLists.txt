@@ -41,3 +41,4 @@ if (BUILD_WITH_NO_TESTS)
 endif()
 
 ADD_BE_LSAN_TEST(statestore-test)
+ADD_BE_LSAN_TEST(statestore-catalogd-mgr-test)

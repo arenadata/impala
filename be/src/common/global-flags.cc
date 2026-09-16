@@ -409,6 +409,12 @@ DEFINE_bool(use_subscriber_id_as_catalogd_priority, false, "Subscriber-id is use
 DEFINE_int64(catalogd_ha_preemption_wait_period_ms, 10000, "(Advanced) The time after "
     "which statestore designates the first registered catalogd as active if statestore "
     "does not receive registration request from the second catalogd.");
+DEFINE_bool(catalogd_ha_failover_on_active_reregistration, true, "(Advanced) If true, "
+    "statestore fails over to the standby catalogd when the active catalogd registers "
+    "again, e.g. after a restart. The previous registration of the active catalogd is "
+    "gone at that point, so the standby catalogd takes over right away instead of the "
+    "re-registered instance keeping the active role until the failure detector evicts "
+    "it, which could leave two catalogd instances in active status.");
 DEFINE_int64(active_catalogd_designation_monitoring_interval_ms, 100, "(Advanced) "
     "Interval (in ms) with which the statestore monitors if active catalogd is "
     "designated.");

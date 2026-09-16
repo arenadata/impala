@@ -95,6 +95,13 @@ under the License.
         recognize the new active CatalogD, causing currently running queries to fail due to lack of
         access to metadata. These failed queries need to be rerun after the failover is complete and
         the new active CatalogD is operational.</p>
+      <p>If the active CatalogD restarts quickly, for example when a container orchestrator
+        recreates it under the same name, it registers with the StateStore again before the
+        failure is detected. By default the StateStore then fails over to the standby CatalogD
+        right away and keeps the restarted instance as standby, so only one CatalogD is active at
+        any time. Set the StateStore startup flag
+        <codeph>catalogd_ha_failover_on_active_reregistration</codeph> to <codeph>false</codeph>
+        to keep the restarted instance active instead.</p>
     </conbody>
   </concept>
 </concept>

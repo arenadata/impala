@@ -25,6 +25,7 @@ using namespace impala;
 
 DECLARE_bool(use_subscriber_id_as_catalogd_priority);
 DECLARE_int64(catalogd_ha_preemption_wait_period_ms);
+DECLARE_bool(catalogd_ha_failover_on_active_reregistration);
 
 #define COPY_CATALOGD_REGISTRATION_FROM_MEMBER_VARIABLES(NAME1, NAME2)     \
   do {                                                                     \
@@ -77,6 +78,23 @@ bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
         last_update_catalogd_time_ = UnixMillis();
         return true;
       }
+      if (subscriber_id == active_catalogd_subscriber_id_
+          && FLAGS_catalogd_ha_failover_on_active_reregistration
+          && !catalogd_registration.force_catalogd_active) {
+        // The active catalogd registers again, e.g. after a restart, and its previous
+        // registration has been removed. Fail over to the standby catalogd right away
+        // and keep the re-registered instance as standby. Otherwise the new instance
+        // would be told it is active while the failure detector may still evict it later
+        // and fail over, leaving two catalogd instances in active status until the
+        // evicted one registers again.
+        COPY_CATALOGD_REGISTRATION_FROM_MEMBER_VARIABLES(active, standby);
+        COPY_CATALOGD_REGISTRATION_FROM_LOCAL_VARIABLES(standby);
+        LOG(INFO) << subscriber_id << " is re-registered while in active role. Fail over "
+                  << "active catalogd to " << active_catalogd_subscriber_id_;
+        ++active_catalogd_version_;
+        last_update_catalogd_time_ = UnixMillis();
+        return true;
+      }
     } else {
       DCHECK(num_registered_catalogd_ == 1 && first_catalogd_register_time_ != 0);
       if (!is_active_catalogd_assigned_
@@ -92,7 +110,22 @@ bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
         return true;
       }
     }
-    // There is no role change during re-registration.
+    // There is no role change during re-registration. Keep the latest registration of
+    // the re-registered catalogd so that its current address is reported.
+    if (is_active_catalogd_assigned_ && subscriber_id == active_catalogd_subscriber_id_) {
+      bool address_changed =
+          active_catalogd_registration_.address != catalogd_registration.address;
+      COPY_CATALOGD_REGISTRATION_FROM_LOCAL_VARIABLES(active);
+      if (address_changed) {
+        LOG(INFO) << subscriber_id << " is re-registered with a different address "
+                  << "and remains active catalogd.";
+        ++active_catalogd_version_;
+        last_update_catalogd_time_ = UnixMillis();
+        return true;
+      }
+    } else if (subscriber_id == standby_catalogd_subscriber_id_) {
+      COPY_CATALOGD_REGISTRATION_FROM_LOCAL_VARIABLES(standby);
+    }
     VLOG(3) << subscriber_id << " is re-registered, but there is no role change.";
     return false;
   }
