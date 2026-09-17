@@ -70,7 +70,7 @@ fi
 # WARNING: If changing this value, also run these commands:
 # cd ${IMPALA_HOME}/java
 # mvn versions:set -DnewVersion=YOUR_NEW_VERSION
-export IMPALA_VERSION=4.5.0.2-4.3.0-0
+export IMPALA_VERSION=4.5.0.3-4.4.0-0
 
 # Whether to build the backend on Avro C++ library or C.
 # This is added temporarily to help transitioning from Avro C to C++ library.
@@ -246,28 +246,28 @@ export CDP_TEZ_VERSION=0.9.1.7.3.1.0-160
 : ${APACHE_MIRROR:="https://www.apache.org/dyn/closer.cgi"}
 export APACHE_MIRROR
 export APACHE_AVRO_JAVA_VERSION=1.11.5
-export APACHE_HADOOP_VERSION=3.4.3.1-4.3.0-1
-export APACHE_HBASE_VERSION=2.6.5.1-4.3.0-0
-export APACHE_ICEBERG_VERSION=1.10.1
+export APACHE_HADOOP_VERSION=3.4.3.2-4.4.0-1
+export APACHE_HBASE_VERSION=2.6.5.2-4.4.0-0
+export APACHE_ICEBERG_VERSION=1.10.1.2-4.4.0-2
 export APACHE_KNOX_VERSION=2.0.0
-export APACHE_PARQUET_VERSION=1.17.0
-export APACHE_RANGER_VERSION=2.6.0.7-2.2.0-1
-export APACHE_TEZ_VERSION=0.10.5.1-4.3.0-1
-export APACHE_HIVE_VERSION=4.3.0.1-4.3.0-3
-export APACHE_HIVE_STORAGE_API_VERSION=4.3.0.1-4.3.0-3
-export APACHE_OZONE_VERSION=2.1.0.1-4.3.0-1
+export APACHE_PARQUET_VERSION=1.17.1
+export APACHE_RANGER_VERSION=2.6.0.8-2.3.0-3
+export APACHE_TEZ_VERSION=0.10.5.2-4.4.0-0
+export APACHE_HIVE_VERSION=4.3.0.2-4.4.0-1
+export APACHE_HIVE_STORAGE_API_VERSION=4.3.0.2-4.4.0-1
+export APACHE_OZONE_VERSION=2.1.0.1-4.3.0-5
 
 # Java dependencies that are not also runtime components. Declaring versions here allows
 # other branches to override them in impala-config-branch.sh for cleaner patches.
-export IMPALA_BOUNCY_CASTLE_VERSION=1.82
-export IMPALA_COMMONS_LANG3_VERSION=3.17.0
+export IMPALA_BOUNCY_CASTLE_VERSION=1.84
+export IMPALA_COMMONS_LANG3_VERSION=3.20.0
 export IMPALA_COS_VERSION=3.1.0-8.0.8
 export IMPALA_DERBY_VERSION=10.14.2.0
 export IMPALA_GUAVA_VERSION=33.5.0-jre
 export IMPALA_HUDI_VERSION=0.5.0-incubating
 export IMPALA_HTTP_CORE_VERSION=4.4.14
-export IMPALA_JACKSON_VERSION=2.18.6
-export IMPALA_JACKSON_DATABIND_VERSION=2.18.6
+export IMPALA_JACKSON_VERSION=2.18.10
+export IMPALA_JACKSON_DATABIND_VERSION=2.18.10
 export IMPALA_JSON_SMART_VERSION=2.4.11
 export IMPALA_JUNIT_VERSION=4.12
 export IMPALA_KITE_VERSION=1.1.0
