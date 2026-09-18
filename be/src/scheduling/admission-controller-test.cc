@@ -1477,8 +1477,12 @@ TEST_F(AdmissionControllerTest, PoolStats) {
   AdmissionController::PoolStats* pool_stats = admission_controller->GetPoolStats(QUEUE);
   CheckPoolStatsEmpty(pool_stats);
 
-  // Show that Queue, IncrementPerUser, and Dequeue leave stats at zero.
+  // Show that Queue, IncrementPerUser, and Dequeue leave stats at zero. Queue and
+  // Dequeue mark the pool for the next statestore topic update.
+  admission_controller->pools_for_updates_.clear();
   pool_stats->Queue();
+  ASSERT_EQ(1, admission_controller->pools_for_updates_.count(QUEUE));
+  admission_controller->pools_for_updates_.clear();
   pool_stats->IncrementPerUser(USER1);
   ASSERT_EQ(1, pool_stats->agg_num_queued());
   ASSERT_EQ(1, pool_stats->metrics()->agg_num_queued->GetValue());
@@ -1489,6 +1493,7 @@ TEST_F(AdmissionControllerTest, PoolStats) {
   ASSERT_EQ(1, pool_stats->agg_user_loads_.get(USER1));
   ASSERT_EQ(0, pool_stats->agg_user_loads_.get(USER2));
   pool_stats->Dequeue(false);
+  ASSERT_EQ(1, admission_controller->pools_for_updates_.count(QUEUE));
   CheckPoolStatsEmpty(pool_stats);
   // the user load should be unchanged.
   ASSERT_EQ(1, pool_stats->agg_user_loads_.get(USER1));

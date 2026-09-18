@@ -829,6 +829,9 @@ void AdmissionController::PoolStats::Queue() {
   metrics_.local_num_queued->Increment(1L);
 
   metrics_.total_queued->Increment(1L);
+  // Publish the new queue length, so that other admission controllers (coordinators or
+  // admissiond replicas) and the autoscaler scraping any of them see it.
+  parent_->pools_for_updates_.insert(name_);
 }
 
 void AdmissionController::PoolStats::IncrementPerUser(const std::string& user) {
@@ -859,6 +862,7 @@ void AdmissionController::PoolStats::Dequeue(bool timed_out) {
 
   DCHECK_GE(agg_num_queued_, 0);
   DCHECK_GE(local_stats_.num_queued, 0);
+  parent_->pools_for_updates_.insert(name_);
   if (timed_out) {
     metrics_.total_timed_out->Increment(1L);
   } else {
