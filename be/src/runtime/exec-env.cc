@@ -145,6 +145,7 @@ DECLARE_int32(webserver_port);
 DECLARE_int64(tcmalloc_max_total_thread_cache_bytes);
 DECLARE_string(admission_service_host);
 DECLARE_int32(admission_service_port);
+DECLARE_bool(enable_admissiond_ha);
 DECLARE_string(catalog_service_host);
 DECLARE_int32(catalog_service_port);
 DECLARE_string(state_store_host);
@@ -301,6 +302,12 @@ ExecEnv::ExecEnv(int krpc_port, int subscriber_port, int webserver_port,
     StatestoreSubscriber::UpdateCatalogdCallback update_catalogd_cb =
         bind<void>(mem_fn(&ExecEnv::UpdateActiveCatalogd), this, _1, _2, _3);
     statestore_subscriber_->AddUpdateCatalogdTopic(update_catalogd_cb);
+    if (FLAGS_enable_admissiond_ha && AdmissionServiceEnabled()) {
+      active_admissiond_version_checker_.reset(new ActiveCatalogdVersionChecker());
+      StatestoreSubscriber::UpdateAdmissiondCallback update_admissiond_cb =
+          bind<void>(mem_fn(&ExecEnv::UpdateActiveAdmissiond), this, _1, _2, _3);
+      statestore_subscriber_->AddUpdateAdmissiondTopic(update_admissiond_cb);
+    }
   }
   StatestoreSubscriber::CompleteRegistrationCallback complete_registration_cb =
       bind<void>(mem_fn(&ExecEnv::SetStatestoreRegistrationCompleted), this);
@@ -703,16 +710,47 @@ bool ExecEnv::AdmissionServiceEnabled() const {
 }
 
 Status ExecEnv::GetAdmissionServiceAddress(
-    NetworkAddressPB& admission_service_address) const {
+    NetworkAddressPB& admission_service_address, string* hostname) const {
   if (AdmissionServiceEnabled()) {
+    string host = FLAGS_admission_service_host;
+    int port = FLAGS_admission_service_port;
+    {
+      std::lock_guard<std::mutex> l(admissiond_address_lock_);
+      if (active_admissiond_address_ != nullptr) {
+        host = active_admissiond_address_->hostname;
+        port = active_admissiond_address_->port;
+      }
+    }
     IpAddr ip;
-    RETURN_IF_ERROR(HostnameToIpAddr(FLAGS_admission_service_host, &ip));
+    RETURN_IF_ERROR(HostnameToIpAddr(host, &ip));
     // TODO: get BackendId of admissiond in global admission control mode.
     // Use admissiond's IP address as unique ID for UDS now.
-    admission_service_address = MakeNetworkAddressPB(
-        ip, FLAGS_admission_service_port, UdsAddressUniqueIdPB::IP_ADDRESS);
+    admission_service_address =
+        MakeNetworkAddressPB(ip, port, UdsAddressUniqueIdPB::IP_ADDRESS);
+    if (hostname != nullptr) *hostname = host;
   }
   return Status::OK();
+}
+
+void ExecEnv::UpdateActiveAdmissiond(bool reset_version,
+    int64_t active_admissiond_version,
+    const TAdmissiondRegistration& admissiond_registration) {
+  std::lock_guard<std::mutex> l(admissiond_address_lock_);
+  if (!active_admissiond_version_checker_->CheckActiveCatalogdVersion(
+          reset_version, active_admissiond_version)) {
+    return;
+  }
+  const TNetworkAddress& address = admissiond_registration.address;
+  if (address.hostname.empty() || address.port == 0) return;
+  if (active_admissiond_address_ != nullptr && *active_admissiond_address_ == address) {
+    return;
+  }
+  LOG(INFO) << "The active admissiond is changed from "
+            << (active_admissiond_address_ == nullptr ?
+                       "none" : TNetworkAddressToString(*active_admissiond_address_))
+            << " to " << TNetworkAddressToString(address);
+  active_admissiond_address_ = std::make_shared<const TNetworkAddress>(address);
+  ++admissiond_generation_;
 }
 
 void ExecEnv::UpdateActiveCatalogd(bool is_registration_reply,

@@ -19,6 +19,7 @@
 #ifndef IMPALA_RUNTIME_EXEC_ENV_H
 #define IMPALA_RUNTIME_EXEC_ENV_H
 
+#include <atomic>
 #include <unordered_map>
 
 #include <boost/scoped_ptr.hpp>
@@ -75,6 +76,7 @@ class TmpFileMgr;
 class TupleCacheMgr;
 class Webserver;
 class CodeGenCache;
+class TAdmissiondRegistration;
 class TCatalogRegistration;
 
 namespace io {
@@ -203,8 +205,20 @@ class ExecEnv {
   int64_t admission_slots() const { return admission_slots_; }
 
   /// Gets the resolved IP address and port where the admission control service is
-  /// running, if enabled.
-  Status GetAdmissionServiceAddress(NetworkAddressPB& address) const;
+  /// running, if enabled. With admissiond HA, this is the active admissiond designated
+  /// by the statestore (--admission_service_host until one is designated). If
+  /// 'hostname' is not null, it is set to the hostname of that address.
+  Status GetAdmissionServiceAddress(
+      NetworkAddressPB& address, std::string* hostname = nullptr) const;
+
+  /// Number of times the active admissiond changed (admissiond HA), see
+  /// UpdateActiveAdmissiond().
+  int64_t admissiond_generation() const { return admissiond_generation_.load(); }
+
+  /// Callback function for receiving notification of new active admissiond
+  /// (admissiond HA), like UpdateActiveCatalogd().
+  void UpdateActiveAdmissiond(bool reset_version, int64_t active_admissiond_version,
+      const TAdmissiondRegistration& admissiond_registration);
 
   /// Returns true if the admission control service is enabled.
   bool AdmissionServiceEnabled() const;
@@ -356,6 +370,19 @@ class ExecEnv {
 
   /// Protects catalogd_address_ and active_catalogd_version_tracker_.
   mutable std::mutex catalogd_address_lock_;
+
+  /// Address of the active admissiond (admissiond HA), null until the statestore
+  /// designates one.
+  std::shared_ptr<const TNetworkAddress> active_admissiond_address_;
+
+  /// Object to track the version of received active admissiond.
+  boost::scoped_ptr<ActiveCatalogdVersionChecker> active_admissiond_version_checker_;
+
+  /// Incremented whenever 'active_admissiond_address_' changes.
+  std::atomic<int64_t> admissiond_generation_{0};
+
+  /// Protects active_admissiond_address_ and active_admissiond_version_checker_.
+  mutable std::mutex admissiond_address_lock_;
 
   /// Initialize ExecEnv based on Hadoop config from frontend.
   Status InitHadoopConfig();

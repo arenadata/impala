@@ -2279,6 +2279,26 @@
     "key": "statestore.active-catalogd-address"
   },
   {
+    "description": "True if this admissiond admits queries: always without admissiond HA, otherwise while the statestore designates it as the active admissiond.",
+    "contexts": [
+      "ADMISSIOND"
+    ],
+    "label": "Admission Control Service Active Status",
+    "units": "NONE",
+    "kind": "PROPERTY",
+    "key": "admission-control-service.active-status"
+  },
+  {
+    "description": "The address of active admission daemon (admissiond HA).",
+    "contexts": [
+      "STATESTORE"
+    ],
+    "label": "Address of Active Admission daemon",
+    "units": "NONE",
+    "kind": "PROPERTY",
+    "key": "statestore.active-admissiond-address"
+  },
+  {
     "description": "The number of registered Statestore subscribers.",
     "contexts": [
       "STATESTORE"

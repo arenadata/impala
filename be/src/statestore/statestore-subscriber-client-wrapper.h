@@ -62,6 +62,14 @@ class StatestoreSubscriberClientWrapper : public StatestoreSubscriberClient {
      recv_UpdateCatalogd(_return);
    }
 
+    void UpdateAdmissiond(TUpdateAdmissiondResponse& _return,
+       const TUpdateAdmissiondRequest& params, bool* send_done) {
+     DCHECK(!*send_done);
+     send_UpdateAdmissiond(params);
+     *send_done = true;
+     recv_UpdateAdmissiond(_return);
+   }
+
    void UpdateStatestoredRole(TUpdateStatestoredRoleResponse& _return,
        const TUpdateStatestoredRoleRequest& params, bool* send_done) {
      DCHECK(!*send_done);

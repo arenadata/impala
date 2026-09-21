@@ -183,6 +183,21 @@ class StatestoreSubscriberThriftIf : public StatestoreSubscriberIf {
     response.__set_status(thrift_status);
   }
 
+  virtual void UpdateAdmissiond(TUpdateAdmissiondResponse& response,
+      const TUpdateAdmissiondRequest& request) {
+    bool update_skipped = false;
+    Status status = CheckProtocolVersion(request.protocol_version);
+    if (status.ok()) {
+      subscriber_->UpdateAdmissiond(request.admissiond_registration,
+          request.registration_id, request.statestore_id, request.admissiond_version,
+          &update_skipped);
+      response.__set_skipped(update_skipped);
+    }
+    TStatus thrift_status;
+    status.ToThrift(&thrift_status);
+    response.__set_status(thrift_status);
+  }
+
   virtual void UpdateStatestoredRole(TUpdateStatestoredRoleResponse& response,
       const TUpdateStatestoredRoleRequest& request) {
     bool update_skipped = false;
@@ -269,6 +284,14 @@ void StatestoreSubscriber::AddUpdateCatalogdTopic(
   statestore_->AddUpdateCatalogdTopic(callback);
   if (statestore2_ != nullptr) {
     statestore2_->AddUpdateCatalogdTopic(callback);
+  }
+}
+
+void StatestoreSubscriber::AddUpdateAdmissiondTopic(
+    const UpdateAdmissiondCallback& callback) {
+  statestore_->AddUpdateAdmissiondTopic(callback);
+  if (statestore2_ != nullptr) {
+    statestore2_->AddUpdateAdmissiondTopic(callback);
   }
 }
 
@@ -370,6 +393,9 @@ Status StatestoreSubscriber::SetRegisterRequest(
   request->__set_subscriber_location(heartbeat_address);
   request->__set_subscriber_id(subscriber_id_);
   request->__set_subscriber_type(subscriber_type_);
+  if (has_admissiond_registration_) {
+    request->__set_admissiond_registration(admissiond_registration_);
+  }
   return Status::OK();
 }
 
@@ -423,6 +449,31 @@ void StatestoreSubscriber::UpdateCatalogd(
     LOG(INFO) << "Skipped updating catalogd message from unknown or inactive "
               << "statestored: " << PrintId(statestore_id);
   }
+}
+
+void StatestoreSubscriber::UpdateAdmissiond(
+    const TAdmissiondRegistration& admissiond_registration,
+    const RegistrationId& registration_id, const TUniqueId& statestore_id,
+    int64_t active_admissiond_version, bool* update_skipped) {
+  // Accept UpdateAdmissiond RPC from active statestore only.
+  StatestoreStub* active_statestore = GetActiveStatestore();
+  if (active_statestore == nullptr
+      || !active_statestore->IsMatchingStatestoreId(statestore_id)) {
+    // Skip it so that the statestore resends it, e.g. if the registration reply or the
+    // notification of statestore failover has not been received yet.
+    *update_skipped = true;
+    LOG(INFO) << "Skipped updating admissiond message from unknown or inactive "
+              << "statestored: " << PrintId(statestore_id);
+    return;
+  }
+  bool reset_version;
+  {
+    lock_guard<mutex> l(admissiond_update_lock_);
+    reset_version = last_admissiond_statestore_id_ != statestore_id;
+    last_admissiond_statestore_id_ = statestore_id;
+  }
+  active_statestore->UpdateAdmissiond(admissiond_registration, registration_id,
+      active_admissiond_version, reset_version, update_skipped);
 }
 
 void StatestoreSubscriber::UpdateStatestoredRole(bool is_active,
@@ -601,6 +652,11 @@ void StatestoreSubscriber::StatestoreStub::AddUpdateCatalogdTopic(
   update_catalogd_callbacks_.push_back(callback);
 }
 
+void StatestoreSubscriber::StatestoreStub::AddUpdateAdmissiondTopic(
+    const UpdateAdmissiondCallback& callback) {
+  update_admissiond_callbacks_.push_back(callback);
+}
+
 void StatestoreSubscriber::StatestoreStub::AddCompleteRegistrationTopic(
     const CompleteRegistrationCallback& callback) {
   complete_registration_callbacks_.push_back(callback);
@@ -653,6 +709,7 @@ Status StatestoreSubscriber::StatestoreStub::Register(bool* has_active_catalogd,
     request.topic_registrations.push_back(thrift_topic);
   }
   request.__set_subscribe_catalogd_change(IsSubscribedCatalogdChange());
+  request.__set_subscribe_admissiond_change(IsSubscribedAdmissiondChange());
 
   {
     // Reset registration_id_ and statestore_id_ before registering with statestore
@@ -732,6 +789,14 @@ Status StatestoreSubscriber::StatestoreStub::Register(bool* has_active_catalogd,
       *active_catalogd_registration = response.catalogd_registration;
     }
   }
+  registered_admissiond_version_ = -1;
+  if (status.ok() && response.__isset.admissiond_registration
+      && response.__isset.admissiond_version) {
+    VLOG(1) << "Active admissiond address: "
+            << TNetworkAddressToString(response.admissiond_registration.address);
+    registered_admissiond_version_ = response.admissiond_version;
+    registered_admissiond_registration_ = response.admissiond_registration;
+  }
   heartbeat_interval_timer_.Start();
   return status;
 }
@@ -763,6 +828,7 @@ Status StatestoreSubscriber::StatestoreStub::Start(bool* startstore_is_active) {
           callback(true, active_catalogd_version, active_catalogd_registration);
         }
       }
+      if (registered_admissiond_version_ >= 0) NotifyAdmissiondFromRegistration();
     } else {
       LOG(INFO) << "statestore registration unsuccessful on startup: "
                 << status.GetDetail();
@@ -850,6 +916,7 @@ void StatestoreSubscriber::StatestoreStub::RecoveryModeChecker() {
           for (const UpdateCatalogdCallback& callback : update_catalogd_callbacks_) {
             callback(true, active_catalogd_version, active_catalogd_registration);
           }
+          NotifyAdmissiondFromRegistration();
           // Break out of enclosing while (true) to top of outer-scope loop.
           break;
         } else {
@@ -959,6 +1026,37 @@ void StatestoreSubscriber::StatestoreStub::UpdateCatalogd(
     LOG(INFO) << "Skip UpdateCatalogd RPC notification due to unknown registration_id. "
               << "It's likely the registration reply is not received.";
     *update_skipped = true;
+  }
+}
+
+void StatestoreSubscriber::StatestoreStub::NotifyAdmissiondFromRegistration() {
+  for (const UpdateAdmissiondCallback& callback : update_admissiond_callbacks_) {
+    callback(/* reset_version */true, registered_admissiond_version_,
+        registered_admissiond_registration_);
+  }
+}
+
+void StatestoreSubscriber::StatestoreStub::UpdateAdmissiond(
+    const TAdmissiondRegistration& admissiond_registration,
+    const RegistrationId& registration_id, int64_t active_admissiond_version,
+    bool reset_version, bool* update_skipped) {
+  const Status& status = CheckRegistrationId(registration_id);
+  if (!status.ok()) {
+    LOG(INFO) << "Skip UpdateAdmissiond RPC notification due to unknown "
+              << "registration_id. It's likely the registration reply is not received.";
+    *update_skipped = true;
+    return;
+  }
+  // Try to acquire lock to avoid race with the registration thread.
+  shared_lock<shared_mutex> l(lock_, boost::try_to_lock);
+  if (!l.owns_lock()) {
+    LOG(INFO) << "Unable to acquire the lock, skip UpdateAdmissiond RPC notification.";
+    *update_skipped = true;
+    return;
+  }
+  DCHECK(active_admissiond_version >= 0);
+  for (const UpdateAdmissiondCallback& callback : update_admissiond_callbacks_) {
+    callback(reset_version, active_admissiond_version, admissiond_registration);
   }
 }
 

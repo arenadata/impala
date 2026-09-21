@@ -171,6 +171,65 @@ TEST_F(StatestoreCatalogdMgrTest, SingleActiveReregistrationKeepsRole) {
   EXPECT_EQ("10.0.0.5", active_host);
 }
 
+// The admissiond election (admissiond HA) uses a manager with explicit settings.
+const SubscriberId ADMISSIOND_A = "admissiond@admissiond-0:29500";
+const SubscriberId ADMISSIOND_B = "admissiond@admissiond-1:29500";
+
+// Explicit settings are used instead of the catalogd flags: the fixture sets
+// --catalogd_ha_preemption_wait_period_ms to 0, but the first admissiond waits for the
+// second one.
+TEST_F(StatestoreCatalogdMgrTest, AdmissiondSettingsIgnoreCatalogdFlags) {
+  StatestoreCatalogdMgr mgr(true, /* use_subscriber_id_as_priority */ true,
+      /* preemption_wait_period_ms */ 100000,
+      /* failover_on_active_reregistration */ true);
+  EXPECT_FALSE(mgr.RegisterCatalogd(
+      false, ADMISSIOND_B, NewRegistrationId(1), Registration("10.0.0.2")));
+  EXPECT_FALSE(mgr.CheckActiveCatalog());
+  // The second registration designates the one with the lower subscriber id, although
+  // it has the higher registration id.
+  EXPECT_TRUE(mgr.RegisterCatalogd(
+      false, ADMISSIOND_A, NewRegistrationId(2), Registration("10.0.0.1")));
+  EXPECT_TRUE(mgr.IsActiveCatalogd(ADMISSIOND_A));
+}
+
+// Two statestoreds see the registrations in different orders and must designate the
+// same admissiond.
+TEST_F(StatestoreCatalogdMgrTest, AdmissiondPriorityIndependentOfOrder) {
+  for (bool a_first : {true, false}) {
+    StatestoreCatalogdMgr mgr(true, true, 100000, true);
+    const SubscriberId& first = a_first ? ADMISSIOND_A : ADMISSIOND_B;
+    const SubscriberId& second = a_first ? ADMISSIOND_B : ADMISSIOND_A;
+    EXPECT_FALSE(mgr.RegisterCatalogd(
+        false, first, NewRegistrationId(a_first ? 1 : 2), Registration("10.0.0.1")));
+    EXPECT_TRUE(mgr.RegisterCatalogd(
+        false, second, NewRegistrationId(a_first ? 2 : 1), Registration("10.0.0.2")));
+    EXPECT_TRUE(mgr.IsActiveCatalogd(ADMISSIOND_A)) << "a_first=" << a_first;
+  }
+}
+
+// The standby admissiond takes over when the active one fails, and the failed one comes
+// back as standby (no failback).
+TEST_F(StatestoreCatalogdMgrTest, AdmissiondFailoverWithoutFailback) {
+  StatestoreCatalogdMgr mgr(true, true, 100000, true);
+  EXPECT_FALSE(mgr.RegisterCatalogd(
+      false, ADMISSIOND_A, NewRegistrationId(1), Registration("10.0.0.1")));
+  EXPECT_TRUE(mgr.RegisterCatalogd(
+      false, ADMISSIOND_B, NewRegistrationId(2), Registration("10.0.0.2")));
+  ASSERT_TRUE(mgr.IsActiveCatalogd(ADMISSIOND_A));
+  string active_host;
+  int64_t version_before = ActiveVersion(&mgr, &active_host);
+
+  EXPECT_TRUE(mgr.UnregisterCatalogd(ADMISSIOND_A));
+  EXPECT_TRUE(mgr.IsActiveCatalogd(ADMISSIOND_B));
+  EXPECT_EQ(version_before + 1, ActiveVersion(&mgr, &active_host));
+  EXPECT_EQ("10.0.0.2", active_host);
+
+  EXPECT_FALSE(mgr.RegisterCatalogd(
+      false, ADMISSIOND_A, NewRegistrationId(3), Registration("10.0.0.3")));
+  EXPECT_TRUE(mgr.IsActiveCatalogd(ADMISSIOND_B));
+  EXPECT_EQ("10.0.0.3", mgr.GetStandbyCatalogRegistration().address.hostname);
+}
+
 } // namespace impala
 
 IMPALA_TEST_MAIN();

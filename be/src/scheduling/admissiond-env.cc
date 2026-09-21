@@ -43,6 +43,8 @@ DECLARE_int32(state_store_2_port);
 DECLARE_int32(state_store_subscriber_port);
 DECLARE_string(hostname);
 DECLARE_string(cluster_membership_topic_id);
+DECLARE_bool(enable_admissiond_ha);
+DECLARE_bool(force_admissiond_active);
 
 namespace impala {
 
@@ -71,6 +73,13 @@ AdmissiondEnv::AdmissiondEnv()
   statestore_subscriber_.reset(new StatestoreSubscriber(subscriber_id, subscriber_address,
       statestore_address, statestore2_address, metrics,
       TStatestoreSubscriberType::ADMISSIOND));
+  // The statestore designates the active admissiond from these registrations when
+  // admissiond HA is enabled; it checks that the HA flag matches its own.
+  TAdmissiondRegistration admissiond_registration;
+  admissiond_registration.__set_address(admission_service_addr);
+  admissiond_registration.__set_enable_admissiond_ha(FLAGS_enable_admissiond_ha);
+  admissiond_registration.__set_force_admissiond_active(FLAGS_force_admissiond_active);
+  statestore_subscriber_->SetAdmissiondRegistration(admissiond_registration);
 
   scheduler_.reset(new Scheduler(metrics, request_pool_service()));
   cluster_membership_mgr_.reset(new ClusterMembershipMgr(
@@ -113,6 +122,14 @@ Status AdmissiondEnv::Init() {
       new AdmissionControlService(DaemonEnv::GetInstance()->metrics()));
   RETURN_IF_ERROR(admission_control_svc_->Init());
   DCHECK(admission_control_svc_);
+  if (FLAGS_enable_admissiond_ha) {
+    statestore_subscriber_->AddUpdateAdmissiondTopic(
+        [&](bool reset_version, int64_t version,
+            const TAdmissiondRegistration& registration) {
+          admission_control_svc_->UpdateActiveAdmissiond(
+              reset_version, version, registration);
+        });
+  }
   DCHECK(admission_controller_);
   admission_controller_->RegisterAdmissionMapCleanupCallback(
       [&](const UniqueIdPB& query_id) {

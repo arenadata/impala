@@ -17,12 +17,15 @@
 
 #pragma once
 
+#include <mutex>
+
 #include "common/object-pool.h"
 #include "common/status.h"
 #include "gen-cpp/Frontend_types.h"
 #include "gen-cpp/admission_control_service.proxy.h"
 #include "gen-cpp/admission_control_service.service.h"
 #include "scheduling/admission-controller.h"
+#include "statestore/statestore-subscriber-catalog.h"
 #include "util/sharded-query-map-util.h"
 #include "util/thread-pool.h"
 #include "util/unique-id-hash.h"
@@ -89,6 +92,16 @@ class AdmissionControlService : public AdmissionControlServiceIf,
   /// Returns whether AdmissionControlService is healthy and is able to accept admission
   /// related RPCs.
   bool IsHealthy() { return service_started_.load(); }
+
+  /// Returns true if this admissiond admits queries: always without admissiond HA,
+  /// otherwise only while the statestore designates it as the active admissiond.
+  bool IsActive() const { return is_active_.load(); }
+
+  /// Statestore callback with the active admissiond (admissiond HA). Promotes this
+  /// admissiond if the active one is this instance and demotes it otherwise, see
+  /// Promote() and Demote().
+  void UpdateActiveAdmissiond(bool reset_version, int64_t active_admissiond_version,
+      const TAdmissiondRegistration& admissiond_registration);
 
   /// Asyncly queues a request to remove the query from admission_state_map_.
   /// This is non-blocking, thread-safe, and avoids deadlocks with the caller.
@@ -235,6 +248,33 @@ class AdmissionControlService : public AdmissionControlServiceIf,
 
   /// Indicates whether the admission control service is ready.
   std::atomic_bool service_started_{false};
+
+  /// True while this admissiond admits queries, see IsActive().
+  std::atomic_bool is_active_;
+
+  /// Metric for 'is_active_'.
+  BooleanProperty* active_status_metric_ = nullptr;
+
+  /// Protects 'active_admissiond_version_checker_' and serializes role changes.
+  std::mutex role_lock_;
+  std::unique_ptr<ActiveCatalogdVersionChecker> active_admissiond_version_checker_;
+
+  /// Rejects an admission rpc on a standby admissiond with the KRPC error
+  /// ERROR_UNAVAILABLE, on which coordinators retry against the active admissiond.
+  /// Returns true if the rpc was rejected.
+  bool RejectIfNotActive(kudu::rpc::RpcContext* rpc_context);
+
+  /// Called when this admissiond becomes the active one. Admission waits again until
+  /// every coordinator has reported its running queries (see
+  /// WaitForAdoptionGracePeriod()), so that the queries admitted by the previous active
+  /// admissiond are adopted first.
+  void Promote();
+
+  /// Called when another admissiond becomes the active one. Cancels the queued queries
+  /// and releases the running ones, so that this instance no longer publishes them in
+  /// the request queue topic; their coordinators resubmit or report them to the active
+  /// admissiond.
+  void Demote();
 
   /// MonotonicMillis() of the first admission rpc (AdmitQuery or heartbeat) this
   /// admissiond received, 0 before.

@@ -165,6 +165,10 @@ DECLARE_string(hostname);
 DECLARE_bool(enable_catalogd_ha);
 DECLARE_int64(active_catalogd_designation_monitoring_interval_ms);
 DECLARE_int64(update_catalogd_rpc_resend_interval_ms);
+DECLARE_bool(catalogd_ha_failover_on_active_reregistration);
+DECLARE_bool(enable_admissiond_ha);
+DECLARE_bool(use_subscriber_id_as_admissiond_priority);
+DECLARE_int64(admissiond_ha_preemption_wait_period_ms);
 DECLARE_string(debug_actions);
 DECLARE_string(ssl_server_certificate);
 DECLARE_string(ssl_private_key);
@@ -202,6 +206,8 @@ const string STATESTORE_FAILED_UPDATE_STATESTORED_ROLE_RPC_NUM =
 const string STATESTORE_CLEAR_TOPIC_ENTRIES_NUM =
     "statestore.num-clear-topic-entries-requests";
 const string STATESTORE_ACTIVE_CATALOGD_ADDRESS = "statestore.active-catalogd-address";
+const string STATESTORE_ACTIVE_ADMISSIOND_ADDRESS =
+    "statestore.active-admissiond-address";
 const string STATESTORE_ACTIVE_STATUS = "statestore.active-status";
 const string STATESTORE_SERVICE_STARTED = "statestore.service-started";
 const string STATESTORE_IN_HA_RECOVERY = "statestore.in-ha-recovery-mode";
@@ -252,6 +258,31 @@ std::string SubscriberTypeToString(TStatestoreSubscriberType::type t) {
 
 }
 
+// The admissiond election reuses StatestoreCatalogdMgr, which keeps registrations as
+// TCatalogRegistration. Only the address, the HA and force flags and the registration
+// time are used.
+static TCatalogRegistration ToCatalogRegistration(const TAdmissiondRegistration& reg) {
+  TCatalogRegistration result;
+  result.__set_address(reg.address);
+  result.__set_enable_catalogd_ha(reg.enable_admissiond_ha);
+  result.__set_force_catalogd_active(reg.force_admissiond_active);
+  if (reg.__isset.registration_time) {
+    result.__set_registration_time(reg.registration_time);
+  }
+  return result;
+}
+
+static TAdmissiondRegistration ToAdmissiondRegistration(const TCatalogRegistration& reg) {
+  TAdmissiondRegistration result;
+  result.__set_address(reg.address);
+  result.__set_enable_admissiond_ha(reg.enable_catalogd_ha);
+  result.__set_force_admissiond_active(reg.force_catalogd_active);
+  if (reg.__isset.registration_time) {
+    result.__set_registration_time(reg.registration_time);
+  }
+  return result;
+}
+
 class StatestoreThriftIf : public StatestoreServiceIf {
  public:
   StatestoreThriftIf(Statestore* statestore)
@@ -292,15 +323,29 @@ class StatestoreThriftIf : public StatestoreServiceIf {
       catalogd_registration = params.catalogd_registration;
       catalogd_registration.__set_registration_time(UnixMillis());
     }
+    bool subscribe_admissiond_change = params.__isset.subscribe_admissiond_change
+        && params.subscribe_admissiond_change;
+    TAdmissiondRegistration admissiond_registration;
+    if (params.__isset.admissiond_registration) {
+      admissiond_registration = params.admissiond_registration;
+      admissiond_registration.__set_registration_time(UnixMillis());
+    }
 
     RegistrationId registration_id;
     bool has_active_catalogd;
     int64_t active_catalogd_version;
     TCatalogRegistration active_catalogd_registration;
+    bool has_active_admissiond = false;
+    int64_t active_admissiond_version = 0;
+    TAdmissiondRegistration active_admissiond_registration;
     Status status = statestore_->RegisterSubscriber(params.subscriber_id,
         params.subscriber_location, params.topic_registrations, subscriber_type,
         subscribe_catalogd_change, catalogd_registration, &registration_id,
-        &has_active_catalogd, &active_catalogd_version, &active_catalogd_registration);
+        &has_active_catalogd, &active_catalogd_version, &active_catalogd_registration,
+        subscribe_admissiond_change,
+        params.__isset.admissiond_registration ? &admissiond_registration : nullptr,
+        &has_active_admissiond, &active_admissiond_version,
+        &active_admissiond_registration);
     status.ToThrift(&response.status);
     response.__set_registration_id(registration_id);
     response.__set_statestore_id(statestore_->GetStateStoreId());
@@ -314,6 +359,10 @@ class StatestoreThriftIf : public StatestoreServiceIf {
       response.__set_catalogd_registration(active_catalogd_registration);
       response.__set_catalogd_version(active_catalogd_version);
       statestore_->UpdateSubscriberCatalogInfo(params.subscriber_id);
+    }
+    if (is_active_statestored && has_active_admissiond && subscribe_admissiond_change) {
+      response.__set_admissiond_registration(active_admissiond_registration);
+      response.__set_admissiond_version(active_admissiond_version);
     }
   }
 
@@ -561,12 +610,14 @@ void Statestore::Topic::ToJson(Document* document, Value* topic_json) {
 Statestore::Subscriber::Subscriber(const SubscriberId& subscriber_id,
     const RegistrationId& registration_id, const TNetworkAddress& network_address,
     const vector<TTopicRegistration>& subscribed_topics,
-    TStatestoreSubscriberType::type subscriber_type, bool subscribe_catalogd_change)
+    TStatestoreSubscriberType::type subscriber_type, bool subscribe_catalogd_change,
+    bool subscribe_admissiond_change)
   : subscriber_id_(subscriber_id),
     registration_id_(registration_id),
     network_address_(network_address),
     subscriber_type_(subscriber_type),
-    subscribe_catalogd_change_(subscribe_catalogd_change) {
+    subscribe_catalogd_change_(subscribe_catalogd_change),
+    subscribe_admissiond_change_(subscribe_admissiond_change) {
   LOG(INFO) << "Subscriber '" << subscriber_id_
             << "' with type " << SubscriberTypeToString(subscriber_type_)
             << " registered (registration id: " << PrintId(registration_id_) << ")";
@@ -664,6 +715,10 @@ void Statestore::Subscriber::UpdateCatalogInfo(
 Statestore::Statestore(MetricGroup* metrics)
   : protocol_version_(StatestoreServiceVersion::V2),
     catalog_manager_(FLAGS_enable_catalogd_ha),
+    admissiond_manager_(FLAGS_enable_admissiond_ha,
+        FLAGS_use_subscriber_id_as_admissiond_priority,
+        FLAGS_admissiond_ha_preemption_wait_period_ms,
+        FLAGS_catalogd_ha_failover_on_active_reregistration),
     subscriber_topic_update_threadpool_("statestore-update",
         "subscriber-update-worker",
         FLAGS_statestore_num_update_threads,
@@ -730,6 +785,8 @@ Statestore::Statestore(MetricGroup* metrics)
       metrics->AddCounter(STATESTORE_CLEAR_TOPIC_ENTRIES_NUM, 0);
   active_catalogd_address_metric_ = metrics->AddProperty<string>(
       STATESTORE_ACTIVE_CATALOGD_ADDRESS, "");
+  active_admissiond_address_metric_ = metrics->AddProperty<string>(
+      STATESTORE_ACTIVE_ADMISSIOND_ADDRESS, "");
   active_status_metric_ = metrics->AddProperty(STATESTORE_ACTIVE_STATUS, true);
   service_started_metric_ = metrics->AddProperty(STATESTORE_SERVICE_STARTED, false);
 
@@ -811,6 +868,11 @@ Status Statestore::Init(int32_t state_store_port) {
       &Statestore::MonitorSubscriberHeartbeat, this, &heartbeat_monitoring_thread_));
   RETURN_IF_ERROR(Thread::Create("statestore-update-catalogd", "update-catalogd-thread",
       &Statestore::MonitorUpdateCatalogd, this, &update_catalogd_thread_));
+  if (FLAGS_enable_admissiond_ha) {
+    RETURN_IF_ERROR(Thread::Create("statestore-update-admissiond",
+        "update-admissiond-thread", &Statestore::MonitorUpdateAdmissiond, this,
+        &update_admissiond_thread_));
+  }
   service_started_ = true;
   service_started_metric_->SetValue(true);
   return Status::OK();
@@ -952,13 +1014,26 @@ Status Statestore::RegisterSubscriber(const SubscriberId& subscriber_id,
     RegistrationId* registration_id,
     bool* has_active_catalogd,
     int64_t* active_catalogd_version,
-    TCatalogRegistration* active_catalogd_registration) {
+    TCatalogRegistration* active_catalogd_registration,
+    bool subscribe_admissiond_change,
+    const TAdmissiondRegistration* admissiond_registration,
+    bool* has_active_admissiond,
+    int64_t* active_admissiond_version,
+    TAdmissiondRegistration* active_admissiond_registration) {
   bool is_catalogd = subscriber_type == TStatestoreSubscriberType::CATALOGD;
+  // Admissionds that send a registration take part in the admissiond election if
+  // admissiond HA is enabled.
+  bool is_registering_admissiond =
+      subscriber_type == TStatestoreSubscriberType::ADMISSIOND
+      && admissiond_registration != nullptr;
   if (subscriber_id.empty()) {
     return Status("Subscriber ID cannot be empty string");
   } else if (is_catalogd
       && FLAGS_enable_catalogd_ha != catalogd_registration.enable_catalogd_ha) {
     return Status("CalaogD HA enabling flag from catalogd does not match.");
+  } else if (is_registering_admissiond
+      && FLAGS_enable_admissiond_ha != admissiond_registration->enable_admissiond_ha) {
+    return Status("Admissiond HA enabling flag from admissiond does not match.");
   } else if (disable_network_.Load()) {
     return Status("Reject registration since network is disabled.");
   }
@@ -1010,10 +1085,18 @@ Status Statestore::RegisterSubscriber(const SubscriberId& subscriber_id,
                 << catalog_manager_.GetActiveCatalogdSubscriberId();
       update_catalod_cv_.NotifyAll();
     }
+    if (is_registering_admissiond && FLAGS_enable_admissiond_ha
+        && admissiond_manager_.RegisterCatalogd(is_reregistering, subscriber_id,
+            *registration_id, ToCatalogRegistration(*admissiond_registration))) {
+      LOG(INFO) << "Active admissiond role is designated to "
+                << admissiond_manager_.GetActiveCatalogdSubscriberId();
+      update_admissiond_cv_.NotifyAll();
+    }
 
     shared_ptr<Subscriber> current_registration(new Subscriber(
         subscriber_id, *registration_id, location, topic_registrations,
-        subscriber_type, subscribe_catalogd_change));
+        subscriber_type, subscribe_catalogd_change,
+        subscribe_admissiond_change && FLAGS_enable_admissiond_ha));
     subscribers_.emplace(subscriber_id, current_registration);
     if (FLAGS_enable_statestored_ha) {
       active_conn_states_.emplace(subscriber_id, TStatestoreConnState::OK);
@@ -1030,6 +1113,15 @@ Status Statestore::RegisterSubscriber(const SubscriberId& subscriber_id,
     *active_catalogd_registration =
         catalog_manager_.GetActiveCatalogRegistration(
             has_active_catalogd, active_catalogd_version);
+    *has_active_admissiond = false;
+    if (FLAGS_enable_admissiond_ha) {
+      TCatalogRegistration active_admissiond =
+          admissiond_manager_.GetActiveCatalogRegistration(
+              has_active_admissiond, active_admissiond_version);
+      if (*has_active_admissiond) {
+        *active_admissiond_registration = ToAdmissiondRegistration(active_admissiond);
+      }
+    }
   }
 
   return Status::OK();
@@ -1438,6 +1530,13 @@ void Statestore::DoSubscriberUpdate(UpdateKind update_kind, int thread_id,
             update_catalod_cv_.NotifyAll();
           }
         }
+        if (subscriber->IsAdmissiond() && subscriber->IsSubscribedAdmissiondChange()) {
+          if (admissiond_manager_.UnregisterCatalogd(subscriber->id())) {
+            LOG(INFO) << "Active admissiond role is designated to "
+                      << admissiond_manager_.GetActiveCatalogdSubscriberId();
+            update_admissiond_cv_.NotifyAll();
+          }
+        }
       } else {
         LOG(INFO) << "Failure was already detected for subscriber '" << subscriber->id()
                   << "'. Won't send another " << update_kind_str;
@@ -1626,6 +1725,118 @@ void Statestore::SendUpdateCatalogdNotification(int64_t* last_active_catalogd_ve
   }
   if (rpc_receivers.empty()) {
     LOG(INFO) << "Successfully sent UpdateCatalogd RPCs to all subscribers";
+  }
+}
+
+[[noreturn]] void Statestore::MonitorUpdateAdmissiond() {
+  DCHECK(FLAGS_enable_admissiond_ha);
+  int64_t last_active_admissiond_version = 0;
+  // Subscribers to which the statestore still needs to send the latest active admissiond.
+  vector<std::shared_ptr<Subscriber>> rpc_receivers;
+  int64_t timeout_us =
+      FLAGS_active_catalogd_designation_monitoring_interval_ms * MICROS_PER_MILLI;
+  // Check if the first registered one should be designated with active role.
+  while (!admissiond_manager_.CheckActiveCatalog()) {
+    unique_lock<mutex> l(*admissiond_manager_.GetLock());
+    update_admissiond_cv_.WaitFor(l, timeout_us);
+  }
+  SendUpdateAdmissiondNotification(&last_active_admissiond_version, rpc_receivers);
+
+  timeout_us = FLAGS_update_catalogd_rpc_resend_interval_ms * MICROS_PER_MILLI;
+  while (1) {
+    {
+      unique_lock<mutex> l(*admissiond_manager_.GetLock());
+      update_admissiond_cv_.WaitFor(l, timeout_us);
+    }
+    // The active admissiond may still be undesignated after it was unregistered and no
+    // other admissiond is left; designate the next registered one after the waiting
+    // period.
+    admissiond_manager_.CheckActiveCatalog();
+    SendUpdateAdmissiondNotification(&last_active_admissiond_version, rpc_receivers);
+  }
+}
+
+void Statestore::SendUpdateAdmissiondNotification(
+    int64_t* last_active_admissiond_version,
+    vector<std::shared_ptr<Subscriber>>& rpc_receivers) {
+  // Don't send UpdateAdmissiond RPC if the statestore is not active. The version is not
+  // recorded either, so that the statestore notifies all subscribers once it becomes
+  // active. Subscribers accept a lower version from a different statestore.
+  if (!IsActive()) return;
+
+  bool has_active_admissiond;
+  int64_t active_admissiond_version = 0;
+  TAdmissiondRegistration admissiond_registration = ToAdmissiondRegistration(
+      admissiond_manager_.GetActiveCatalogRegistration(
+          &has_active_admissiond, &active_admissiond_version));
+  if (!has_active_admissiond ||
+      (active_admissiond_version == *last_active_admissiond_version
+          && rpc_receivers.empty())) {
+    return;
+  }
+
+  if (active_admissiond_version != *last_active_admissiond_version) {
+    LOG(INFO) << "Send notification for active admissiond version: "
+              << active_admissiond_version << ", address: "
+              << TNetworkAddressToString(admissiond_registration.address);
+    active_admissiond_address_metric_->SetValue(
+        TNetworkAddressToString(admissiond_registration.address));
+    rpc_receivers.clear();
+    {
+      lock_guard<mutex> l(subscribers_lock_);
+      for (const auto& subscriber : subscribers_) {
+        if (subscriber.second->IsSubscribedAdmissiondChange()) {
+          rpc_receivers.push_back(subscriber.second);
+        }
+      }
+    }
+    *last_active_admissiond_version = active_admissiond_version;
+  } else {
+    lock_guard<mutex> l(subscribers_lock_);
+    for (auto it = rpc_receivers.begin(); it != rpc_receivers.end();) {
+      // Don't resend RPC to subscribers which have been removed from subscriber list.
+      if (subscribers_.find((*it)->id()) == subscribers_.end()) {
+        it = rpc_receivers.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    if (rpc_receivers.empty()) return;
+  }
+
+  for (auto it = rpc_receivers.begin(); it != rpc_receivers.end();) {
+    std::shared_ptr<Subscriber> subscriber = *it;
+    bool update_skipped = false;
+    Status status;
+    StatestoreSubscriberConn client(update_catalogd_client_cache_.get(),
+        subscriber->network_address(), &status);
+    if (status.ok()) {
+      TUpdateAdmissiondRequest request;
+      TUpdateAdmissiondResponse response;
+      request.__set_registration_id(subscriber->registration_id());
+      request.__set_statestore_id(statestore_id_);
+      request.__set_admissiond_version(active_admissiond_version);
+      request.__set_admissiond_registration(admissiond_registration);
+      status = client.DoRpc(
+          &StatestoreSubscriberClientWrapper::UpdateAdmissiond, request, &response);
+      if (status.ok()) {
+        update_skipped = (response.__isset.skipped && response.skipped);
+      }
+    }
+    if (status.ok() && !update_skipped) {
+      it = rpc_receivers.erase(it);
+    } else {
+      if (!status.ok()) {
+        LOG(ERROR) << "Couldn't send UpdateAdmissiond RPC to " << subscriber->id()
+                   << ", " << status.GetDetail();
+      }
+      // Leave the subscriber in the receiver list. Statestore will resend RPC to it in
+      // next round.
+      ++it;
+    }
+  }
+  if (rpc_receivers.empty()) {
+    LOG(INFO) << "Successfully sent UpdateAdmissiond RPCs to all subscribers";
   }
 }
 

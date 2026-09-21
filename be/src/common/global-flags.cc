@@ -422,6 +422,23 @@ DEFINE_int64(update_catalogd_rpc_resend_interval_ms, 100, "(Advanced) Interval (
     "with which the statestore resends the update catalogd RPC to a subscriber if the "
     "statestore has failed to send the RPC to the subscriber.");
 
+// Flags for admissiond High Availability (active/passive). Statestore elects the active
+// admissiond like the active catalogd; standby admissiond rejects admission RPCs.
+DEFINE_bool(enable_admissiond_ha, false, "Set to true to enable admissiond HA. Must be "
+    "set on statestored, admissiond and coordinators. Statestore designates one active "
+    "admissiond, coordinators send admission RPCs to it and the standby admissiond "
+    "rejects them.");
+DEFINE_bool(force_admissiond_active, false, "Set to true to force this admissiond "
+    "instance to take active role.");
+// Subscriber-id (built with the network address) is used as priority by default so that
+// two statestoreds designate the same active admissiond.
+DEFINE_bool(use_subscriber_id_as_admissiond_priority, true, "Subscriber-id is used as "
+    "priority value of admissiond instance if this is set as true. Otherwise, "
+    "registration_id which is generated as random number will be used.");
+DEFINE_int64(admissiond_ha_preemption_wait_period_ms, 10000, "(Advanced) The time after "
+    "which statestore designates the first registered admissiond as active if statestore "
+    "does not receive registration request from the second admissiond.");
+
 DEFINE_int32(iceberg_reload_new_files_threshold, 100, "(Advanced) If during a table "
     "refresh the number of new files are greater than this, catalogd will use a "
     "recursive file listing to load file metadata. If number of new files are less or "

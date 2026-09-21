@@ -21,6 +21,7 @@
 #include "gen-cpp/admission_control_service.pb.h"
 #include "gutil/strings/substitute.h"
 #include "kudu/rpc/rpc_context.h"
+#include "kudu/rpc/rpc_header.pb.h"
 #include "rpc/rpc-mgr.h"
 #include "rpc/rpc-mgr.inline.h"
 #include "rpc/sidecar-util.h"
@@ -83,6 +84,9 @@ DEFINE_int32(admission_adoption_grace_period_ms, 10000,
 
 DECLARE_int32(admission_heartbeat_frequency_ms);
 DECLARE_int32(admission_heartbeat_rpc_timeout_ms);
+DECLARE_bool(enable_admissiond_ha);
+DECLARE_string(hostname);
+DECLARE_int32(admission_service_port);
 
 namespace impala {
 
@@ -97,7 +101,11 @@ namespace impala {
 
 AdmissionControlService::AdmissionControlService(MetricGroup* metric_group)
   : AdmissionControlServiceIf(AdmissiondEnv::GetInstance()->rpc_mgr()->metric_entity(),
-        AdmissiondEnv::GetInstance()->rpc_mgr()->result_tracker()) {
+        AdmissiondEnv::GetInstance()->rpc_mgr()->result_tracker()),
+    is_active_(!FLAGS_enable_admissiond_ha),
+    active_admissiond_version_checker_(new ActiveCatalogdVersionChecker()) {
+  active_status_metric_ =
+      metric_group->AddProperty("admission-control-service.active-status", IsActive());
   MemTracker* process_mem_tracker = AdmissiondEnv::GetInstance()->process_mem_tracker();
   bool is_percent; // not used
   int64_t bytes_limit =
@@ -162,11 +170,12 @@ std::atomic<int64_t> AdmissionControlService::proxy_generation_{0};
 Status AdmissionControlService::GetProxy(
     unique_ptr<AdmissionControlServiceProxy>* proxy, int64_t* generation) {
   NetworkAddressPB admission_service_address;
+  string admission_service_hostname;
   RETURN_IF_ERROR(ExecEnv::GetInstance()->GetAdmissionServiceAddress(
-      admission_service_address));
+      admission_service_address, &admission_service_hostname));
   // Create a AdmissionControlService proxy to the destination.
   RETURN_IF_ERROR(ExecEnv::GetInstance()->rpc_mgr()->GetProxy(
-      admission_service_address, FLAGS_admission_service_host,
+      admission_service_address, admission_service_hostname,
       proxy));
   // KRPC shares one connection per remote address and network plane; a new plane name
   // gives a new connection.
@@ -235,6 +244,7 @@ void AdmissionControlService::WaitForAdoptionGracePeriod() {
 
 void AdmissionControlService::AdmitQuery(
     const AdmitQueryRequestPB* req, AdmitQueryResponsePB* resp, RpcContext* rpc_context) {
+  if (RejectIfNotActive(rpc_context)) return;
   VLOG(1) << "AdmitQuery: query_id=" << req->query_id()
           << " coordinator=" << req->coord_id();
   RecordFirstContact();
@@ -264,6 +274,7 @@ void AdmissionControlService::AdmitQuery(
 
 void AdmissionControlService::GetQueryStatus(const GetQueryStatusRequestPB* req,
     GetQueryStatusResponsePB* resp, kudu::rpc::RpcContext* rpc_context) {
+  if (RejectIfNotActive(rpc_context)) return;
   VLOG(2) << "GetQueryStatus " << req->query_id();
 
   shared_ptr<AdmissionState> admission_state;
@@ -340,6 +351,7 @@ void AdmissionControlService::GetQueryStatus(const GetQueryStatusRequestPB* req,
 
 void AdmissionControlService::ReleaseQuery(const ReleaseQueryRequestPB* req,
     ReleaseQueryResponsePB* resp, RpcContext* rpc_context) {
+  if (RejectIfNotActive(rpc_context)) return;
   VLOG(1) << "ReleaseQuery: query_id=" << req->query_id();
   shared_ptr<AdmissionState> admission_state;
   RESPOND_IF_ERROR(admission_state_map_.Get(req->query_id(), &admission_state));
@@ -372,6 +384,7 @@ void AdmissionControlService::ReleaseQuery(const ReleaseQueryRequestPB* req,
 void AdmissionControlService::ReleaseQueryBackends(
     const ReleaseQueryBackendsRequestPB* req, ReleaseQueryBackendsResponsePB* resp,
     RpcContext* rpc_context) {
+  if (RejectIfNotActive(rpc_context)) return;
   VLOG(2) << "ReleaseQueryBackends: query_id=" << req->query_id();
   shared_ptr<AdmissionState> admission_state;
   RESPOND_IF_ERROR(admission_state_map_.Get(req->query_id(), &admission_state));
@@ -401,6 +414,7 @@ void AdmissionControlService::ReleaseQueryBackends(
 
 void AdmissionControlService::CancelAdmission(const CancelAdmissionRequestPB* req,
     CancelAdmissionResponsePB* resp, kudu::rpc::RpcContext* rpc_context) {
+  if (RejectIfNotActive(rpc_context)) return;
   VLOG(1) << "CancelAdmission: query_id=" << req->query_id();
   shared_ptr<AdmissionState> admission_state;
   RESPOND_IF_ERROR(admission_state_map_.Get(req->query_id(), &admission_state));
@@ -410,6 +424,7 @@ void AdmissionControlService::CancelAdmission(const CancelAdmissionRequestPB* re
 
 void AdmissionControlService::AdmissionHeartbeat(const AdmissionHeartbeatRequestPB* req,
     AdmissionHeartbeatResponsePB* resp, kudu::rpc::RpcContext* rpc_context) {
+  if (RejectIfNotActive(rpc_context)) return;
   VLOG(2) << "AdmissionHeartbeat: host_id=" << req->host_id();
   RecordFirstContact();
 
@@ -664,6 +679,8 @@ void AdmissionControlService::AdmitFromThreadPool(const UniqueIdPB& query_id) {
 
   {
     lock_guard<mutex> l(admission_state->lock);
+    // Demoted meanwhile: the coordinator gets rejected and resubmits to the active one.
+    if (!IsActive()) return;
     bool queued;
     AdmissionController::AdmissionRequest request = {admission_state->query_id,
         admission_state->coord_id, admission_state->query_exec_request,
@@ -686,6 +703,85 @@ void AdmissionControlService::AdmitFromThreadPool(const UniqueIdPB& query_id) {
       DCHECK(admission_state->admit_status.ok());
     }
   }
+}
+
+bool AdmissionControlService::RejectIfNotActive(RpcContext* rpc_context) {
+  if (LIKELY(IsActive())) return false;
+  mem_tracker_->Release(rpc_context->GetTransferSize());
+  rpc_context->RespondRpcFailure(kudu::rpc::ErrorStatusPB::ERROR_UNAVAILABLE,
+      kudu::Status::ServiceUnavailable(Substitute("admissiond $0:$1 is not the active "
+          "admissiond", FLAGS_hostname, FLAGS_admission_service_port)));
+  return true;
+}
+
+void AdmissionControlService::UpdateActiveAdmissiond(bool reset_version,
+    int64_t active_admissiond_version,
+    const TAdmissiondRegistration& admissiond_registration) {
+  lock_guard<mutex> l(role_lock_);
+  if (!active_admissiond_version_checker_->CheckActiveCatalogdVersion(
+          reset_version, active_admissiond_version)) {
+    return;
+  }
+  bool is_this = admissiond_registration.address.hostname == FLAGS_hostname
+      && admissiond_registration.address.port == FLAGS_admission_service_port;
+  LOG(INFO) << "Active admissiond is "
+            << TNetworkAddressToString(admissiond_registration.address)
+            << " (version " << active_admissiond_version << ")"
+            << (is_this ? ", this instance." : ".");
+  if (is_this && !IsActive()) {
+    Promote();
+  } else if (!is_this && IsActive()) {
+    Demote();
+  }
+}
+
+void AdmissionControlService::Promote() {
+  // Re-arm the adoption gate before admitting anything.
+  {
+    lock_guard<mutex> l(heartbeat_lock_);
+    for (auto& entry : coord_id_to_heartbeat_) entry.second.reported = false;
+  }
+  first_contact_ms_.store(0);
+  adoption_grace_over_.store(false);
+  is_active_.store(true);
+  active_status_metric_->SetValue(true);
+  LOG(INFO) << "This admissiond is now the active admissiond.";
+}
+
+void AdmissionControlService::Demote() {
+  is_active_.store(false);
+  active_status_metric_->SetValue(false);
+  AdmissionController* admission_controller =
+      AdmissiondEnv::GetInstance()->admission_controller();
+  vector<shared_ptr<AdmissionState>> states;
+  admission_state_map_.DoFuncForAllEntries(
+      [&](const shared_ptr<AdmissionState>& state) { states.push_back(state); });
+  int num_cancelled = 0;
+  for (const shared_ptr<AdmissionState>& state : states) {
+    lock_guard<mutex> l(state->lock);
+    if (!state->submitted || state->admission_done) continue;
+    // Take the query off the queue: WaitOnQueued() removes a cancelled queue node and
+    // updates the pool stats.
+    state->admit_outcome.Set(AdmissionOutcome::CANCELLED);
+    state->admit_status =
+        admission_controller->WaitOnQueued(state->query_id, &state->schedule);
+    state->admission_done = true;
+    ++num_cancelled;
+  }
+  int num_released = 0;
+  for (const UniqueIdPB& coord_id :
+      admission_controller->GetCoordinatorsWithRunningQueries()) {
+    num_released += admission_controller->ReleaseRunningQueriesForHost(coord_id).size();
+  }
+  for (const shared_ptr<AdmissionState>& state : states) {
+    discard_result(admission_state_map_.Delete(state->query_id));
+  }
+  {
+    lock_guard<mutex> l(adopted_lock_);
+    adopted_query_ids_.clear();
+  }
+  LOG(INFO) << "This admissiond is now a standby admissiond: cancelled " << num_cancelled
+            << " queued and released " << num_released << " running queries.";
 }
 
 template <typename ResponsePBType>

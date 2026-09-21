@@ -225,6 +225,21 @@ struct TCatalogRegistration {
   5: optional i64 registration_time;
 }
 
+// Additional registration info for admission daemon.
+struct TAdmissiondRegistration {
+  // Address of the admission control service (KRPC) of admissiond.
+  1: required Types.TNetworkAddress address;
+
+  // True if admissiond HA is enabled.
+  2: optional bool enable_admissiond_ha;
+
+  // True if the admissiond instance is started as active instance.
+  3: optional bool force_admissiond_active;
+
+  // The registration time of the admissiond.
+  4: optional i64 registration_time;
+}
+
 struct TRegisterSubscriberRequest {
   // Protocol version of the subscriber
   1: required StatestoreServiceVersion protocol_version =
@@ -250,6 +265,15 @@ struct TRegisterSubscriberRequest {
 
   // Set iff this subscriber is catalogd.
   7: optional TCatalogRegistration catalogd_registration;
+
+  // Indicate if the subscriber wishes to be notified of changes to the active
+  // admissiond. When it's set as true, statestore will send UpdateAdmissiond RPC to the
+  // subscriber once there is admissiond change. Set by coordinators and admissionds when
+  // admissiond HA is enabled.
+  8: optional bool subscribe_admissiond_change;
+
+  // Set iff this subscriber is admissiond.
+  9: optional TAdmissiondRegistration admissiond_registration;
 }
 
 struct TRegisterSubscriberResponse {
@@ -279,6 +303,12 @@ struct TRegisterSubscriberResponse {
 
   // The version of active statestored
   8: optional i64 active_statestored_version;
+
+  // Registration info of active admissiond.
+  9: optional TAdmissiondRegistration admissiond_registration;
+
+  // The version of active admissiond
+  10: optional i64 admissiond_version;
 }
 
 struct TGetProtocolVersionRequest {
@@ -409,6 +439,32 @@ struct TUpdateCatalogdResponse {
   2: optional bool skipped;
 }
 
+struct TUpdateAdmissiondRequest {
+  // Protocol version of the statestore
+  1: required StatestoreServiceVersion protocol_version =
+      StatestoreServiceVersion.V2
+
+  // registration_id of the receiver
+  2: required Types.TUniqueId registration_id;
+
+  // Unique identifier for the statestore instance.
+  3: required Types.TUniqueId statestore_id;
+
+  // The version of active admissiond
+  4: required i64 admissiond_version;
+
+  // Registration info of active admissiond.
+  5: required TAdmissiondRegistration admissiond_registration;
+}
+
+struct TUpdateAdmissiondResponse {
+  // Whether the call was executed correctly at the application level
+  1: required Status.TStatus status;
+
+  // True if this update was skipped by the subscriber, so that the statestore resends it.
+  2: optional bool skipped;
+}
+
 struct TUpdateStatestoredRoleRequest {
   // Protocol version of the statestore
   1: required StatestoreServiceVersion protocol_version =
@@ -467,6 +523,9 @@ service StatestoreSubscriber {
 
   // Called when active catalogd has been updated.
   TUpdateCatalogdResponse UpdateCatalogd(1: TUpdateCatalogdRequest params);
+
+  // Called when active admissiond has been updated.
+  TUpdateAdmissiondResponse UpdateAdmissiond(1: TUpdateAdmissiondRequest params);
 
   // Called by standby statestore when the Statestore service failover happens, which
   // causes the active states of statestoreds are changed.

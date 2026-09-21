@@ -20,6 +20,7 @@
 #include "gen-cpp/admission_control_service.pb.h"
 #include "gen-cpp/admission_control_service.proxy.h"
 #include "kudu/rpc/rpc_controller.h"
+#include "kudu/rpc/rpc_header.pb.h"
 #include "kudu/rpc/rpc_sidecar.h"
 #include "rpc/rpc-mgr.inline.h"
 #include "rpc/sidecar-util.h"
@@ -51,6 +52,14 @@ using namespace strings;
 using namespace kudu::rpc;
 
 namespace impala {
+
+// True if the rpc was rejected by a standby admissiond (admissiond HA), see
+// AdmissionControlService::RejectIfNotActive().
+static bool IsRejectedByStandby(const RpcController& rpc_controller) {
+  const kudu::rpc::ErrorStatusPB* err = rpc_controller.error_response();
+  return rpc_controller.status().IsRemoteError() && err != nullptr && err->has_code()
+      && err->code() == kudu::rpc::ErrorStatusPB::ERROR_UNAVAILABLE;
+}
 
 RemoteAdmissionControlClient::RemoteAdmissionControlClient(const TQueryCtx& query_ctx)
   : query_ctx_(query_ctx) {
@@ -87,6 +96,9 @@ Status RemoteAdmissionControlClient::TryAdmitQuery(AdmissionControlServiceProxy*
 
     *rpc_status = proxy->AdmitQuery(*req, &resp, &rpc_controller);
     if (!rpc_status->ok()) {
+      if (IsRejectedByStandby(rpc_controller)) {
+        *rpc_status = kudu::Status::ServiceUnavailable(rpc_status->ToString());
+      }
       return Status::OK();
     }
 
@@ -114,8 +126,9 @@ Status RemoteAdmissionControlClient::AdmitQueryWithRetry(
       TryAdmitQuery(proxy->get(), request.request, req, &admit_rpc_status);
   int32_t num_retries = 0;
   // Only retry AdmitQuery if the rpc layer reported a network error or a timeout,
-  // indicating that the admissiond was unreachable.
-  while (admit_rpc_status.IsNetworkError() || admit_rpc_status.IsTimedOut()) {
+  // indicating that the admissiond was unreachable, or a standby admissiond rejected it.
+  while (admit_rpc_status.IsNetworkError() || admit_rpc_status.IsTimedOut()
+      || admit_rpc_status.IsServiceUnavailable()) {
     int64_t elapsed_s = (MonotonicMillis() - admission_start) / MILLIS_PER_SEC;
     if (elapsed_s > FLAGS_admission_max_retry_time_s) {
       return Status(
@@ -132,9 +145,9 @@ Status RemoteAdmissionControlClient::AdmitQueryWithRetry(
 
     VLOG(3) << "Retrying AdmitQuery rpc for " << request.query_id
             << ". Previous rpc failed with status: " << admit_rpc_status.ToString();
-    // Re-resolve the admissiond address on each retry to handle cases
-    // where the admissiond has restarted with a new IP. After a timeout, also stop
-    // using the connection, whose negotiation may hang.
+    // Re-resolve the admissiond on each retry: it may have restarted with a new IP, or
+    // another one may be active (admissiond HA). After a timeout, also stop using the
+    // connection, whose negotiation may hang.
     if (admit_rpc_status.IsTimedOut()) {
       AdmissionControlService::UseNewConnection(proxy_generation_);
     }
@@ -155,6 +168,8 @@ Status RemoteAdmissionControlClient::SubmitForAdmission(
   ScopedEvent completedEvent(
       query_events, AdmissionControlClient::QUERY_EVENT_COMPLETED_ADMISSION);
 
+  // The query is resubmitted if the active admissiond changes (admissiond HA).
+  int64_t admissiond_generation = ExecEnv::GetInstance()->admissiond_generation();
   std::unique_ptr<AdmissionControlServiceProxy> proxy;
   RETURN_IF_ERROR(AdmissionControlService::GetProxy(&proxy, &proxy_generation_));
   AdmitQueryRequestPB req;
@@ -187,7 +202,8 @@ Status RemoteAdmissionControlClient::SubmitForAdmission(
     string lost_reason;
     if (!rpc_status.ok()) {
       if (!FLAGS_admission_resubmit_on_admissiond_loss
-          || !(rpc_status.IsNetworkError() || rpc_status.IsTimedOut())) {
+          || !(rpc_status.IsNetworkError() || rpc_status.IsTimedOut()
+              || IsRejectedByStandby(rpc_controller2))) {
         KUDU_RETURN_IF_ERROR(rpc_status, "GetQueryStatus rpc failed");
       }
       lost_reason = rpc_status.ToString();
@@ -224,6 +240,12 @@ Status RemoteAdmissionControlClient::SubmitForAdmission(
       }
     }
 
+    if (lost_reason.empty() && FLAGS_admission_resubmit_on_admissiond_loss
+        && ExecEnv::GetInstance()->admissiond_generation() != admissiond_generation) {
+      // Still queued on an admissiond that is no longer the active one.
+      lost_reason = "the active admissiond changed";
+    }
+
     if (!lost_reason.empty()) {
       if (num_resubmits == MAX_ADMISSION_RESUBMITS) {
         {
@@ -240,6 +262,7 @@ Status RemoteAdmissionControlClient::SubmitForAdmission(
       query_events->MarkEvent(QUERY_EVENT_RESUBMITTED);
       // A fresh retry budget: the query may have been queued for longer than
       // --admission_max_retry_time_s already. Does nothing if admission was cancelled.
+      admissiond_generation = ExecEnv::GetInstance()->admissiond_generation();
       Status resubmit_status =
           AdmissionControlService::GetProxy(&proxy, &proxy_generation_);
       if (resubmit_status.ok()) {

@@ -48,6 +48,12 @@ DECLARE_bool(catalogd_ha_failover_on_active_reregistration);
     NAME##_catalogd_registration_ = TCatalogRegistration();   \
   } while (false)
 
+StatestoreCatalogdMgr::StatestoreCatalogdMgr(bool enable_catalogd_ha)
+  : StatestoreCatalogdMgr(enable_catalogd_ha,
+        FLAGS_use_subscriber_id_as_catalogd_priority,
+        FLAGS_catalogd_ha_preemption_wait_period_ms,
+        FLAGS_catalogd_ha_failover_on_active_reregistration) {}
+
 bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
     const SubscriberId& subscriber_id,
     const RegistrationId& registration_id,
@@ -79,7 +85,7 @@ bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
         return true;
       }
       if (subscriber_id == active_catalogd_subscriber_id_
-          && FLAGS_catalogd_ha_failover_on_active_reregistration
+          && failover_on_active_reregistration_
           && !catalogd_registration.force_catalogd_active) {
         // The active catalogd registers again, e.g. after a restart, and its previous
         // registration has been removed. Fail over to the standby catalogd right away
@@ -99,7 +105,7 @@ bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
       DCHECK(num_registered_catalogd_ == 1 && first_catalogd_register_time_ != 0);
       if (!is_active_catalogd_assigned_
           && (MonotonicMillis() - first_catalogd_register_time_
-              >= FLAGS_catalogd_ha_preemption_wait_period_ms)) {
+              >= preemption_wait_period_ms_)) {
         is_active_catalogd_assigned_ = true;
         COPY_CATALOGD_REGISTRATION_FROM_LOCAL_VARIABLES(active);
         LOG(INFO) << active_catalogd_subscriber_id_
@@ -138,11 +144,11 @@ bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
     bool is_waiting_period_expired = false;
     if (first_catalogd_register_time_ == 0) {
       first_catalogd_register_time_ = MonotonicMillis();
-      if (FLAGS_catalogd_ha_preemption_wait_period_ms == 0) {
+      if (preemption_wait_period_ms_ == 0) {
         is_waiting_period_expired = true;
       }
     } else if (MonotonicMillis() - first_catalogd_register_time_ >=
-        FLAGS_catalogd_ha_preemption_wait_period_ms) {
+        preemption_wait_period_ms_) {
       is_waiting_period_expired = true;
     }
     if (catalogd_registration.force_catalogd_active || is_waiting_period_expired) {
@@ -184,7 +190,7 @@ bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
     } else {
       // Compare priority and assign the catalogd with high priority as active catalogd.
       is_active_catalogd_assigned_ = true;
-      bool first_has_high_priority = FLAGS_use_subscriber_id_as_catalogd_priority
+      bool first_has_high_priority = use_subscriber_id_as_priority_
           ? first_catalogd_subscriber_id_ < subscriber_id
           : first_catalogd_registration_id_ < registration_id;
       if (first_has_high_priority) {
@@ -211,7 +217,7 @@ bool StatestoreCatalogdMgr::CheckActiveCatalog() {
   } else if (num_registered_catalogd_ == 0
       || first_catalogd_register_time_ == 0
       || (MonotonicMillis() - first_catalogd_register_time_ <
-          FLAGS_catalogd_ha_preemption_wait_period_ms)) {
+          preemption_wait_period_ms_)) {
     return false;
   }
   // Assign the first registered catalogd as active one.
@@ -244,7 +250,7 @@ bool StatestoreCatalogdMgr::UnregisterCatalogd(
       is_active_catalogd_assigned_ = false;
       // Don't need to wait second one to be registered.
       first_catalogd_register_time_ = MonotonicMillis() -
-          FLAGS_catalogd_ha_preemption_wait_period_ms -1;
+          preemption_wait_period_ms_ -1;
       LOG(INFO) << "No active catalogd available in the cluster";
     }
   } else if (num_registered_catalogd_ > 0) {

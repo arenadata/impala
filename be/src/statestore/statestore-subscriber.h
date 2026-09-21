@@ -135,6 +135,26 @@ class StatestoreSubscriber {
   /// Adds a callback for notification of updating catalogd.
   void AddUpdateCatalogdTopic(const UpdateCatalogdCallback& callback);
 
+  /// UpdateAdmissiondCallback is invoked every time the active admissiond is received
+  /// from the active statestore (admissiond HA): in the registration reply and in the
+  /// UpdateAdmissiond RPC. 'reset_version' is true for registration replies and for the
+  /// first update from a different statestore instance, whose versions start anew.
+  /// 'active_admissiond_version' is -1 if no admissiond has been elected yet; then
+  /// 'admissiond_registration' must not be used.
+  typedef boost::function<void (
+      bool reset_version, int64_t active_admissiond_version,
+      const TAdmissiondRegistration& admissiond_registration)> UpdateAdmissiondCallback;
+
+  /// Adds a callback for notification of updating the active admissiond.
+  void AddUpdateAdmissiondTopic(const UpdateAdmissiondCallback& callback);
+
+  /// Sets the registration info of this admissiond, sent to the statestore on every
+  /// registration. Must be called before Start().
+  void SetAdmissiondRegistration(const TAdmissiondRegistration& registration) {
+    admissiond_registration_ = registration;
+    has_admissiond_registration_ = true;
+  }
+
   /// CompleteRegistrationCallback is invoked when the registration with the statestore
   /// is completed.
   typedef boost::function<void ()>CompleteRegistrationCallback;
@@ -275,6 +295,9 @@ class StatestoreSubscriber {
     /// Adds a callback for notification of updating catalogd.
     void AddUpdateCatalogdTopic(const UpdateCatalogdCallback& callback);
 
+    /// Adds a callback for notification of updating the active admissiond.
+    void AddUpdateAdmissiondTopic(const UpdateAdmissiondCallback& callback);
+
     /// Adds a callback for registration completion.
     void AddCompleteRegistrationTopic(const CompleteRegistrationCallback& callback);
 
@@ -309,6 +332,15 @@ class StatestoreSubscriber {
     void UpdateCatalogd(const TCatalogRegistration& catalogd_registration,
         const RegistrationId& registration_id, int64_t active_catalogd_version,
         bool statestore_failover, bool* update_skipped);
+
+    /// Called when the active admissiond has been updated.
+    void UpdateAdmissiond(const TAdmissiondRegistration& admissiond_registration,
+        const RegistrationId& registration_id, int64_t active_admissiond_version,
+        bool reset_version, bool* update_skipped);
+
+    /// Calls the admissiond callbacks with the active admissiond from the last
+    /// registration reply (version -1 if there was none). 'lock_' must be held.
+    void NotifyAdmissiondFromRegistration();
 
     /// Run in a separate thread. In a loop, check failure_detector_ to see if the
     /// statestore is still sending heartbeat messages. If not, enter 'recovery mode'
@@ -351,6 +383,9 @@ class StatestoreSubscriber {
     /// Check if the subscriber is interesting to receive the notification of catalogd
     /// change.
     bool IsSubscribedCatalogdChange() { return !update_catalogd_callbacks_.empty(); }
+
+    /// Check if the subscriber wants the notification of admissiond change.
+    bool IsSubscribedAdmissiondChange() { return !update_admissiond_callbacks_.empty(); }
 
     /// Returns true if the registration with statestore is completed.
     bool IsRegistered();
@@ -467,6 +502,14 @@ class StatestoreSubscriber {
     /// Callback functions to handle the notification of updating catalogD.
     std::vector<UpdateCatalogdCallback> update_catalogd_callbacks_;
 
+    /// Callback functions to handle the notification of updating the active admissiond.
+    std::vector<UpdateAdmissiondCallback> update_admissiond_callbacks_;
+
+    /// Active admissiond from the last registration reply; version -1 if there was none.
+    /// Protected by 'lock_' like the registration.
+    int64_t registered_admissiond_version_ = -1;
+    TAdmissiondRegistration registered_admissiond_registration_;
+
     /// Callback functions for registration completion.
     std::vector<CompleteRegistrationCallback> complete_registration_callbacks_;
 
@@ -528,6 +571,21 @@ class StatestoreSubscriber {
   void UpdateCatalogd(const TCatalogRegistration& catalogd_registration,
       const RegistrationId& registration_id, const TUniqueId& statestore_id,
       int64_t active_catalogd_version, bool* update_skipped);
+
+  /// Called when the active admissiond has been updated.
+  void UpdateAdmissiond(const TAdmissiondRegistration& admissiond_registration,
+      const RegistrationId& registration_id, const TUniqueId& statestore_id,
+      int64_t active_admissiond_version, bool* update_skipped);
+
+  /// Registration info of this admissiond, if set by SetAdmissiondRegistration().
+  TAdmissiondRegistration admissiond_registration_;
+  bool has_admissiond_registration_ = false;
+
+  /// Statestore instance of the last accepted UpdateAdmissiond RPC. Versions of active
+  /// admissiond are per statestore instance, so the version check is reset when it
+  /// changes.
+  std::mutex admissiond_update_lock_;
+  TUniqueId last_admissiond_statestore_id_;
 
   /// Called when the active statestore has been updated.
   void UpdateStatestoredRole(bool is_active,

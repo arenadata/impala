@@ -206,7 +206,12 @@ class Statestore : public CacheLineAligned {
       RegistrationId* registration_id,
       bool* has_active_catalogd,
       int64_t* active_catalogd_version,
-      TCatalogRegistration* active_catalogd_registration);
+      TCatalogRegistration* active_catalogd_registration,
+      bool subscribe_admissiond_change,
+      const TAdmissiondRegistration* admissiond_registration,
+      bool* has_active_admissiond,
+      int64_t* active_admissiond_version,
+      TAdmissiondRegistration* active_admissiond_registration);
 
   /// Registers webpages for the input webserver. If metrics_only is set then only
   /// '/healthz' page is registered.
@@ -468,7 +473,7 @@ class Statestore : public CacheLineAligned {
         const TNetworkAddress& network_address,
         const std::vector<TTopicRegistration>& subscribed_topics,
         TStatestoreSubscriberType::type subscriber_type,
-        bool subscribe_catalogd_change);
+        bool subscribe_catalogd_change, bool subscribe_admissiond_change);
 
     /// Information about a subscriber's subscription to a specific topic.
     struct TopicSubscription {
@@ -587,6 +592,16 @@ class Statestore : public CacheLineAligned {
       return subscribe_catalogd_change_;
     }
 
+    /// Check if the subscriber is admission daemon.
+    bool IsAdmissiond() const {
+      return subscriber_type_ == TStatestoreSubscriberType::ADMISSIOND;
+    }
+
+    /// Check if the subscriber wants to receive the notification of admissiond change.
+    bool IsSubscribedAdmissiondChange() const {
+      return subscribe_admissiond_change_;
+    }
+
     /// The subscriber updates the catalog information.
     void UpdateCatalogInfo(
         int64_t catalogd_version, const TNetworkAddress& catalogd_address);
@@ -610,6 +625,9 @@ class Statestore : public CacheLineAligned {
 
     /// Indicate if the subscriber subscribe to the notification of updating catalogd.
     bool subscribe_catalogd_change_;
+
+    /// Indicate if the subscriber subscribe to the notification of updating admissiond.
+    bool subscribe_admissiond_change_;
 
     /// Maps of topic subscriptions to current TopicSubscription, with separate maps for
     /// priority and non-priority topics. The state describes whether updates on the
@@ -669,6 +687,13 @@ class Statestore : public CacheLineAligned {
 
   /// Condition variable for sending the notifications of updating catalogd.
   ConditionVariable update_catalod_cv_;
+
+  /// Admissiond manager for admissiond HA. It elects the active admissiond with the
+  /// catalogd election rules. TAdmissiondRegistration is carried in TCatalogRegistration.
+  StatestoreCatalogdMgr admissiond_manager_;
+
+  /// Condition variable for sending the notifications of updating admissiond.
+  ConditionVariable update_admissiond_cv_;
 
   /// Condition variable for sending the notifications of updating role of statestored.
   ConditionVariable update_statestored_cv_;
@@ -743,6 +768,10 @@ class Statestore : public CacheLineAligned {
 
   /// Thread to send notification of updating role of statestored.
   std::unique_ptr<Thread> update_statestored_thread_;
+
+  /// Thread to send notification of updating admissiond. Only started if admissiond HA
+  /// is enabled.
+  std::unique_ptr<Thread> update_admissiond_thread_;
 
   /// Indicates whether the statestore has been initialized and the service is ready.
   std::atomic_bool service_started_{false};
@@ -901,6 +930,9 @@ class Statestore : public CacheLineAligned {
   /// Metric that tracks the address of active catalogd for catalogd HA
   StringProperty* active_catalogd_address_metric_;
 
+  /// Metric that tracks the address of active admissiond for admissiond HA
+  StringProperty* active_admissiond_address_metric_;
+
   /// Metric that tracks if the statestored is active when statestored HA is enabled.
   BooleanProperty* active_status_metric_;
 
@@ -1031,6 +1063,15 @@ class Statestore : public CacheLineAligned {
 
   /// Send notification of updating catalogd to the coordinators.
   void SendUpdateCatalogdNotification(int64_t* last_active_catalogd_version,
+      vector<std::shared_ptr<Subscriber>>& receivers);
+
+  /// Monitors the notification of updating admissiond.
+  [[noreturn]] void MonitorUpdateAdmissiond();
+
+  /// Send notification of updating admissiond to the subscribers which subscribed to
+  /// admissiond changes (coordinators and admissionds). Uses
+  /// update_catalogd_client_cache_.
+  void SendUpdateAdmissiondNotification(int64_t* last_active_admissiond_version,
       vector<std::shared_ptr<Subscriber>>& receivers);
 
   /// Send notification of updating statestored's role to all subscribers.
