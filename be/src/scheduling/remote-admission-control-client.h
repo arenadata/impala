@@ -125,8 +125,11 @@ class RemoteAdmissionControlClient : public AdmissionControlClient {
   /// --admission_max_retry_time_s from the time of the call. '*proxy' is replaced on
   /// each retry, and a timed out rpc also switches to a new connection, see
   /// AdmissionControlService::UseNewConnection().
+  /// '*admissiond_generation' is set to ExecEnv::admissiond_generation() before each
+  /// refetch, so that it belongs to the proxy the query was finally submitted with.
   Status AdmitQueryWithRetry(std::unique_ptr<AdmissionControlServiceProxy>* proxy,
-      const AdmissionController::AdmissionRequest& request, AdmitQueryRequestPB* req);
+      const AdmissionController::AdmissionRequest& request, AdmitQueryRequestPB* req,
+      int64_t* admissiond_generation);
 
   /// Records the admitted 'schedule' in 'admitted_query_'.
   void RecordAdmission(const QuerySchedulePB& schedule);

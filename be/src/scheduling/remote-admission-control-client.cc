@@ -147,7 +147,8 @@ Status RemoteAdmissionControlClient::TryAdmitQuery(AdmissionControlServiceProxy*
 
 Status RemoteAdmissionControlClient::AdmitQueryWithRetry(
     std::unique_ptr<AdmissionControlServiceProxy>* proxy,
-    const AdmissionController::AdmissionRequest& request, AdmitQueryRequestPB* req) {
+    const AdmissionController::AdmissionRequest& request, AdmitQueryRequestPB* req,
+    int64_t* admissiond_generation) {
   int64_t admission_start = MonotonicMillis();
   kudu::Status admit_rpc_status = kudu::Status::OK();
   Status admit_status =
@@ -179,6 +180,7 @@ Status RemoteAdmissionControlClient::AdmitQueryWithRetry(
     if (admit_rpc_status.IsTimedOut()) {
       AdmissionControlService::UseNewConnection(proxy_generation_);
     }
+    *admissiond_generation = ExecEnv::GetInstance()->admissiond_generation();
     RETURN_IF_ERROR(AdmissionControlService::GetProxy(proxy, &proxy_generation_));
     admit_status =
         TryAdmitQuery(proxy->get(), request.request, req, &admit_rpc_status);
@@ -211,7 +213,7 @@ Status RemoteAdmissionControlClient::SubmitForAdmission(
 
   query_events->MarkEvent(QUERY_EVENT_SUBMIT_FOR_ADMISSION);
 
-  RETURN_IF_ERROR(AdmitQueryWithRetry(&proxy, request, &req));
+  RETURN_IF_ERROR(AdmitQueryWithRetry(&proxy, request, &req, &admissiond_generation));
 
   Status admit_status = Status::OK();
   bool is_query_queued = false;
@@ -297,7 +299,8 @@ Status RemoteAdmissionControlClient::SubmitForAdmission(
       Status resubmit_status =
           AdmissionControlService::GetProxy(&proxy, &proxy_generation_);
       if (resubmit_status.ok()) {
-        resubmit_status = AdmitQueryWithRetry(&proxy, request, &req);
+        resubmit_status =
+            AdmitQueryWithRetry(&proxy, request, &req, &admissiond_generation);
       }
       if (!resubmit_status.ok()) {
         lock_guard<mutex> l(lock_);
