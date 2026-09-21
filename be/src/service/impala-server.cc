@@ -3023,6 +3023,8 @@ void ImpalaServer::UnregisterSessionTimeout(int32_t session_timeout) {
     // The new active admissiond needs the full list.
     if (current_generation != admissiond_generation) report_all_admitted = true;
     admissiond_generation = current_generation;
+    // Test hook: a coordinator whose report reaches a newly promoted admissiond late.
+    DebugActionNoFail(FLAGS_debug_actions, "ADMISSION_HEARTBEAT_DELAY");
     std::unique_ptr<AdmissionControlServiceProxy> proxy;
     int64_t proxy_generation;
     Status get_proxy_status =
