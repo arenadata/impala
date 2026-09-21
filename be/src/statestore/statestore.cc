@@ -165,8 +165,8 @@ DECLARE_string(hostname);
 DECLARE_bool(enable_catalogd_ha);
 DECLARE_int64(active_catalogd_designation_monitoring_interval_ms);
 DECLARE_int64(update_catalogd_rpc_resend_interval_ms);
-DECLARE_bool(catalogd_ha_failover_on_active_reregistration);
 DECLARE_bool(enable_admissiond_ha);
+DECLARE_bool(admissiond_ha_failover_on_active_reregistration);
 DECLARE_bool(use_subscriber_id_as_admissiond_priority);
 DECLARE_int64(admissiond_ha_preemption_wait_period_ms);
 DECLARE_string(debug_actions);
@@ -718,7 +718,7 @@ Statestore::Statestore(MetricGroup* metrics)
     admissiond_manager_(FLAGS_enable_admissiond_ha,
         FLAGS_use_subscriber_id_as_admissiond_priority,
         FLAGS_admissiond_ha_preemption_wait_period_ms,
-        FLAGS_catalogd_ha_failover_on_active_reregistration),
+        FLAGS_admissiond_ha_failover_on_active_reregistration),
     subscriber_topic_update_threadpool_("statestore-update",
         "subscriber-update-worker",
         FLAGS_statestore_num_update_threads,
@@ -1086,11 +1086,23 @@ Status Statestore::RegisterSubscriber(const SubscriberId& subscriber_id,
       update_catalod_cv_.NotifyAll();
     }
     if (is_registering_admissiond && FLAGS_enable_admissiond_ha
-        && admissiond_manager_.RegisterCatalogd(is_reregistering, subscriber_id,
-            *registration_id, ToCatalogRegistration(*admissiond_registration))) {
-      LOG(INFO) << "Active admissiond role is designated to "
-                << admissiond_manager_.GetActiveCatalogdSubscriberId();
-      update_admissiond_cv_.NotifyAll();
+        && subscribe_admissiond_change) {
+      TCatalogRegistration registration =
+          ToCatalogRegistration(*admissiond_registration);
+      if (admissiond_registration->__isset.is_active
+          && admissiond_registration->is_active) {
+        // The admissiond is active already, e.g. this statestore restarted: keep it
+        // active instead of electing again, unless another one was designated meanwhile.
+        if (admissiond_manager_.MayKeepActiveRole(subscriber_id)) {
+          registration.__set_force_catalogd_active(true);
+        }
+      }
+      if (admissiond_manager_.RegisterCatalogd(
+              is_reregistering, subscriber_id, *registration_id, registration)) {
+        LOG(INFO) << "Active admissiond role is designated to "
+                  << admissiond_manager_.GetActiveCatalogdSubscriberId();
+        update_admissiond_cv_.NotifyAll();
+      }
     }
 
     shared_ptr<Subscriber> current_registration(new Subscriber(

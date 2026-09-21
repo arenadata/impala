@@ -149,9 +149,12 @@ class StatestoreSubscriber {
   void AddUpdateAdmissiondTopic(const UpdateAdmissiondCallback& callback);
 
   /// Sets the registration info of this admissiond, sent to the statestore on every
-  /// registration. Must be called before Start().
-  void SetAdmissiondRegistration(const TAdmissiondRegistration& registration) {
+  /// registration, with 'is_active' telling whether it is the active admissiond at that
+  /// time. Must be called before Start().
+  void SetAdmissiondRegistration(const TAdmissiondRegistration& registration,
+      const std::function<bool()>& is_active) {
     admissiond_registration_ = registration;
+    admissiond_is_active_ = is_active;
     has_admissiond_registration_ = true;
   }
 
@@ -579,6 +582,7 @@ class StatestoreSubscriber {
 
   /// Registration info of this admissiond, if set by SetAdmissiondRegistration().
   TAdmissiondRegistration admissiond_registration_;
+  std::function<bool()> admissiond_is_active_;
   bool has_admissiond_registration_ = false;
 
   /// Statestore instance of the last accepted UpdateAdmissiond RPC. Versions of active

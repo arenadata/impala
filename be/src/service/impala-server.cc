@@ -3010,8 +3010,19 @@ void ImpalaServer::UnregisterSessionTimeout(int32_t session_timeout) {
   // AdmissionHeartbeatRequestPB.all_admitted_queries. The first one does, so that the
   // first successful heartbeat always carries the full list.
   bool report_all_admitted = true;
+  int64_t admissiond_generation = exec_env_->admissiond_generation();
   while (true) {
-    SleepForMs(FLAGS_admission_heartbeat_frequency_ms);
+    // Report right away to a newly designated active admissiond (admissiond HA): it
+    // admits only after every coordinator has reported its queries.
+    for (int64_t slept = 0; slept < FLAGS_admission_heartbeat_frequency_ms
+         && admissiond_generation == exec_env_->admissiond_generation();
+         slept += 50) {
+      SleepForMs(50);
+    }
+    int64_t current_generation = exec_env_->admissiond_generation();
+    // The new active admissiond needs the full list.
+    if (current_generation != admissiond_generation) report_all_admitted = true;
+    admissiond_generation = current_generation;
     std::unique_ptr<AdmissionControlServiceProxy> proxy;
     int64_t proxy_generation;
     Status get_proxy_status =

@@ -110,6 +110,13 @@ class RemoteAdmissionControlClient : public AdmissionControlClient {
   /// Checks if admission has already been cancelled, and if not sends the AdmitQuery rpc.
   /// Sets 'rpc_status' to the return Status from the rpc layer, and returns OK if the
   /// query was successfully submitted for admission.
+  /// Sends a release or cancel rpc to the active admissiond with
+  /// RpcMgr::DoRpcWithRetry(). If a standby admissiond rejected it or the active
+  /// admissiond changed meanwhile (admissiond HA), resends it to the active one.
+  template <typename ProxyMethod, typename Request, typename Response>
+  Status DoRpcOnActiveAdmissiond(const ProxyMethod& rpc_call, const Request& request,
+      Response* response, const char* error_msg, const char* debug_action);
+
   Status TryAdmitQuery(AdmissionControlServiceProxy* proxy,
       const TQueryExecRequest& request, AdmitQueryRequestPB* req,
       kudu::Status* rpc_status);

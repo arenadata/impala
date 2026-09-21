@@ -230,6 +230,57 @@ TEST_F(StatestoreCatalogdMgrTest, AdmissiondFailoverWithoutFailback) {
   EXPECT_EQ("10.0.0.3", mgr.GetStandbyCatalogRegistration().address.hostname);
 }
 
+// A restarted statestore designates the admissiond that reports itself active right
+// away and keeps it when the other one registers; the reporting admissiond is
+// registered with force_catalogd_active as the statestore does.
+TEST_F(StatestoreCatalogdMgrTest, AdmissiondActiveClaimAfterStatestoreRestart) {
+  StatestoreCatalogdMgr mgr(true, true, 100000, true);
+  ASSERT_TRUE(mgr.MayKeepActiveRole(ADMISSIOND_B));
+  EXPECT_TRUE(mgr.RegisterCatalogd(false, ADMISSIOND_B, NewRegistrationId(1),
+      Registration("10.0.0.2", /* force */ true)));
+  EXPECT_TRUE(mgr.IsActiveCatalogd(ADMISSIOND_B));
+  // ADMISSIOND_A has the higher priority but does not report itself active.
+  EXPECT_FALSE(mgr.RegisterCatalogd(
+      false, ADMISSIOND_A, NewRegistrationId(2), Registration("10.0.0.1")));
+  EXPECT_TRUE(mgr.IsActiveCatalogd(ADMISSIOND_B));
+}
+
+// The active admissiond registers again while still active (its statestore connection
+// broke for a moment): it keeps the role. After a restart it is not active any more and
+// the standby takes over.
+TEST_F(StatestoreCatalogdMgrTest, AdmissiondActiveReregistration) {
+  StatestoreCatalogdMgr mgr(true, true, 100000, true);
+  EXPECT_FALSE(mgr.RegisterCatalogd(
+      false, ADMISSIOND_A, NewRegistrationId(1), Registration("10.0.0.1")));
+  EXPECT_TRUE(mgr.RegisterCatalogd(
+      false, ADMISSIOND_B, NewRegistrationId(2), Registration("10.0.0.2")));
+  ASSERT_TRUE(mgr.IsActiveCatalogd(ADMISSIOND_A));
+  ASSERT_TRUE(mgr.MayKeepActiveRole(ADMISSIOND_A));
+  EXPECT_FALSE(mgr.RegisterCatalogd(true, ADMISSIOND_A, NewRegistrationId(3),
+      Registration("10.0.0.1", /* force */ true)));
+  EXPECT_TRUE(mgr.IsActiveCatalogd(ADMISSIOND_A));
+
+  EXPECT_TRUE(mgr.RegisterCatalogd(
+      true, ADMISSIOND_A, NewRegistrationId(4), Registration("10.0.0.1")));
+  EXPECT_TRUE(mgr.IsActiveCatalogd(ADMISSIOND_B));
+}
+
+// An admissiond that still believes it is active after it was evicted (e.g. it lost the
+// statestore) does not take the role back from the admissiond designated meanwhile.
+TEST_F(StatestoreCatalogdMgrTest, AdmissiondStaleActiveClaimIgnored) {
+  StatestoreCatalogdMgr mgr(true, true, 100000, true);
+  EXPECT_FALSE(mgr.RegisterCatalogd(
+      false, ADMISSIOND_A, NewRegistrationId(1), Registration("10.0.0.1")));
+  EXPECT_TRUE(mgr.RegisterCatalogd(
+      false, ADMISSIOND_B, NewRegistrationId(2), Registration("10.0.0.2")));
+  EXPECT_TRUE(mgr.UnregisterCatalogd(ADMISSIOND_A));
+  ASSERT_TRUE(mgr.IsActiveCatalogd(ADMISSIOND_B));
+  EXPECT_FALSE(mgr.MayKeepActiveRole(ADMISSIOND_A));
+  EXPECT_FALSE(mgr.RegisterCatalogd(
+      false, ADMISSIOND_A, NewRegistrationId(3), Registration("10.0.0.1")));
+  EXPECT_TRUE(mgr.IsActiveCatalogd(ADMISSIOND_B));
+}
+
 } // namespace impala
 
 IMPALA_TEST_MAIN();

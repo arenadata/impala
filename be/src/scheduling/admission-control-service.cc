@@ -104,8 +104,8 @@ AdmissionControlService::AdmissionControlService(MetricGroup* metric_group)
         AdmissiondEnv::GetInstance()->rpc_mgr()->result_tracker()),
     is_active_(!FLAGS_enable_admissiond_ha),
     active_admissiond_version_checker_(new ActiveCatalogdVersionChecker()) {
-  active_status_metric_ =
-      metric_group->AddProperty("admission-control-service.active-status", IsActive());
+  active_metric_ =
+      metric_group->AddGauge("admission-control-service.active", IsActive() ? 1 : 0);
   MemTracker* process_mem_tracker = AdmissiondEnv::GetInstance()->process_mem_tracker();
   bool is_percent; // not used
   int64_t bytes_limit =
@@ -221,10 +221,12 @@ void AdmissionControlService::WaitForAdoptionGracePeriod() {
   }
   // A coordinator reports within one heartbeat rpc timeout plus two heartbeat periods:
   // a heartbeat in flight may time out, or carry no admitted queries until a response
-  // asks for them, and the full report follows one period later.
+  // asks for them, and the full report follows one period later. With admissiond HA,
+  // cover a heartbeat that is stuck on the previous admissiond plus the next one, so
+  // that no coordinator is skipped because of a lost admissiond.
   int64_t grace_period_ms = max<int64_t>(FLAGS_admission_adoption_grace_period_ms,
-      FLAGS_admission_heartbeat_rpc_timeout_ms
-          + 2 * FLAGS_admission_heartbeat_frequency_ms);
+      2 * (FLAGS_admission_heartbeat_rpc_timeout_ms
+          + FLAGS_admission_heartbeat_frequency_ms));
   int64_t start = MonotonicMillis();
   while (!shutdown_.load()) {
     int64_t first = first_contact_ms_.load();
@@ -680,7 +682,11 @@ void AdmissionControlService::AdmitFromThreadPool(const UniqueIdPB& query_id) {
   {
     lock_guard<mutex> l(admission_state->lock);
     // Demoted meanwhile: the coordinator gets rejected and resubmits to the active one.
-    if (!IsActive()) return;
+    // Drop the state so that a later resubmission of the query is not ignored.
+    if (!IsActive()) {
+      discard_result(admission_state_map_.Delete(query_id));
+      return;
+    }
     bool queued;
     AdmissionController::AdmissionRequest request = {admission_state->query_id,
         admission_state->coord_id, admission_state->query_exec_request,
@@ -709,8 +715,8 @@ bool AdmissionControlService::RejectIfNotActive(RpcContext* rpc_context) {
   if (LIKELY(IsActive())) return false;
   mem_tracker_->Release(rpc_context->GetTransferSize());
   rpc_context->RespondRpcFailure(kudu::rpc::ErrorStatusPB::ERROR_UNAVAILABLE,
-      kudu::Status::ServiceUnavailable(Substitute("admissiond $0:$1 is not the active "
-          "admissiond", FLAGS_hostname, FLAGS_admission_service_port)));
+      kudu::Status::ServiceUnavailable(Substitute("admissiond $0:$1 $2", FLAGS_hostname,
+          FLAGS_admission_service_port, NOT_ACTIVE_MSG)));
   return true;
 }
 
@@ -741,16 +747,18 @@ void AdmissionControlService::Promote() {
     lock_guard<mutex> l(heartbeat_lock_);
     for (auto& entry : coord_id_to_heartbeat_) entry.second.reported = false;
   }
-  first_contact_ms_.store(0);
+  // The grace period starts with the promotion: coordinators learn about it at the same
+  // time and report within a heartbeat.
+  first_contact_ms_.store(MonotonicMillis());
   adoption_grace_over_.store(false);
   is_active_.store(true);
-  active_status_metric_->SetValue(true);
+  active_metric_->SetValue(1);
   LOG(INFO) << "This admissiond is now the active admissiond.";
 }
 
 void AdmissionControlService::Demote() {
   is_active_.store(false);
-  active_status_metric_->SetValue(false);
+  active_metric_->SetValue(0);
   AdmissionController* admission_controller =
       AdmissiondEnv::GetInstance()->admission_controller();
   vector<shared_ptr<AdmissionState>> states;

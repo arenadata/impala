@@ -89,6 +89,11 @@ class StatestoreCatalogdMgr {
   /// Check if the subscriber with given subscriber_id is active catalogd.
   bool IsActiveCatalogd(const SubscriberId&subscriber_id);
 
+  /// Returns true if a registrant that is already active (admissiond HA: it reports so
+  /// when it registers again) may keep that role: no active one is designated, or it is
+  /// the designated one. The caller then registers it with force_catalogd_active.
+  bool MayKeepActiveRole(const SubscriberId& subscriber_id);
+
   /// Return the mutex lock.
   std::mutex* GetLock() { return &catalog_mgr_lock_; }
 

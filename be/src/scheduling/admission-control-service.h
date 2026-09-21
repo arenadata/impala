@@ -93,6 +93,9 @@ class AdmissionControlService : public AdmissionControlServiceIf,
   /// related RPCs.
   bool IsHealthy() { return service_started_.load(); }
 
+  /// Part of the error of an rpc rejected by a standby admissiond.
+  static constexpr const char* NOT_ACTIVE_MSG = "is not the active admissiond";
+
   /// Returns true if this admissiond admits queries: always without admissiond HA,
   /// otherwise only while the statestore designates it as the active admissiond.
   bool IsActive() const { return is_active_.load(); }
@@ -252,8 +255,8 @@ class AdmissionControlService : public AdmissionControlServiceIf,
   /// True while this admissiond admits queries, see IsActive().
   std::atomic_bool is_active_;
 
-  /// Metric for 'is_active_'.
-  BooleanProperty* active_status_metric_ = nullptr;
+  /// Metric for 'is_active_' (1 or 0), read by the autoscaler.
+  IntGauge* active_metric_ = nullptr;
 
   /// Protects 'active_admissiond_version_checker_' and serializes role changes.
   std::mutex role_lock_;

@@ -394,7 +394,9 @@ Status StatestoreSubscriber::SetRegisterRequest(
   request->__set_subscriber_id(subscriber_id_);
   request->__set_subscriber_type(subscriber_type_);
   if (has_admissiond_registration_) {
-    request->__set_admissiond_registration(admissiond_registration_);
+    TAdmissiondRegistration registration = admissiond_registration_;
+    registration.__set_is_active(admissiond_is_active_());
+    request->__set_admissiond_registration(registration);
   }
   return Status::OK();
 }
@@ -470,10 +472,15 @@ void StatestoreSubscriber::UpdateAdmissiond(
   {
     lock_guard<mutex> l(admissiond_update_lock_);
     reset_version = last_admissiond_statestore_id_ != statestore_id;
-    last_admissiond_statestore_id_ = statestore_id;
   }
   active_statestore->UpdateAdmissiond(admissiond_registration, registration_id,
       active_admissiond_version, reset_version, update_skipped);
+  // Only a processed update moves the version check to this statestore; a skipped one is
+  // resent and must reset it again.
+  if (!*update_skipped) {
+    lock_guard<mutex> l(admissiond_update_lock_);
+    last_admissiond_statestore_id_ = statestore_id;
+  }
 }
 
 void StatestoreSubscriber::UpdateStatestoredRole(bool is_active,
@@ -1030,6 +1037,14 @@ void StatestoreSubscriber::StatestoreStub::UpdateCatalogd(
 }
 
 void StatestoreSubscriber::StatestoreStub::NotifyAdmissiondFromRegistration() {
+  if (registered_admissiond_version_ >= 0) {
+    // The reply came from the active statestore; its later updates continue its versions.
+    RegistrationId registration_id;
+    TUniqueId statestore_id;
+    GetRegistrationIdAndStatestoreId(&registration_id, &statestore_id);
+    lock_guard<mutex> l(subscriber_->admissiond_update_lock_);
+    subscriber_->last_admissiond_statestore_id_ = statestore_id;
+  }
   for (const UpdateAdmissiondCallback& callback : update_admissiond_callbacks_) {
     callback(/* reset_version */true, registered_admissiond_version_,
         registered_admissiond_registration_);

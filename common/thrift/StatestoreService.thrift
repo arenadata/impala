@@ -238,6 +238,11 @@ struct TAdmissiondRegistration {
 
   // The registration time of the admissiond.
   4: optional i64 registration_time;
+
+  // True if the admissiond is the active one when it registers, e.g. again after a
+  // statestore restart or failover. A statestore without an active admissiond designates
+  // it right away, and an active admissiond that registers again keeps its role.
+  5: optional bool is_active;
 }
 
 struct TRegisterSubscriberRequest {

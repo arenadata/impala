@@ -66,6 +66,34 @@ RemoteAdmissionControlClient::RemoteAdmissionControlClient(const TQueryCtx& quer
   TUniqueIdToUniqueIdPB(query_ctx.query_id, &query_id_);
 }
 
+template <typename ProxyMethod, typename Request, typename Response>
+Status RemoteAdmissionControlClient::DoRpcOnActiveAdmissiond(const ProxyMethod& rpc_call,
+    const Request& request, Response* response, const char* error_msg,
+    const char* debug_action) {
+  Status rpc_status;
+  for (int attempt = 0; attempt < RPC_NUM_RETRIES; ++attempt) {
+    int64_t generation = ExecEnv::GetInstance()->admissiond_generation();
+    std::unique_ptr<AdmissionControlServiceProxy> proxy;
+    RETURN_IF_ERROR(AdmissionControlService::GetProxy(&proxy));
+    rpc_status = RpcMgr::DoRpcWithRetry(proxy, rpc_call, request, response, query_ctx_,
+        error_msg, RPC_NUM_RETRIES, RPC_TIMEOUT_MS, RPC_BACKOFF_TIME_MS, debug_action);
+    if (rpc_status.ok()) return rpc_status;
+    // Retry only if a standby admissiond rejected it or the active one changed meanwhile
+    // (admissiond HA); wait for the statestore to name the active one.
+    bool rejected = rpc_status.GetDetail().find(AdmissionControlService::NOT_ACTIVE_MSG)
+        != string::npos;
+    if (!rejected && generation == ExecEnv::GetInstance()->admissiond_generation()) {
+      return rpc_status;
+    }
+    for (int64_t waited = 0; waited < RPC_BACKOFF_TIME_MS
+         && generation == ExecEnv::GetInstance()->admissiond_generation();
+         waited += 100) {
+      SleepForMs(100);
+    }
+  }
+  return rpc_status;
+}
+
 Status RemoteAdmissionControlClient::TryAdmitQuery(AdmissionControlServiceProxy* proxy,
     const TQueryExecRequest& request, AdmitQueryRequestPB* req,
     kudu::Status* rpc_status) {
@@ -194,13 +222,22 @@ Status RemoteAdmissionControlClient::SubmitForAdmission(
     GetQueryStatusRequestPB get_status_req;
     GetQueryStatusResponsePB get_status_resp;
     *get_status_req.mutable_query_id() = request.query_id;
-    kudu::Status rpc_status =
-        proxy->GetQueryStatus(get_status_req, &get_status_resp, &rpc_controller2);
+    // Still queued on an admissiond that is no longer the active one (admissiond HA):
+    // resubmit without asking it again.
+    bool switched = FLAGS_admission_resubmit_on_admissiond_loss
+        && ExecEnv::GetInstance()->admissiond_generation() != admissiond_generation;
+    kudu::Status rpc_status;
+    if (!switched) {
+      rpc_status =
+          proxy->GetQueryStatus(get_status_req, &get_status_resp, &rpc_controller2);
+    }
 
     // The admissiond that queued the query is gone (unreachable), or it restarted or
     // another admissiond replica answers and does not know the query.
     string lost_reason;
-    if (!rpc_status.ok()) {
+    if (switched) {
+      lost_reason = "the active admissiond changed";
+    } else if (!rpc_status.ok()) {
       if (!FLAGS_admission_resubmit_on_admissiond_loss
           || !(rpc_status.IsNetworkError() || rpc_status.IsTimedOut()
               || IsRejectedByStandby(rpc_controller2))) {
@@ -238,12 +275,6 @@ Status RemoteAdmissionControlClient::SubmitForAdmission(
         }
         lost_reason = admit_status.GetDetail();
       }
-    }
-
-    if (lost_reason.empty() && FLAGS_admission_resubmit_on_admissiond_loss
-        && ExecEnv::GetInstance()->admissiond_generation() != admissiond_generation) {
-      // Still queued on an admissiond that is no longer the active one.
-      lost_reason = "the active admissiond changed";
     }
 
     if (!lost_reason.empty()) {
@@ -341,22 +372,12 @@ void RemoteAdmissionControlClient::ReleaseQuery(int64_t peak_mem_consumption) {
     admitted_query_.set_released(true);
     admitted_query_.clear_unreleased_backends();
   }
-  std::unique_ptr<AdmissionControlServiceProxy> proxy;
-  Status get_proxy_status = AdmissionControlService::GetProxy(&proxy);
-  if (!get_proxy_status.ok()) {
-    LOG(ERROR) << "ReleaseQuery for " << query_id_
-               << " failed to get proxy: " << get_proxy_status;
-    return;
-  }
-
   ReleaseQueryRequestPB req;
   ReleaseQueryResponsePB resp;
   *req.mutable_query_id() = query_id_;
   req.set_peak_mem_consumption(peak_mem_consumption);
-  Status rpc_status =
-      RpcMgr::DoRpcWithRetry(proxy, &AdmissionControlServiceProxy::ReleaseQuery, req,
-          &resp, query_ctx_, "ReleaseQuery() RPC failed", RPC_NUM_RETRIES, RPC_TIMEOUT_MS,
-          RPC_BACKOFF_TIME_MS, "REMOTE_AC_RELEASE_QUERY");
+  Status rpc_status = DoRpcOnActiveAdmissiond(&AdmissionControlServiceProxy::ReleaseQuery,
+      req, &resp, "ReleaseQuery() RPC failed", "REMOTE_AC_RELEASE_QUERY");
 
   // Failure of this rpc is not considered a query failure, so we just log it.
   // TODO: we need to be sure that the resources do in fact get cleaned up in situation
@@ -385,14 +406,6 @@ void RemoteAdmissionControlClient::ReleaseQueryBackends(
       }
     }
   }
-  std::unique_ptr<AdmissionControlServiceProxy> proxy;
-  Status get_proxy_status = AdmissionControlService::GetProxy(&proxy);
-  if (!get_proxy_status.ok()) {
-    LOG(ERROR) << "ReleaseQueryBackends for " << query_id_
-               << " failed to get proxy: " << get_proxy_status;
-    return;
-  }
-
   ReleaseQueryBackendsRequestPB req;
   ReleaseQueryBackendsResponsePB resp;
   *req.mutable_query_id() = query_id_;
@@ -400,9 +413,8 @@ void RemoteAdmissionControlClient::ReleaseQueryBackends(
     *req.add_host_addr() = addr;
   }
   Status rpc_status =
-      RpcMgr::DoRpcWithRetry(proxy, &AdmissionControlServiceProxy::ReleaseQueryBackends,
-          req, &resp, query_ctx_, "ReleaseQueryBackends() RPC failed", RPC_NUM_RETRIES,
-          RPC_TIMEOUT_MS, RPC_BACKOFF_TIME_MS, "REMOTE_AC_RELEASE_BACKENDS");
+      DoRpcOnActiveAdmissiond(&AdmissionControlServiceProxy::ReleaseQueryBackends, req,
+          &resp, "ReleaseQueryBackends() RPC failed", "REMOTE_AC_RELEASE_BACKENDS");
 
   // Failure of this rpc is not considered a query failure, so we just log it.
   // TODO: we need to be sure that the resources do in fact get cleaned up in situation
@@ -428,20 +440,12 @@ void RemoteAdmissionControlClient::CancelAdmission() {
     }
   }
 
-  std::unique_ptr<AdmissionControlServiceProxy> proxy;
-  Status get_proxy_status = AdmissionControlService::GetProxy(&proxy);
-  if (!get_proxy_status.ok()) {
-    LOG(WARNING) << "CancelAdmission for " << query_id_
-                 << " failed to get proxy: " << get_proxy_status;
-  }
-
   CancelAdmissionRequestPB req;
   CancelAdmissionResponsePB resp;
   *req.mutable_query_id() = query_id_;
   Status rpc_status =
-      RpcMgr::DoRpcWithRetry(proxy, &AdmissionControlServiceProxy::CancelAdmission, req,
-          &resp, query_ctx_, "CancelAdmission() RPC failed", RPC_NUM_RETRIES,
-          RPC_TIMEOUT_MS, RPC_BACKOFF_TIME_MS, "REMOTE_AC_CANCEL_ADMISSION");
+      DoRpcOnActiveAdmissiond(&AdmissionControlServiceProxy::CancelAdmission, req, &resp,
+          "CancelAdmission() RPC failed", "REMOTE_AC_CANCEL_ADMISSION");
 
   // Failure of this rpc is not considered a query failure, so we just log it.
   if (!rpc_status.ok()) {

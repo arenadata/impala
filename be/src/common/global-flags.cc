@@ -438,6 +438,10 @@ DEFINE_bool(use_subscriber_id_as_admissiond_priority, true, "Subscriber-id is us
 DEFINE_int64(admissiond_ha_preemption_wait_period_ms, 10000, "(Advanced) The time after "
     "which statestore designates the first registered admissiond as active if statestore "
     "does not receive registration request from the second admissiond.");
+DEFINE_bool(admissiond_ha_failover_on_active_reregistration, true, "(Advanced) If "
+    "true, statestore fails over to the standby admissiond when the active admissiond "
+    "registers again without being active any more, e.g. after a restart. An active "
+    "admissiond that registers again while still active keeps its role.");
 
 DEFINE_int32(iceberg_reload_new_files_threshold, 100, "(Advanced) If during a table "
     "refresh the number of new files are greater than this, catalogd will use a "

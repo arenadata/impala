@@ -288,6 +288,11 @@ bool StatestoreCatalogdMgr::IsActiveCatalogd(const SubscriberId& subscriber_id) 
   return active_catalogd_subscriber_id_ == subscriber_id;
 }
 
+bool StatestoreCatalogdMgr::MayKeepActiveRole(const SubscriberId& subscriber_id) {
+  std::lock_guard<std::mutex> l(catalog_mgr_lock_);
+  return !is_active_catalogd_assigned_ || active_catalogd_subscriber_id_ == subscriber_id;
+}
+
 int64_t StatestoreCatalogdMgr::GetLastUpdateCatalogTime() {
   std::lock_guard<std::mutex> l(catalog_mgr_lock_);
   return last_update_catalogd_time_;
