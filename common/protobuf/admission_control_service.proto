@@ -206,6 +206,23 @@ message QuerySchedulePB {
 
   // Source of coord_backend_mem_to_admit.
   optional MemLimitSourcePB coord_backend_mem_to_admit_source = 12;
+
+  // The following are set by the admission controller when the query is admitted. The
+  // coordinator reports them back in AdmittedQueryPB so that a restarted admissiond can
+  // re-register the query as running.
+
+  // The request pool the query was admitted to.
+  optional string request_pool = 13;
+
+  // The executor group the query was scheduled on.
+  optional string executor_group = 14;
+
+  // True if the query was admitted as a trivial query.
+  optional bool is_trivial = 15;
+
+  // The effective user the admission controller accounted the query to. Only used for
+  // user quotas.
+  optional string admission_user = 16;
 }
 
 message AdmitQueryRequestPB {
@@ -281,6 +298,31 @@ message CancelAdmissionResponsePB {
   optional StatusPB status = 1;
 }
 
+// Resources held by an admitted query on one backend.
+message BackendAllocationPB {
+  optional NetworkAddressPB address = 1;
+  optional int32 slots_to_use = 2;
+  optional int64 mem_to_admit = 3;
+}
+
+// An admitted query as seen by its coordinator. Sent in AdmissionHeartbeatRequestPB so
+// that an admissiond that lost its state (e.g. after a restart) can re-register the
+// query as running ("adopt" it) and account for its resources.
+message AdmittedQueryPB {
+  optional UniqueIdPB query_id = 1;
+  optional string request_pool = 2;
+  optional string executor_group = 3;
+  optional bool is_trivial = 4;
+  optional string admission_user = 5;
+
+  // True once the coordinator has sent ReleaseQuery. Kept so that an adoption based on an
+  // older heartbeat is undone by the next one.
+  optional bool released = 6;
+
+  // Backends not released yet (ReleaseQueryBackends not sent for them).
+  repeated BackendAllocationPB unreleased_backends = 7;
+}
+
 message AdmissionHeartbeatRequestPB {
   // The backend id for the coordinator sending this heartbeat.
   optional UniqueIdPB host_id = 1;
@@ -290,10 +332,25 @@ message AdmissionHeartbeatRequestPB {
 
   // A list of all queries registered at this coordinator.
   repeated UniqueIdPB query_ids = 3;
+
+  // Queries admitted through the admission service that are still registered at this
+  // coordinator. A subset of 'query_ids'. Released queries are always included, with
+  // only 'query_id' and 'released' set. The others are included only if
+  // 'all_admitted_queries' is true.
+  repeated AdmittedQueryPB admitted_queries = 4;
+
+  // True if 'admitted_queries' includes every admitted query that has not been released,
+  // with its unreleased backends. Sent when the last heartbeat response asked for it
+  // ('report_admitted_queries'), or after a failed heartbeat.
+  optional bool all_admitted_queries = 5;
 }
 
 message AdmissionHeartbeatResponsePB {
   optional StatusPB status = 1;
+
+  // True if the admission service has not got this coordinator's admitted queries yet,
+  // e.g. after it restarted. The next heartbeat then sets 'all_admitted_queries'.
+  optional bool report_admitted_queries = 2;
 }
 
 service AdmissionControlService {

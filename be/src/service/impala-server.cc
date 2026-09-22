@@ -66,6 +66,7 @@
 #include "runtime/query-driver.h"
 #include "runtime/tmp-file-mgr.h"
 #include "runtime/io/disk-io-mgr.h"
+#include "scheduling/admission-control-client.h"
 #include "scheduling/admission-control-service.h"
 #include "scheduling/admission-controller.h"
 #include "service/cancellation-work.h"
@@ -375,6 +376,8 @@ DEFINE_int32(admission_heartbeat_frequency_ms, 1000,
     "(Advanced) The time in milliseconds to wait between sending heartbeats to the "
     "admission service, if enabled. Heartbeats are used to ensure resources are properly "
     "accounted for even if rpcs to the admission service occasionally fail.");
+DEFINE_int32(admission_heartbeat_rpc_timeout_ms, 3000,
+    "(Advanced) Timeout in milliseconds for the heartbeat rpc to the admission service.");
 
 DEFINE_bool(auto_check_compaction, false,
     "When true, compaction checking will be conducted for each query in local catalog "
@@ -3003,10 +3006,16 @@ void ImpalaServer::UnregisterSessionTimeout(int32_t session_timeout) {
 }
 
 [[noreturn]] void ImpalaServer::AdmissionHeartbeatThread() {
+  // Whether the next heartbeat reports all admitted queries, see
+  // AdmissionHeartbeatRequestPB.all_admitted_queries. The first one does, so that the
+  // first successful heartbeat always carries the full list.
+  bool report_all_admitted = true;
   while (true) {
     SleepForMs(FLAGS_admission_heartbeat_frequency_ms);
     std::unique_ptr<AdmissionControlServiceProxy> proxy;
-    Status get_proxy_status = AdmissionControlService::GetProxy(&proxy);
+    int64_t proxy_generation;
+    Status get_proxy_status =
+        AdmissionControlService::GetProxy(&proxy, &proxy_generation);
     if (!get_proxy_status.ok()) {
       LOG(ERROR) << "Admission heartbeat thread was unable to get an "
                     "AdmissionControlService proxy:"
@@ -3018,19 +3027,40 @@ void ImpalaServer::UnregisterSessionTimeout(int32_t session_timeout) {
     AdmissionHeartbeatResponsePB response;
     *request.mutable_host_id() = exec_env_->backend_id();
     request.set_version(++admission_heartbeat_version_);
+    request.set_all_admitted_queries(report_all_admitted);
     query_driver_map_.DoFuncForAllEntries(
         [&](const std::shared_ptr<QueryDriver>& query_driver) {
           ClientRequestState* request_state = query_driver->GetActiveClientRequestState();
           TUniqueIdToUniqueIdPB(request_state->query_id(), request.add_query_ids());
+          // Report admitted queries so that an admissiond that lost its state can
+          // re-register them as running.
+          AdmissionControlClient* admission_client =
+              request_state->admission_control_client();
+          AdmittedQueryPB admitted_query;
+          if (admission_client != nullptr
+              && admission_client->GetAdmittedQuery(
+                  report_all_admitted, &admitted_query)) {
+            request.add_admitted_queries()->Swap(&admitted_query);
+          }
         });
 
     kudu::rpc::RpcController rpc_controller;
+    rpc_controller.set_timeout(
+        kudu::MonoDelta::FromMilliseconds(FLAGS_admission_heartbeat_rpc_timeout_ms));
     kudu::Status rpc_status =
         proxy->AdmissionHeartbeat(request, &response, &rpc_controller);
     if (!rpc_status.ok()) {
       LOG(ERROR) << "Admission heartbeat rpc failed: " << rpc_status.ToString();
+      // Do not wait on a connection whose negotiation hangs; the next heartbeat opens a
+      // new one.
+      if (rpc_status.IsTimedOut()) {
+        AdmissionControlService::UseNewConnection(proxy_generation);
+      }
+      // The admissiond may have restarted; report everything to the next one.
+      report_all_admitted = true;
       continue;
     }
+    report_all_admitted = response.report_admitted_queries();
     Status heartbeat_status(response.status());
     if (!heartbeat_status.ok()) {
       LOG(ERROR) << "Admission heartbeat failed: " << heartbeat_status;

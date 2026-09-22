@@ -2082,6 +2082,48 @@ class TestAdmissionControllerWithACService(TestAdmissionController):
 
   @SkipIfNotHdfsMinicluster.tuned_for_minicluster
   @pytest.mark.execute_serially
+  @CustomClusterTestSuite.with_args(impalad_args="--default_pool_max_requests=1")
+  def test_admissiond_restart_recovers_state(self):
+    """Tests that an admissiond restart keeps admission state: the running query is
+    re-registered from its coordinator's heartbeats, so the pool limit still holds, and
+    the queued query is resubmitted instead of failing. Its later release works."""
+    # Query designed to run for a few minutes.
+    long_query = "select count(*) from functional.alltypes where int_col = sleep(10000)"
+    short_query = "select 1"
+    # Queue the short query instead of admitting it as a trivial query.
+    self.client.set_configuration_option("enable_trivial_query_for_admission", "false")
+    running = self.execute_query_async(long_query)
+    self.wait_for_state(running, self.client.QUERY_STATES['RUNNING'], 20)
+    queued = self.execute_query_async(short_query)
+    for _ in range(60):
+      if "Admission result: Queued" in self.client.get_runtime_profile(queued):
+        break
+      sleep(1)
+    assert "Admission result: Queued" in self.client.get_runtime_profile(queued)
+
+    self.cluster.admissiond.kill()
+    self.cluster.admissiond.start()
+    admissiond = self.cluster.admissiond.service
+    admissiond.wait_for_metric_value(
+        "admission-controller.total-adopted.default-pool", 1, timeout=60)
+    assert admissiond.get_metric_value(
+        "admission-controller.local-num-admitted-running.default-pool") == 1
+    # The pool is still full, so the resubmitted query stays queued.
+    sleep(5)
+    assert self.client.get_state(queued) != self.client.QUERY_STATES['FINISHED']
+
+    self.client.cancel(running)
+    result = self.client.fetch(short_query, queued)
+    assert result.data == ["1"]
+    self.assert_impalad_log_contains(
+        "WARNING", "resubmitting it for admission", expected_count=-1)
+    self.assert_impalad_log_contains(
+        "WARNING", "ReleaseQuery (rpc )?failed", expected_count=0)
+    admissiond.wait_for_metric_value(
+        "admission-controller.local-num-admitted-running.default-pool", 0, timeout=30)
+
+  @SkipIfNotHdfsMinicluster.tuned_for_minicluster
+  @pytest.mark.execute_serially
   @CustomClusterTestSuite.with_args(
       impalad_args="--vmodule admission-controller=3 --default_pool_max_requests=1 "
       "--debug_actions=IMPALA_SERVICE_POOL:127.0.0.1:29500:ReleaseQuery:FAIL@1.0")

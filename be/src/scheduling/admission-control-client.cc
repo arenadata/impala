@@ -29,6 +29,8 @@ namespace impala {
 const string AdmissionControlClient::QUERY_EVENT_SUBMIT_FOR_ADMISSION =
     "Submit for admission";
 const string AdmissionControlClient::QUERY_EVENT_QUEUED = "Queued";
+const string AdmissionControlClient::QUERY_EVENT_RESUBMITTED =
+    "Resubmitted for admission";
 const string AdmissionControlClient::QUERY_EVENT_COMPLETED_ADMISSION =
     "Completed admission";
 

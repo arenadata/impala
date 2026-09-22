@@ -1539,6 +1539,155 @@ TEST_F(AdmissionControllerTest, PoolStats) {
   CheckPoolStatsEmpty(pool_stats);
 }
 
+/// Test re-registering ("adopting") a query admitted by another admissiond instance and
+/// releasing it again, as the admission control service does after a restart.
+TEST_F(AdmissionControllerTest, AdoptRunningQuery) {
+  UniqueIdPB* coord_id = pool_.Add(new UniqueIdPB());
+  coord_id->set_hi(1);
+  coord_id->set_lo(2);
+  AdmissionController* admission_controller = MakeAdmissionController(coord_id);
+  const string QUEUE = "unused";
+  TPoolConfig pool_cfg;
+  TPoolConfig root_cfg;
+  ASSERT_OK(admission_controller->request_pool_service_->GetPoolConfig(QUEUE, &pool_cfg));
+  ASSERT_OK(
+      admission_controller->request_pool_service_->GetPoolConfig(QUEUE_ROOT, &root_cfg));
+
+  NetworkAddressPB host1;
+  host1.set_hostname("host1");
+  host1.set_port(27000);
+  NetworkAddressPB host2;
+  host2.set_hostname("host2");
+  host2.set_port(27000);
+  const string host1_key = NetworkAddressPBToString(host1);
+  const string host2_key = NetworkAddressPBToString(host2);
+
+  AdmittedQueryPB admitted_query;
+  admitted_query.mutable_query_id()->set_hi(3);
+  admitted_query.mutable_query_id()->set_lo(4);
+  const UniqueIdPB& query_id = admitted_query.query_id();
+  admitted_query.set_request_pool(QUEUE);
+  admitted_query.set_executor_group("EG1");
+  BackendAllocationPB* backend1 = admitted_query.add_unreleased_backends();
+  *backend1->mutable_address() = host1;
+  backend1->set_slots_to_use(1);
+  backend1->set_mem_to_admit(1000);
+  BackendAllocationPB* backend2 = admitted_query.add_unreleased_backends();
+  *backend2->mutable_address() = host2;
+  backend2->set_slots_to_use(2);
+  backend2->set_mem_to_admit(2000);
+
+  // Adoption accounts for the query like an admission, but counts as adopted.
+  bool adopted = false;
+  ASSERT_OK(admission_controller->AdoptRunningQuery(
+      *coord_id, admitted_query, pool_cfg, root_cfg, &adopted));
+  ASSERT_TRUE(adopted);
+  AdmissionController::PoolStats* pool_stats = admission_controller->GetPoolStats(QUEUE);
+  ASSERT_EQ(1, pool_stats->agg_num_running());
+  ASSERT_EQ(1, pool_stats->local_stats_.num_admitted_running);
+  ASSERT_EQ(3000, pool_stats->local_mem_admitted_);
+  ASSERT_EQ(1, pool_stats->metrics()->total_adopted->GetValue());
+  ASSERT_EQ(0, pool_stats->metrics()->total_admitted->GetValue());
+  ASSERT_EQ(1000, admission_controller->host_stats_[host1_key].mem_admitted);
+  ASSERT_EQ(1, admission_controller->host_stats_[host1_key].num_admitted);
+  ASSERT_EQ(1, admission_controller->host_stats_[host1_key].slots_in_use);
+  ASSERT_EQ(2, admission_controller->host_stats_[host2_key].slots_in_use);
+
+  // Adopting a query that is already running here does nothing.
+  ASSERT_OK(admission_controller->AdoptRunningQuery(
+      *coord_id, admitted_query, pool_cfg, root_cfg, &adopted));
+  ASSERT_FALSE(adopted);
+  ASSERT_EQ(1, pool_stats->agg_num_running());
+  ASSERT_EQ(3000, pool_stats->local_mem_admitted_);
+
+  // Backends and the query are released as if the query had been admitted here.
+  admission_controller->ReleaseQueryBackends(query_id, *coord_id, {host1});
+  ASSERT_EQ(0, admission_controller->host_stats_[host1_key].mem_admitted);
+  ASSERT_EQ(0, admission_controller->host_stats_[host1_key].slots_in_use);
+  ASSERT_EQ(2000, pool_stats->local_mem_admitted_);
+  admission_controller->ReleaseQuery(query_id, *coord_id, -1,
+      /* release_remaining_backends */ true);
+  CheckPoolStatsEmpty(pool_stats);
+  ASSERT_EQ(0, admission_controller->host_stats_[host2_key].mem_admitted);
+  ASSERT_EQ(0, admission_controller->host_stats_[host2_key].num_admitted);
+  ASSERT_EQ(0, admission_controller->host_stats_[host2_key].slots_in_use);
+  ASSERT_TRUE(admission_controller->num_released_backends_.empty());
+
+  // A query whose backends were all released still holds a slot in the pool.
+  AdmittedQueryPB finishing_query = admitted_query;
+  finishing_query.mutable_query_id()->set_lo(5);
+  finishing_query.clear_unreleased_backends();
+  ASSERT_OK(admission_controller->AdoptRunningQuery(
+      *coord_id, finishing_query, pool_cfg, root_cfg, &adopted));
+  ASSERT_TRUE(adopted);
+  ASSERT_EQ(1, pool_stats->agg_num_running());
+  ASSERT_EQ(0, pool_stats->local_mem_admitted_);
+  admission_controller->ReleaseQuery(finishing_query.query_id(), *coord_id, -1,
+      /* release_remaining_backends */ true);
+  CheckPoolStatsEmpty(pool_stats);
+
+  // A query without a pool cannot be adopted.
+  AdmittedQueryPB no_pool = admitted_query;
+  no_pool.clear_request_pool();
+  ASSERT_FALSE(admission_controller->AdoptRunningQuery(
+      *coord_id, no_pool, pool_cfg, root_cfg, &adopted).ok());
+  ASSERT_FALSE(adopted);
+
+  // A query admitted here (it has a released-backends entry) is not adopted again.
+  admission_controller->num_released_backends_[query_id] = 2;
+  ASSERT_OK(admission_controller->AdoptRunningQuery(
+      *coord_id, admitted_query, pool_cfg, root_cfg, &adopted));
+  ASSERT_FALSE(adopted);
+  CheckPoolStatsEmpty(pool_stats);
+  admission_controller->num_released_backends_.erase(query_id);
+}
+
+/// Test that adopting a query in a pool with user quotas counts it for its user.
+TEST_F(AdmissionControllerTest, AdoptRunningQueryUserQuota) {
+  auto fair_scheduler = ScopedFlagSetter<string>::Make(
+      &FLAGS_fair_scheduler_allocation_path, GetResourceFile("fair-scheduler-test2.xml"));
+  auto llama_site = ScopedFlagSetter<string>::Make(
+      &FLAGS_llama_site_path, GetResourceFile("llama-site-test2.xml"));
+  UniqueIdPB* coord_id = pool_.Add(new UniqueIdPB());
+  coord_id->set_hi(1);
+  coord_id->set_lo(2);
+  AdmissionController* admission_controller = MakeAdmissionController(coord_id);
+  RequestPoolService* request_pool_service = admission_controller->request_pool_service_;
+  TPoolConfig pool_cfg;
+  TPoolConfig root_cfg;
+  ASSERT_OK(request_pool_service->GetPoolConfig(QUEUE_E, &pool_cfg));
+  ASSERT_OK(request_pool_service->GetPoolConfig(QUEUE_ROOT, &root_cfg));
+  ASSERT_TRUE(AdmissionController::HasQuotaConfig(pool_cfg));
+
+  AdmittedQueryPB admitted_query;
+  admitted_query.mutable_query_id()->set_hi(3);
+  admitted_query.mutable_query_id()->set_lo(4);
+  admitted_query.set_request_pool(QUEUE_E);
+  admitted_query.set_admission_user(USER_A);
+  admitted_query.set_is_trivial(true);
+  BackendAllocationPB* backend = admitted_query.add_unreleased_backends();
+  backend->mutable_address()->set_hostname("host1");
+  backend->mutable_address()->set_port(27000);
+  backend->set_slots_to_use(1);
+  backend->set_mem_to_admit(1000);
+
+  bool adopted = false;
+  ASSERT_OK(admission_controller->AdoptRunningQuery(
+      *coord_id, admitted_query, pool_cfg, root_cfg, &adopted));
+  ASSERT_TRUE(adopted);
+  AdmissionController::PoolStats* pool_stats =
+      admission_controller->GetPoolStats(QUEUE_E);
+  ASSERT_EQ(1, pool_stats->agg_user_loads_.get(USER_A));
+  ASSERT_EQ(1, pool_stats->local_trivial_running_);
+  ASSERT_EQ(pool_cfg.max_requests, pool_stats->metrics()->pool_max_requests->GetValue());
+
+  admission_controller->ReleaseQuery(admitted_query.query_id(), *coord_id, -1,
+      /* release_remaining_backends */ true);
+  ASSERT_EQ(0, pool_stats->agg_user_loads_.get(USER_A));
+  ASSERT_EQ(0, pool_stats->local_trivial_running_);
+  CheckPoolStatsEmpty(pool_stats);
+}
+
 /// Test that PoolDisabled works
 TEST_F(AdmissionControllerTest, PoolDisabled) {
   checkPoolDisabled(true, /* max_requests */ 0, /* max_mem_resources */ 0);

@@ -40,6 +40,12 @@ DEFINE_int32(admission_status_retry_time_ms, 10,
 DEFINE_int32(admission_max_retry_time_s, 60,
     "(Advanced) The amount of time in seconds the coordinator will spend attempting to "
     "retry admission if the admissiond is unreachable.");
+DEFINE_bool(admission_resubmit_on_admissiond_loss, true,
+    "(Advanced) If true, a coordinator resubmits a queued query for admission when the "
+    "admissiond that queued it becomes unreachable or no longer knows the query, e.g. "
+    "after an admissiond restart, instead of failing the query. The query loses its "
+    "place in the queue and its queue timeout restarts. A query whose rejection or queue "
+    "timeout reply is lost is resubmitted as well and decided again.");
 
 using namespace strings;
 using namespace kudu::rpc;
@@ -56,6 +62,8 @@ Status RemoteAdmissionControlClient::TryAdmitQuery(AdmissionControlServiceProxy*
     kudu::Status* rpc_status) {
   AdmitQueryResponsePB resp;
   RpcController rpc_controller;
+  rpc_controller.set_timeout(
+      kudu::MonoDelta::FromMilliseconds(ADMIT_QUERY_RPC_TIMEOUT_MS));
 
   KrpcSerializer serializer;
   int sidecar_idx;
@@ -94,35 +102,17 @@ Status RemoteAdmissionControlClient::TryAdmitQuery(AdmissionControlServiceProxy*
   return admit_status;
 }
 
-Status RemoteAdmissionControlClient::SubmitForAdmission(
-    const AdmissionController::AdmissionRequest& request,
-    RuntimeProfile::EventSequence* query_events,
-    std::unique_ptr<QuerySchedulePB>* schedule_result,
-    int64_t* wait_start_time_ms, int64_t* wait_end_time_ms) {
-  ScopedEvent completedEvent(
-      query_events, AdmissionControlClient::QUERY_EVENT_COMPLETED_ADMISSION);
-
-  std::unique_ptr<AdmissionControlServiceProxy> proxy;
-  RETURN_IF_ERROR(AdmissionControlService::GetProxy(&proxy));
-  AdmitQueryRequestPB req;
-
-  *req.mutable_query_id() = request.query_id;
-  *req.mutable_coord_id() = ExecEnv::GetInstance()->backend_id();
-
-  for (const NetworkAddressPB& address : request.blacklisted_executor_addresses) {
-    *req.add_blacklisted_executor_addresses() = address;
-  }
-
-  query_events->MarkEvent(QUERY_EVENT_SUBMIT_FOR_ADMISSION);
-
+Status RemoteAdmissionControlClient::AdmitQueryWithRetry(
+    std::unique_ptr<AdmissionControlServiceProxy>* proxy,
+    const AdmissionController::AdmissionRequest& request, AdmitQueryRequestPB* req) {
   int64_t admission_start = MonotonicMillis();
   kudu::Status admit_rpc_status = kudu::Status::OK();
   Status admit_status =
-      TryAdmitQuery(proxy.get(), request.request, &req, &admit_rpc_status);
+      TryAdmitQuery(proxy->get(), request.request, req, &admit_rpc_status);
   int32_t num_retries = 0;
-  // Only retry AdmitQuery if the rpc layer reported a network error, indicating that the
-  // admissiond was unreachable.
-  while (admit_rpc_status.IsNetworkError()) {
+  // Only retry AdmitQuery if the rpc layer reported a network error or a timeout,
+  // indicating that the admissiond was unreachable.
+  while (admit_rpc_status.IsNetworkError() || admit_rpc_status.IsTimedOut()) {
     int64_t elapsed_s = (MonotonicMillis() - admission_start) / MILLIS_PER_SEC;
     if (elapsed_s > FLAGS_admission_max_retry_time_s) {
       return Status(
@@ -140,46 +130,125 @@ Status RemoteAdmissionControlClient::SubmitForAdmission(
     VLOG(3) << "Retrying AdmitQuery rpc for " << request.query_id
             << ". Previous rpc failed with status: " << admit_rpc_status.ToString();
     // Re-resolve the admissiond address on each retry to handle cases
-    // where the admissiond has restarted with a new IP.
-    RETURN_IF_ERROR(AdmissionControlService::GetProxy(&proxy));
-    admit_status = TryAdmitQuery(proxy.get(), request.request, &req, &admit_rpc_status);
+    // where the admissiond has restarted with a new IP. After a timeout, also stop
+    // using the connection, whose negotiation may hang.
+    if (admit_rpc_status.IsTimedOut()) {
+      AdmissionControlService::UseNewConnection(proxy_generation_);
+    }
+    RETURN_IF_ERROR(AdmissionControlService::GetProxy(proxy, &proxy_generation_));
+    admit_status =
+        TryAdmitQuery(proxy->get(), request.request, req, &admit_rpc_status);
   }
 
   KUDU_RETURN_IF_ERROR(admit_rpc_status, "AdmitQuery rpc failed");
-  RETURN_IF_ERROR(admit_status);
+  return admit_status;
+}
 
+Status RemoteAdmissionControlClient::SubmitForAdmission(
+    const AdmissionController::AdmissionRequest& request,
+    RuntimeProfile::EventSequence* query_events,
+    std::unique_ptr<QuerySchedulePB>* schedule_result,
+    int64_t* wait_start_time_ms, int64_t* wait_end_time_ms) {
+  ScopedEvent completedEvent(
+      query_events, AdmissionControlClient::QUERY_EVENT_COMPLETED_ADMISSION);
+
+  std::unique_ptr<AdmissionControlServiceProxy> proxy;
+  RETURN_IF_ERROR(AdmissionControlService::GetProxy(&proxy, &proxy_generation_));
+  AdmitQueryRequestPB req;
+
+  *req.mutable_query_id() = request.query_id;
+  *req.mutable_coord_id() = ExecEnv::GetInstance()->backend_id();
+
+  for (const NetworkAddressPB& address : request.blacklisted_executor_addresses) {
+    *req.add_blacklisted_executor_addresses() = address;
+  }
+
+  query_events->MarkEvent(QUERY_EVENT_SUBMIT_FOR_ADMISSION);
+
+  RETURN_IF_ERROR(AdmitQueryWithRetry(&proxy, request, &req));
+
+  Status admit_status = Status::OK();
   bool is_query_queued = false;
+  int num_resubmits = 0;
   while (true) {
     RpcController rpc_controller2;
+    rpc_controller2.set_timeout(kudu::MonoDelta::FromMilliseconds(RPC_TIMEOUT_MS));
     GetQueryStatusRequestPB get_status_req;
     GetQueryStatusResponsePB get_status_resp;
     *get_status_req.mutable_query_id() = request.query_id;
-    KUDU_RETURN_IF_ERROR(
-        proxy->GetQueryStatus(get_status_req, &get_status_resp, &rpc_controller2),
-        "GetQueryStatus rpc failed");
+    kudu::Status rpc_status =
+        proxy->GetQueryStatus(get_status_req, &get_status_resp, &rpc_controller2);
 
-    if (get_status_resp.has_summary_profile_sidecar_idx()) {
-      TRuntimeProfileTree tree;
-      RETURN_IF_ERROR(GetSidecar(
-          get_status_resp.summary_profile_sidecar_idx(), &rpc_controller2, &tree));
-      request.summary_profile->Update(tree);
+    // The admissiond that queued the query is gone (unreachable), or it restarted and
+    // does not know the query.
+    string lost_reason;
+    if (!rpc_status.ok()) {
+      if (!FLAGS_admission_resubmit_on_admissiond_loss
+          || !(rpc_status.IsNetworkError() || rpc_status.IsTimedOut())) {
+        KUDU_RETURN_IF_ERROR(rpc_status, "GetQueryStatus rpc failed");
+      }
+      lost_reason = rpc_status.ToString();
+      if (rpc_status.IsTimedOut()) {
+        AdmissionControlService::UseNewConnection(proxy_generation_);
+      }
+    } else {
+      if (get_status_resp.has_summary_profile_sidecar_idx()) {
+        TRuntimeProfileTree tree;
+        RETURN_IF_ERROR(GetSidecar(
+            get_status_resp.summary_profile_sidecar_idx(), &rpc_controller2, &tree));
+        request.summary_profile->Update(tree);
+      }
+
+      if (wait_start_time_ms != nullptr && get_status_resp.has_wait_start_time_ms()) {
+        *wait_start_time_ms = get_status_resp.wait_start_time_ms();
+      }
+      if (wait_end_time_ms != nullptr && get_status_resp.has_wait_end_time_ms()) {
+        *wait_end_time_ms = get_status_resp.wait_end_time_ms();
+      }
+
+      if (get_status_resp.has_query_schedule()) {
+        schedule_result->reset(new QuerySchedulePB());
+        schedule_result->get()->Swap(get_status_resp.mutable_query_schedule());
+        break;
+      }
+      admit_status = Status(get_status_resp.status());
+      if (!admit_status.ok()) {
+        if (!FLAGS_admission_resubmit_on_admissiond_loss
+            || admit_status.code() != TErrorCode::INVALID_QUERY_HANDLE) {
+          break;
+        }
+        lost_reason = admit_status.GetDetail();
+      }
     }
 
-    if (wait_start_time_ms != nullptr && get_status_resp.has_wait_start_time_ms()) {
-      *wait_start_time_ms = get_status_resp.wait_start_time_ms();
-    }
-    if (wait_end_time_ms != nullptr && get_status_resp.has_wait_end_time_ms()) {
-      *wait_end_time_ms = get_status_resp.wait_end_time_ms();
-    }
-
-    if (get_status_resp.has_query_schedule()) {
-      schedule_result->reset(new QuerySchedulePB());
-      schedule_result->get()->Swap(get_status_resp.mutable_query_schedule());
-      break;
-    }
-    admit_status = Status(get_status_resp.status());
-    if (!admit_status.ok()) {
-      break;
+    if (!lost_reason.empty()) {
+      if (num_resubmits == MAX_ADMISSION_RESUBMITS) {
+        {
+          lock_guard<mutex> l(lock_);
+          pending_admit_ = false;
+        }
+        return Status(Substitute(
+            "Admission of query $0 was lost again after $1 resubmissions, last: $2",
+            PrintId(request.query_id), num_resubmits, lost_reason));
+      }
+      ++num_resubmits;
+      LOG(WARNING) << "Admission state of query " << PrintId(request.query_id)
+                   << " was lost (" << lost_reason << "), resubmitting it for admission";
+      query_events->MarkEvent(QUERY_EVENT_RESUBMITTED);
+      // A fresh retry budget: the query may have been queued for longer than
+      // --admission_max_retry_time_s already. Does nothing if admission was cancelled.
+      Status resubmit_status =
+          AdmissionControlService::GetProxy(&proxy, &proxy_generation_);
+      if (resubmit_status.ok()) {
+        resubmit_status = AdmitQueryWithRetry(&proxy, request, &req);
+      }
+      if (!resubmit_status.ok()) {
+        lock_guard<mutex> l(lock_);
+        pending_admit_ = false;
+        return resubmit_status;
+      }
+      admit_status = Status::OK();
+      continue;
     }
 
     if (!is_query_queued) {
@@ -195,10 +264,57 @@ Status RemoteAdmissionControlClient::SubmitForAdmission(
     pending_admit_ = false;
   }
 
+  if (admit_status.ok() && *schedule_result != nullptr) {
+    RecordAdmission(**schedule_result);
+  }
   return admit_status;
 }
 
+void RemoteAdmissionControlClient::RecordAdmission(const QuerySchedulePB& schedule) {
+  // An admissiond without this feature does not set the pool; it could not use the
+  // record either.
+  if (schedule.request_pool().empty()) return;
+  lock_guard<mutex> l(admitted_lock_);
+  admitted_query_.Clear();
+  *admitted_query_.mutable_query_id() = query_id_;
+  admitted_query_.set_request_pool(schedule.request_pool());
+  admitted_query_.set_executor_group(schedule.executor_group());
+  admitted_query_.set_is_trivial(schedule.is_trivial());
+  admitted_query_.set_admission_user(schedule.admission_user());
+  for (const BackendExecParamsPB& backend : schedule.backend_exec_params()) {
+    BackendAllocationPB* allocation = admitted_query_.add_unreleased_backends();
+    *allocation->mutable_address() = backend.address();
+    allocation->set_slots_to_use(backend.slots_to_use());
+    // Same as AdmissionController::GetMemToAdmit().
+    allocation->set_mem_to_admit(backend.is_coord_backend() ?
+            schedule.coord_backend_mem_to_admit() :
+            schedule.per_backend_mem_to_admit());
+  }
+  admitted_ = true;
+}
+
+bool RemoteAdmissionControlClient::GetAdmittedQuery(
+    bool all, AdmittedQueryPB* admitted_query) {
+  lock_guard<mutex> l(admitted_lock_);
+  if (!admitted_) return false;
+  if (admitted_query_.released()) {
+    *admitted_query->mutable_query_id() = admitted_query_.query_id();
+    admitted_query->set_released(true);
+    return true;
+  }
+  if (!all) return false;
+  *admitted_query = admitted_query_;
+  return true;
+}
+
 void RemoteAdmissionControlClient::ReleaseQuery(int64_t peak_mem_consumption) {
+  {
+    // Keep reporting the query, now as released, so that an admissiond that adopted it
+    // from an older heartbeat releases it again.
+    lock_guard<mutex> l(admitted_lock_);
+    admitted_query_.set_released(true);
+    admitted_query_.clear_unreleased_backends();
+  }
   std::unique_ptr<AdmissionControlServiceProxy> proxy;
   Status get_proxy_status = AdmissionControlService::GetProxy(&proxy);
   if (!get_proxy_status.ok()) {
@@ -230,6 +346,19 @@ void RemoteAdmissionControlClient::ReleaseQuery(int64_t peak_mem_consumption) {
 
 void RemoteAdmissionControlClient::ReleaseQueryBackends(
     const vector<NetworkAddressPB>& host_addrs) {
+  {
+    lock_guard<mutex> l(admitted_lock_);
+    auto* backends = admitted_query_.mutable_unreleased_backends();
+    for (const NetworkAddressPB& addr : host_addrs) {
+      for (auto it = backends->begin(); it != backends->end(); ++it) {
+        if (it->address().hostname() == addr.hostname()
+            && it->address().port() == addr.port()) {
+          backends->erase(it);
+          break;
+        }
+      }
+    }
+  }
   std::unique_ptr<AdmissionControlServiceProxy> proxy;
   Status get_proxy_status = AdmissionControlService::GetProxy(&proxy);
   if (!get_proxy_status.ok()) {

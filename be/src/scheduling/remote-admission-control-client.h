@@ -60,6 +60,8 @@ class RemoteAdmissionControlClient : public AdmissionControlClient {
       const std::vector<NetworkAddressPB>& host_addr) override;
   virtual void CancelAdmission() override;
 
+  bool GetAdmittedQuery(bool all, AdmittedQueryPB* admitted_query) override;
+
  private:
   // Owned by the ClientRequestState.
   const TQueryCtx& query_ctx_;
@@ -78,10 +80,32 @@ class RemoteAdmissionControlClient : public AdmissionControlClient {
   /// subsequently, it will not send the AdmitQuery rpc
   bool cancelled_ = false;
 
+  /// Protects 'admitted_' and 'admitted_query_'.
+  std::mutex admitted_lock_;
+
+  /// True once the query was admitted. 'admitted_query_' is then valid.
+  bool admitted_ = false;
+
+  /// What the admission control service needs to re-register this query as running
+  /// after it lost its state, see AdmittedQueryPB. Backends are removed as they are
+  /// released; 'released' is set by ReleaseQuery(). Reported in admission heartbeats.
+  AdmittedQueryPB admitted_query_;
+
   /// Constants related to retrying the idempotent rpcs.
   static const int RPC_NUM_RETRIES = 3;
   static const int64_t RPC_TIMEOUT_MS = 10 * MILLIS_PER_SEC;
   static const int64_t RPC_BACKOFF_TIME_MS = 3 * MILLIS_PER_SEC;
+
+  /// Timeout of the AdmitQuery rpc, whose sidecar carries the query plan.
+  static const int64_t ADMIT_QUERY_RPC_TIMEOUT_MS = 30 * MILLIS_PER_SEC;
+
+  /// Connection generation of the proxy used by SubmitForAdmission(), see
+  /// AdmissionControlService::UseNewConnection().
+  int64_t proxy_generation_ = 0;
+
+  /// Maximum number of times a queued query is resubmitted after its admission state was
+  /// lost, see --admission_resubmit_on_admissiond_loss.
+  static const int MAX_ADMISSION_RESUBMITS = 5;
 
   /// Checks if admission has already been cancelled, and if not sends the AdmitQuery rpc.
   /// Sets 'rpc_status' to the return Status from the rpc layer, and returns OK if the
@@ -89,6 +113,16 @@ class RemoteAdmissionControlClient : public AdmissionControlClient {
   Status TryAdmitQuery(AdmissionControlServiceProxy* proxy,
       const TQueryExecRequest& request, AdmitQueryRequestPB* req,
       kudu::Status* rpc_status);
+
+  /// Sends the AdmitQuery rpc, retrying it on network errors and timeouts for up to
+  /// --admission_max_retry_time_s from the time of the call. '*proxy' is replaced on
+  /// each retry, and a timed out rpc also switches to a new connection, see
+  /// AdmissionControlService::UseNewConnection().
+  Status AdmitQueryWithRetry(std::unique_ptr<AdmissionControlServiceProxy>* proxy,
+      const AdmissionController::AdmissionRequest& request, AdmitQueryRequestPB* req);
+
+  /// Records the admitted 'schedule' in 'admitted_query_'.
+  void RecordAdmission(const QuerySchedulePB& schedule);
 };
 
 } // namespace impala

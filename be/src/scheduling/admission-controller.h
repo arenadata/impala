@@ -436,6 +436,18 @@ class AdmissionController {
   CancelQueriesOnFailedCoordinators(
       const std::unordered_set<UniqueIdPB>& current_backends);
 
+  /// Re-registers a query that was admitted by another admission controller instance
+  /// (e.g. the admissiond before a restart) as running for the
+  /// coordinator 'coord_id', and accounts for the resources it still holds as reported by
+  /// its coordinator in 'admitted_query'. After this, ReleaseQueryBackends() and
+  /// ReleaseQuery() work for the query as if it had been admitted here. 'pool_cfg' and
+  /// 'root_cfg' are the configs of the query's pool and of the root pool. Does nothing
+  /// and sets 'adopted' to false if the query is already running here. Only used in the
+  /// context of the admission control service.
+  Status AdoptRunningQuery(const UniqueIdPB& coord_id,
+      const AdmittedQueryPB& admitted_query, const TPoolConfig& pool_cfg,
+      const TPoolConfig& root_cfg, bool* adopted);
+
   /// Registers the request queue topic with the statestore, starts up the dequeue thread
   /// and registers a callback with the cluster membership manager to receive updates for
   /// membership changes.
@@ -612,6 +624,8 @@ class AdmissionController {
       /// Monotonically increasing counters (since process start) referring to this
       /// host's admission controller.
       IntCounter* total_admitted;
+      /// Queries admitted by another admissiond instance and re-registered here.
+      IntCounter* total_adopted;
       IntCounter* total_rejected;
       IntCounter* total_queued;
       IntCounter* total_dequeued; // Does not include those in total_timed_out
@@ -671,6 +685,10 @@ class AdmissionController {
     /// Updates the pool stats when the request represented by 'state' is admitted.
     void AdmitQueryAndMemory(
         const ScheduleState& state, bool is_trivial, PerUserTracking& per_user_tracking);
+    /// Updates the pool stats when a query admitted elsewhere is adopted, see
+    /// AdoptRunningQuery(). 'mem_admitted' is the memory it still holds in the cluster.
+    /// The 'user' parameter is empty unless user quotas are configured.
+    void AdoptQuery(int64_t mem_admitted, bool is_trivial, const std::string& user);
     /// Updates the pool stats except the memory admitted stat.
     /// The 'user' parameter is empty unless user quotas are configured.
     void ReleaseQuery(
@@ -843,6 +861,8 @@ class AdmissionController {
     FRIEND_TEST(AdmissionControllerTest, TopNQueryCheck);
     FRIEND_TEST(AdmissionControllerTest, EraseHostStats);
     FRIEND_TEST(AdmissionControllerTest, UserAndGroupQuotas);
+    FRIEND_TEST(AdmissionControllerTest, AdoptRunningQuery);
+    FRIEND_TEST(AdmissionControllerTest, AdoptRunningQueryUserQuota);
     friend class AdmissionControllerTest;
   };
 
@@ -1391,6 +1411,8 @@ class AdmissionController {
       const vector<NetworkAddressPB>& host_addr);
 
   FRIEND_TEST(AdmissionControllerTest, AggregatedUserLoads);
+  FRIEND_TEST(AdmissionControllerTest, AdoptRunningQuery);
+  FRIEND_TEST(AdmissionControllerTest, AdoptRunningQueryUserQuota);
   FRIEND_TEST(AdmissionControllerTest, CanAdmitRequestCount);
   FRIEND_TEST(AdmissionControllerTest, CanAdmitRequestMemory);
   FRIEND_TEST(AdmissionControllerTest, CanAdmitRequestSlots);
