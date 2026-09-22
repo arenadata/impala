@@ -161,10 +161,13 @@ class AdmissionControlService : public AdmissionControlServiceIf,
   struct CoordinatorHeartbeat {
     // The latest heartbeat version number that was processed.
     int64_t version = 0;
+    // MonotonicMillis() when the last heartbeat (processed or stale) was received, or
+    // when the coordinator was first seen with running queries.
+    int64_t last_seen_ms = 0;
     // True once a heartbeat with the full list of the coordinator's admitted queries was
     // processed while the coordinator was in this admissiond's cluster membership, i.e.
-    // its running queries were adopted. Reset when the coordinator leaves the
-    // membership, as its running queries are released then.
+    // its running queries were adopted. Reset when its running queries are released
+    // because it left the membership or stopped sending heartbeats.
     bool reported = false;
   };
 
@@ -181,6 +184,10 @@ class AdmissionControlService : public AdmissionControlServiceIf,
   /// Ids of adopted queries that are still in 'admission_state_map_'.
   std::unordered_set<UniqueIdPB> adopted_query_ids_;
 
+  /// Thread that releases the running queries of coordinators that stopped sending
+  /// heartbeats, see CoordinatorAgeingLoop().
+  std::unique_ptr<Thread> ageing_thread_;
+
   /// Callback for 'admission_thread_pool_'.
   void AdmitFromThreadPool(const UniqueIdPB& query_id);
 
@@ -193,7 +200,9 @@ class AdmissionControlService : public AdmissionControlServiceIf,
   /// For the coordinator identified by 'coord_id', it updates the last processed hearbeat
   /// version to 'update_version' if 'update_version' is higher. Returns true if update
   /// was successful.
-  bool CheckAndUpdateHeartbeat(const UniqueIdPB& coord_id, int64_t update_version);
+  /// Records 'now_ms' as the time of the last heartbeat from the coordinator in any case.
+  bool CheckAndUpdateHeartbeat(
+      const UniqueIdPB& coord_id, int64_t update_version, int64_t now_ms);
 
   /// Handles the 'admitted_queries' of a heartbeat from 'coord_id': re-registers
   /// (adopts) admitted queries this admissiond does not know, e.g. after a restart, and
@@ -215,6 +224,11 @@ class AdmissionControlService : public AdmissionControlServiceIf,
 
   /// Removes 'query_id' from 'adopted_query_ids_' if present.
   void ForgetAdoptedQuery(const UniqueIdPB& query_id);
+
+  /// Background loop: releases the running queries of coordinators that have not sent a
+  /// heartbeat for --admission_coordinator_heartbeat_timeout_s, e.g. because their
+  /// connection moved to another admissiond replica.
+  void CoordinatorAgeingLoop();
 
   /// Background thread loop that removes entries from admission_state_map_.
   void AdmissionStateMapCleanupLoop();

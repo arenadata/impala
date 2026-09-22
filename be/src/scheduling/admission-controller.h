@@ -436,8 +436,8 @@ class AdmissionController {
   CancelQueriesOnFailedCoordinators(
       const std::unordered_set<UniqueIdPB>& current_backends);
 
-  /// Re-registers a query that was admitted by another admission controller instance
-  /// (e.g. the admissiond before a restart) as running for the
+  /// Re-registers a query that was admitted by another admission controller instance (an
+  /// admissiond before a restart, or another admissiond replica) as running for the
   /// coordinator 'coord_id', and accounts for the resources it still holds as reported by
   /// its coordinator in 'admitted_query'. After this, ReleaseQueryBackends() and
   /// ReleaseQuery() work for the query as if it had been admitted here. 'pool_cfg' and
@@ -447,6 +447,15 @@ class AdmissionController {
   Status AdoptRunningQuery(const UniqueIdPB& coord_id,
       const AdmittedQueryPB& admitted_query, const TPoolConfig& pool_cfg,
       const TPoolConfig& root_cfg, bool* adopted);
+
+  /// Returns the ids of the coordinators that have running queries.
+  std::vector<UniqueIdPB> GetCoordinatorsWithRunningQueries();
+
+  /// Releases the resources of all running queries of the coordinator 'coord_id', e.g.
+  /// because it stopped sending heartbeats to this admissiond. Queued queries are not
+  /// touched. Returns the queries that were released. Only used in the context of the
+  /// admission control service.
+  std::vector<UniqueIdPB> ReleaseRunningQueriesForHost(const UniqueIdPB& coord_id);
 
   /// Registers the request queue topic with the statestore, starts up the dequeue thread
   /// and registers a callback with the cluster membership manager to receive updates for

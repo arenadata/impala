@@ -64,7 +64,15 @@ DEFINE_bool(admission_adopt_running_queries, true,
     "(Advanced) If true, the admission control service re-registers running queries "
     "that its coordinators report in their heartbeats but that it does not know, e.g. "
     "after an admissiond restart, so that their resources are accounted for until they "
-    "finish.");
+    "finish. Keep it on together with --admission_coordinator_heartbeat_timeout_s: "
+    "queries released for a silent coordinator are re-registered when it is heard "
+    "again.");
+DEFINE_int32(admission_coordinator_heartbeat_timeout_s, 30,
+    "The admission control service releases the running queries of a coordinator that "
+    "has not sent an admission heartbeat for this many seconds, e.g. because it now "
+    "talks to another admissiond. Raised to at least 3 x (heartbeat rpc timeout + "
+    "heartbeat period). 0 disables it.");
+
 DEFINE_int32(admission_adoption_grace_period_ms, 10000,
     "(Advanced) After an admissiond starts, it admits queries only when every "
     "coordinator in the cluster membership has reported its still running queries in a "
@@ -126,6 +134,11 @@ Status AdmissionControlService::Init() {
   RETURN_IF_ERROR(Thread::Create("admission-control-service",
       "admission-state-map-cleanup",
       &AdmissionControlService::AdmissionStateMapCleanupLoop, this, &cleanup_thread_));
+  if (FLAGS_admission_coordinator_heartbeat_timeout_s > 0) {
+    RETURN_IF_ERROR(Thread::Create("admission-control-service",
+        "admission-coordinator-ageing", &AdmissionControlService::CoordinatorAgeingLoop,
+        this, &ageing_thread_));
+  }
 
   return Status::OK();
 }
@@ -141,6 +154,7 @@ void AdmissionControlService::Join() {
   DCHECK(cleanup_thread_ != nullptr);
   // Wait for the cleanup thread to finish clearing the queue.
   cleanup_thread_->Join();
+  if (ageing_thread_ != nullptr) ageing_thread_->Join();
 }
 
 std::atomic<int64_t> AdmissionControlService::proxy_generation_{0};
@@ -399,7 +413,7 @@ void AdmissionControlService::AdmissionHeartbeat(const AdmissionHeartbeatRequest
   VLOG(2) << "AdmissionHeartbeat: host_id=" << req->host_id();
   RecordFirstContact();
 
-  if(!CheckAndUpdateHeartbeat(req->host_id(), req->version())) {
+  if(!CheckAndUpdateHeartbeat(req->host_id(), req->version(), MonotonicMillis())) {
     VLOG(1) << "Stale heartbeat received for coord_id: "<< req->host_id();
     resp->set_report_admitted_queries(
         NeedsAdmittedQueries(req->host_id(), IsInMembership(req->host_id())));
@@ -567,6 +581,53 @@ void AdmissionControlService::ForgetAdoptedQuery(const UniqueIdPB& query_id) {
   adopted_query_ids_.erase(query_id);
 }
 
+void AdmissionControlService::CoordinatorAgeingLoop() {
+  int64_t min_timeout_ms = 3
+      * (FLAGS_admission_heartbeat_rpc_timeout_ms
+          + FLAGS_admission_heartbeat_frequency_ms);
+  int64_t timeout_ms = max<int64_t>(
+      FLAGS_admission_coordinator_heartbeat_timeout_s * MILLIS_PER_SEC, min_timeout_ms);
+  if (timeout_ms > FLAGS_admission_coordinator_heartbeat_timeout_s * MILLIS_PER_SEC) {
+    LOG(WARNING) << "--admission_coordinator_heartbeat_timeout_s raised to "
+                 << timeout_ms / MILLIS_PER_SEC
+                 << " s (3 x heartbeat rpc timeout + period)";
+  }
+  AdmissionController* admission_controller =
+      AdmissiondEnv::GetInstance()->admission_controller();
+  while (!shutdown_.load()) {
+    SleepForMs(MILLIS_PER_SEC);
+    vector<UniqueIdPB> coord_ids =
+        admission_controller->GetCoordinatorsWithRunningQueries();
+    int64_t now = MonotonicMillis();
+    vector<UniqueIdPB> silent;
+    {
+      lock_guard<mutex> l(heartbeat_lock_);
+      for (const UniqueIdPB& coord_id : coord_ids) {
+        CoordinatorHeartbeat& heartbeat = coord_id_to_heartbeat_[coord_id];
+        // A coordinator seen for the first time (e.g. a query admitted before its first
+        // heartbeat) gets a full timeout from now.
+        if (heartbeat.last_seen_ms == 0) heartbeat.last_seen_ms = now;
+        if (now - heartbeat.last_seen_ms > timeout_ms) silent.push_back(coord_id);
+      }
+    }
+    for (const UniqueIdPB& coord_id : silent) {
+      vector<UniqueIdPB> released =
+          admission_controller->ReleaseRunningQueriesForHost(coord_id);
+      if (released.empty()) continue;
+      LOG(WARNING) << "Coordinator " << PrintId(coord_id) << " sent no admission "
+                   << "heartbeat for " << timeout_ms / MILLIS_PER_SEC << " s, released "
+                   << released.size() << " running queries.";
+      for (const UniqueIdPB& query_id : released) {
+        discard_result(admission_state_map_.Delete(query_id));
+        ForgetAdoptedQuery(query_id);
+      }
+      // When it is heard again, it must report its queries again to have them adopted.
+      lock_guard<mutex> l(heartbeat_lock_);
+      coord_id_to_heartbeat_[coord_id].reported = false;
+    }
+  }
+}
+
 void AdmissionControlService::CancelQueriesOnFailedCoordinators(
     const std::unordered_set<UniqueIdPB>& current_backends) {
   std::unordered_map<UniqueIdPB, vector<UniqueIdPB>> cleaned_up =
@@ -637,9 +698,10 @@ void AdmissionControlService::RespondAndReleaseRpc(
 }
 
 bool AdmissionControlService::CheckAndUpdateHeartbeat(
-    const UniqueIdPB& coord_id, int64_t update_version) {
+    const UniqueIdPB& coord_id, int64_t update_version, int64_t now_ms) {
   lock_guard<mutex> l(heartbeat_lock_);
   CoordinatorHeartbeat& heartbeat = coord_id_to_heartbeat_[coord_id];
+  heartbeat.last_seen_ms = now_ms;
   if (heartbeat.version < update_version) {
     heartbeat.version = update_version;
     return true;

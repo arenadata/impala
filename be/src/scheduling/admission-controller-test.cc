@@ -1597,6 +1597,9 @@ TEST_F(AdmissionControllerTest, AdoptRunningQuery) {
   ASSERT_EQ(1, admission_controller->host_stats_[host1_key].num_admitted);
   ASSERT_EQ(1, admission_controller->host_stats_[host1_key].slots_in_use);
   ASSERT_EQ(2, admission_controller->host_stats_[host2_key].slots_in_use);
+  vector<UniqueIdPB> coords = admission_controller->GetCoordinatorsWithRunningQueries();
+  ASSERT_EQ(1, coords.size());
+  ASSERT_EQ(*coord_id, coords[0]);
 
   // Adopting a query that is already running here does nothing.
   ASSERT_OK(admission_controller->AdoptRunningQuery(
@@ -1616,7 +1619,19 @@ TEST_F(AdmissionControllerTest, AdoptRunningQuery) {
   ASSERT_EQ(0, admission_controller->host_stats_[host2_key].mem_admitted);
   ASSERT_EQ(0, admission_controller->host_stats_[host2_key].num_admitted);
   ASSERT_EQ(0, admission_controller->host_stats_[host2_key].slots_in_use);
+  ASSERT_TRUE(admission_controller->GetCoordinatorsWithRunningQueries().empty());
   ASSERT_TRUE(admission_controller->num_released_backends_.empty());
+
+  // ReleaseRunningQueriesForHost() releases adopted queries of a silent coordinator.
+  ASSERT_OK(admission_controller->AdoptRunningQuery(
+      *coord_id, admitted_query, pool_cfg, root_cfg, &adopted));
+  ASSERT_TRUE(adopted);
+  vector<UniqueIdPB> released =
+      admission_controller->ReleaseRunningQueriesForHost(*coord_id);
+  ASSERT_EQ(1, released.size());
+  ASSERT_EQ(query_id, released[0]);
+  CheckPoolStatsEmpty(pool_stats);
+  ASSERT_EQ(0, admission_controller->host_stats_[host1_key].mem_admitted);
 
   // A query whose backends were all released still holds a slot in the pool.
   AdmittedQueryPB finishing_query = admitted_query;

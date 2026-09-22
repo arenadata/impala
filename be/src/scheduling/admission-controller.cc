@@ -2058,6 +2058,30 @@ Status AdmissionController::AdoptRunningQuery(const UniqueIdPB& coord_id,
   return Status::OK();
 }
 
+vector<UniqueIdPB> AdmissionController::GetCoordinatorsWithRunningQueries() {
+  vector<UniqueIdPB> coord_ids;
+  lock_guard<mutex> lock(admission_ctrl_lock_);
+  for (const auto& entry : running_queries_) {
+    if (!entry.second.empty()) coord_ids.push_back(entry.first);
+  }
+  return coord_ids;
+}
+
+vector<UniqueIdPB> AdmissionController::ReleaseRunningQueriesForHost(
+    const UniqueIdPB& coord_id) {
+  vector<UniqueIdPB> to_release;
+  {
+    lock_guard<mutex> lock(admission_ctrl_lock_);
+    auto it = running_queries_.find(coord_id);
+    if (it == running_queries_.end()) return to_release;
+    for (const auto& entry : it->second) to_release.push_back(entry.first);
+  }
+  for (const UniqueIdPB& query_id : to_release) {
+    ReleaseQuery(query_id, coord_id, -1, /* release_remaining_backends */ true);
+  }
+  return to_release;
+}
+
 Status AdmissionController::ResolvePoolAndGetConfig(const TQueryCtx& query_ctx,
     string* pool_name, TPoolConfig* pool_config, TPoolConfig* root_config) {
   RETURN_IF_ERROR(request_pool_service_->ResolveRequestPool(query_ctx, pool_name));

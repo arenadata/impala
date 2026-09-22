@@ -182,8 +182,8 @@ Status RemoteAdmissionControlClient::SubmitForAdmission(
     kudu::Status rpc_status =
         proxy->GetQueryStatus(get_status_req, &get_status_resp, &rpc_controller2);
 
-    // The admissiond that queued the query is gone (unreachable), or it restarted and
-    // does not know the query.
+    // The admissiond that queued the query is gone (unreachable), or it restarted or
+    // another admissiond replica answers and does not know the query.
     string lost_reason;
     if (!rpc_status.ok()) {
       if (!FLAGS_admission_resubmit_on_admissiond_loss

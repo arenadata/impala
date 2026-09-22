@@ -306,8 +306,8 @@ message BackendAllocationPB {
 }
 
 // An admitted query as seen by its coordinator. Sent in AdmissionHeartbeatRequestPB so
-// that an admissiond that lost its state (e.g. after a restart) can re-register the
-// query as running ("adopt" it) and account for its resources.
+// that an admissiond that lost its state (restart, or a different admissiond replica)
+// can re-register the query as running ("adopt" it) and account for its resources.
 message AdmittedQueryPB {
   optional UniqueIdPB query_id = 1;
   optional string request_pool = 2;
