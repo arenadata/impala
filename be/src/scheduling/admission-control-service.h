@@ -68,7 +68,18 @@ class AdmissionControlService : public AdmissionControlServiceIf,
 
   /// Gets a AdmissionControlService proxy to the configured admission control service.
   /// The newly created proxy is returned in 'proxy'. Returns error status on failure.
-  static Status GetProxy(std::unique_ptr<AdmissionControlServiceProxy>* proxy);
+  /// If 'generation' is not null, it is set to the connection generation of the proxy,
+  /// see UseNewConnection().
+  static Status GetProxy(std::unique_ptr<AdmissionControlServiceProxy>* proxy,
+      int64_t* generation = nullptr);
+
+  /// Makes proxies returned by later GetProxy() calls use a new connection to the
+  /// admission service. Called after an admission rpc timed out: KRPC keeps a connection
+  /// whose negotiation hangs (e.g. its SYN went to an admissiond host that is gone) for
+  /// up to --rpc_negotiation_timeout_ms, and all rpcs on it time out meanwhile.
+  /// 'stale_generation' is the generation of the proxy whose rpc timed out; concurrent
+  /// timeouts on the same connection switch to a new one only once.
+  static void UseNewConnection(int64_t stale_generation);
 
   /// Relases the resources for any queries currently running on coordinators that do not
   /// appear in 'current_backends'. Called in response to statestore updates.
@@ -144,6 +155,10 @@ class AdmissionControlService : public AdmissionControlServiceIf,
 
     // The name of the request pool for this query. Valid if 'submitted' is true.
     std::string request_pool = "";
+
+    // True if the query was admitted by another admissiond instance and re-registered
+    // here from its coordinator's heartbeat. 'schedule' is not set for such queries.
+    bool adopted = false;
   };
 
   /// Tracks the memory usage of payload in the service queue.
@@ -156,13 +171,28 @@ class AdmissionControlService : public AdmissionControlServiceIf,
   /// Thread-safe map from query ids to info about the query.
   ShardedQueryPBMap<std::shared_ptr<AdmissionState>> admission_state_map_;
 
+  struct CoordinatorHeartbeat {
+    // The latest heartbeat version number that was processed.
+    int64_t version = 0;
+    // True once a heartbeat with the full list of the coordinator's admitted queries was
+    // processed while the coordinator was in this admissiond's cluster membership, i.e.
+    // its running queries were adopted. Reset when the coordinator leaves the
+    // membership, as its running queries are released then.
+    bool reported = false;
+  };
+
   /// Protects 'coord_id_to_heartbeat_'.
   std::mutex heartbeat_lock_;
-  /// Maps from coordinator ID to the latest heartbeat version number that was processed
-  /// from it. NOTE: Can contain stale data from coordinators that have restarted.
+  /// Maps from coordinator ID to its heartbeat state. NOTE: Can contain stale data from
+  /// coordinators that have restarted.
   /// TODO: Leverage IMPALA-9155 to add coord_id the first time a coord sends a heartbeat
   /// and delete it when goes down.
-  std::unordered_map<UniqueIdPB, int64_t> coord_id_to_heartbeat_;
+  std::unordered_map<UniqueIdPB, CoordinatorHeartbeat> coord_id_to_heartbeat_;
+
+  /// Protects 'adopted_query_ids_'.
+  std::mutex adopted_lock_;
+  /// Ids of adopted queries that are still in 'admission_state_map_'.
+  std::unordered_set<UniqueIdPB> adopted_query_ids_;
 
   /// Callback for 'admission_thread_pool_'.
   void AdmitFromThreadPool(const UniqueIdPB& query_id);
@@ -178,11 +208,55 @@ class AdmissionControlService : public AdmissionControlServiceIf,
   /// was successful.
   bool CheckAndUpdateHeartbeat(const UniqueIdPB& coord_id, int64_t update_version);
 
+  /// Handles the 'admitted_queries' of a heartbeat from 'coord_id': re-registers
+  /// (adopts) admitted queries this admissiond does not know, e.g. after a restart, and
+  /// releases adopted queries that the coordinator reports as released. Does not adopt
+  /// until 'coord_id' is in this admissiond's cluster membership, so that
+  /// CancelQueriesOnFailedCoordinators() does not release the adopted queries again
+  /// while the membership is still partial right after startup. Returns true if
+  /// 'coord_id' was in the membership.
+  bool AdoptOrReleaseReportedQueries(const AdmissionHeartbeatRequestPB& req);
+
+  /// Returns true if the coordinator 'coord_id' should send its admitted queries in its
+  /// next heartbeat: it has not reported them yet (see CoordinatorHeartbeat::reported),
+  /// and it is in the cluster membership ('in_membership') or admission has not started
+  /// yet.
+  bool NeedsAdmittedQueries(const UniqueIdPB& coord_id, bool in_membership);
+
+  /// Returns true if 'coord_id' is in this admissiond's cluster membership.
+  bool IsInMembership(const UniqueIdPB& coord_id);
+
+  /// Removes 'query_id' from 'adopted_query_ids_' if present.
+  void ForgetAdoptedQuery(const UniqueIdPB& query_id);
+
   /// Background thread loop that removes entries from admission_state_map_.
   void AdmissionStateMapCleanupLoop();
 
   /// Indicates whether the admission control service is ready.
   std::atomic_bool service_started_{false};
+
+  /// MonotonicMillis() of the first admission rpc (AdmitQuery or heartbeat) this
+  /// admissiond received, 0 before.
+  std::atomic<int64_t> first_contact_ms_{0};
+
+  /// True once admission no longer waits for coordinators to report their queries.
+  std::atomic_bool adoption_grace_over_{false};
+
+  /// Records the first admission rpc, see 'first_contact_ms_'.
+  void RecordFirstContact();
+
+  /// Returns true if every coordinator in the cluster membership has reported its
+  /// queries in a heartbeat to this admissiond.
+  bool AllCoordinatorsReported();
+
+  /// Blocks admission after startup until every coordinator in the cluster membership
+  /// has reported its running queries, or the adoption grace period
+  /// (--admission_adoption_grace_period_ms) after the first admission rpc, whichever
+  /// comes first.
+  void WaitForAdoptionGracePeriod();
+
+  /// Generation of the connection used by GetProxy(), see UseNewConnection().
+  static std::atomic<int64_t> proxy_generation_;
 
   /// Flag to signal to exit.
   std::atomic_bool shutdown_{false};

@@ -35,6 +35,7 @@ class AdmissionControlClient {
  public:
   static const std::string QUERY_EVENT_SUBMIT_FOR_ADMISSION;
   static const std::string QUERY_EVENT_QUEUED;
+  static const std::string QUERY_EVENT_RESUBMITTED;
   static const std::string QUERY_EVENT_COMPLETED_ADMISSION;
 
   // Creates a new AdmissionControlClient and returns it in 'client'.
@@ -62,6 +63,15 @@ class AdmissionControlClient {
 
   // Indicates if the query was queued or not.
   virtual bool WasQueued() const = 0;
+
+  // If the query was admitted by a remote admission control service, fills
+  // 'admitted_query' with what that service needs to re-register the query after a
+  // restart and returns true. A released query is reported with only its id and
+  // 'released' set; one that is not released yet is reported only if 'all' is true.
+  // Returns false if there is nothing to report. Thread-safe.
+  virtual bool GetAdmittedQuery(bool all, AdmittedQueryPB* admitted_query) {
+    return false;
+  }
 };
 
 } // namespace impala

@@ -350,6 +350,16 @@
     "key": "admission-controller.total-admitted.$0"
   },
   {
+    "description": "Total number of running requests in pool $0 admitted by another admissiond instance and re-registered here after an admissiond restart",
+    "contexts": [
+      "RESOURCE_POOL"
+    ],
+    "label": "Resource Pool $0 Total Adopted",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "admission-controller.total-adopted.$0"
+  },
+  {
     "description": "Total number of requests that have completed and released resources in pool $0",
     "contexts": [
       "RESOURCE_POOL"

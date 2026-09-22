@@ -139,6 +139,8 @@ const string EXEC_REQ_COMPRESSION_RATIO_KEY =
 // '$0' is replaced with the pool name by strings::Substitute
 const string TOTAL_ADMITTED_METRIC_KEY_FORMAT =
   "admission-controller.total-admitted.$0";
+const string TOTAL_ADOPTED_METRIC_KEY_FORMAT =
+  "admission-controller.total-adopted.$0";
 const string TOTAL_QUEUED_METRIC_KEY_FORMAT =
   "admission-controller.total-queued.$0";
 const string TOTAL_DEQUEUED_METRIC_KEY_FORMAT =
@@ -875,6 +877,23 @@ void AdmissionController::PoolStats::AdmitQueryAndMemory(
     // If the query was not previously queued then track the user counts.
     IncrementPerUser(per_user_tracking.user);
   }
+}
+
+void AdmissionController::PoolStats::AdoptQuery(
+    int64_t mem_admitted, bool is_trivial, const std::string& user) {
+  DCHECK_GE(mem_admitted, 0);
+  local_mem_admitted_ += mem_admitted;
+  metrics_.local_mem_admitted->Increment(mem_admitted);
+
+  agg_num_running_ += 1;
+  metrics_.agg_num_running->Increment(1L);
+
+  local_stats_.num_admitted_running += 1;
+  metrics_.local_num_admitted_running->Increment(1L);
+
+  metrics_.total_adopted->Increment(1L);
+  if (is_trivial) ++local_trivial_running_;
+  if (!user.empty()) IncrementPerUser(user);
 }
 
 void AdmissionController::PoolStats::ReleaseQuery(
@@ -2133,6 +2152,57 @@ AdmissionController::CancelQueriesOnFailedCoordinators(
   return to_clean_up;
 }
 
+Status AdmissionController::AdoptRunningQuery(const UniqueIdPB& coord_id,
+    const AdmittedQueryPB& admitted_query, const TPoolConfig& pool_cfg,
+    const TPoolConfig& root_cfg, bool* adopted) {
+  *adopted = false;
+  const UniqueIdPB& query_id = admitted_query.query_id();
+  const string& pool_name = admitted_query.request_pool();
+  if (pool_name.empty()) {
+    return Status(
+        Substitute("Cannot adopt query $0: no request pool", PrintId(query_id)));
+  }
+  {
+    lock_guard<mutex> lock(admission_ctrl_lock_);
+    if (num_released_backends_.find(query_id) != num_released_backends_.end()) {
+      // Already running here (every running query has an entry).
+      return Status::OK();
+    }
+    auto& coord_queries = running_queries_[coord_id];
+    pool_config_map_[pool_name] = pool_cfg;
+    PoolStats* stats = GetPoolStats(pool_name);
+    stats->UpdateConfigMetrics(pool_cfg);
+
+    bool track_per_user = HasQuotaConfig(pool_cfg) || HasQuotaConfig(root_cfg);
+    RunningQuery& running_query = coord_queries[query_id];
+    running_query.request_pool = pool_name;
+    running_query.executor_group = admitted_query.executor_group();
+    running_query.is_trivial = admitted_query.is_trivial();
+    if (track_per_user) running_query.user = admitted_query.admission_user();
+
+    int64_t mem_admitted = 0;
+    for (const BackendAllocationPB& backend : admitted_query.unreleased_backends()) {
+      BackendAllocation& allocation =
+          running_query.per_backend_resources[backend.address()];
+      allocation.slots_to_use = backend.slots_to_use();
+      allocation.mem_to_admit = backend.mem_to_admit();
+      UpdateHostStats(backend.address(), backend.mem_to_admit(), 1,
+          backend.slots_to_use());
+      mem_admitted += backend.mem_to_admit();
+    }
+    num_released_backends_[query_id] = running_query.per_backend_resources.size();
+    stats->AdoptQuery(mem_admitted, running_query.is_trivial, running_query.user);
+    UpdateExecGroupMetric(running_query.executor_group, 1);
+    pools_for_updates_.insert(pool_name);
+    *adopted = true;
+    LOG(INFO) << "Adopted running query " << PrintId(query_id) << " of coordinator "
+              << PrintId(coord_id) << " in pool " << pool_name << " with "
+              << running_query.per_backend_resources.size()
+              << " unreleased backends, mem " << PrintBytes(mem_admitted);
+  }
+  return Status::OK();
+}
+
 Status AdmissionController::ResolvePoolAndGetConfig(const TQueryCtx& query_ctx,
     string* pool_name, TPoolConfig* pool_config, TPoolConfig* root_config) {
   RETURN_IF_ERROR(request_pool_service_->ResolveRequestPool(query_ctx, pool_name));
@@ -2882,6 +2952,14 @@ void AdmissionController::AdmitQuery(
   bool track_per_user = HasQuotaConfig(node->pool_cfg) || HasQuotaConfig(node->root_cfg);
   PerUserTracking per_user_tracking{user, was_queued, track_per_user};
   UpdateStatsOnAdmission(*state, is_trivial, per_user_tracking);
+  // Record what is needed to re-register the query as running after an admissiond
+  // restart; the coordinator reports it back in its admission heartbeats.
+  QuerySchedulePB* schedule_pb = state->query_schedule_pb().get();
+  DCHECK(schedule_pb != nullptr);
+  schedule_pb->set_request_pool(state->request_pool());
+  schedule_pb->set_executor_group(state->executor_group());
+  schedule_pb->set_is_trivial(is_trivial);
+  if (track_per_user) schedule_pb->set_admission_user(user);
   UpdateExecGroupMetric(state->executor_group(), 1);
   // Update summary profile.
   const string& admission_result = was_queued ?
@@ -3059,6 +3137,8 @@ void AdmissionController::PoolStats::ToJson(
   pool->AddMember(
       "total_admitted", metrics_.total_admitted->GetValue(), document->GetAllocator());
   pool->AddMember(
+      "total_adopted", metrics_.total_adopted->GetValue(), document->GetAllocator());
+  pool->AddMember(
       "total_rejected", metrics_.total_rejected->GetValue(), document->GetAllocator());
   pool->AddMember(
       "total_timed_out", metrics_.total_timed_out->GetValue(), document->GetAllocator());
@@ -3109,6 +3189,7 @@ void AdmissionController::PoolStats::ResetInformationalStats() {
   wait_time_ms_ema_ = 0.0;
   // Reset only metrics keeping track of totals since last reset.
   metrics()->total_admitted->SetValue(0);
+  metrics()->total_adopted->SetValue(0);
   metrics()->total_rejected->SetValue(0);
   metrics()->total_queued->SetValue(0);
   metrics()->total_dequeued->SetValue(0);
@@ -3120,6 +3201,8 @@ void AdmissionController::PoolStats::ResetInformationalStats() {
 void AdmissionController::PoolStats::InitMetrics() {
   metrics_.total_admitted = parent_->metrics_group_->AddCounter(
       TOTAL_ADMITTED_METRIC_KEY_FORMAT, 0, name_);
+  metrics_.total_adopted = parent_->metrics_group_->AddCounter(
+      TOTAL_ADOPTED_METRIC_KEY_FORMAT, 0, name_);
   metrics_.total_queued = parent_->metrics_group_->AddCounter(
       TOTAL_QUEUED_METRIC_KEY_FORMAT, 0, name_);
   metrics_.total_dequeued = parent_->metrics_group_->AddCounter(

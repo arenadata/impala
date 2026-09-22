@@ -38,6 +38,7 @@
 #include "util/memory-metrics.h"
 #include "util/parse-util.h"
 #include "util/promise.h"
+#include "util/time.h"
 
 using kudu::rpc::RpcContext;
 using std::bind;
@@ -68,6 +69,21 @@ DEFINE_string(admission_service_host, "",
 DEFINE_int32(admission_status_wait_time_ms, 100,
     "(Advanced) The number of milliseconds the GetQueryStatus() rpc in the admission "
     "control service will wait for admission to complete before returning.");
+DEFINE_bool(admission_adopt_running_queries, true,
+    "(Advanced) If true, the admission control service re-registers running queries "
+    "that its coordinators report in their heartbeats but that it does not know, e.g. "
+    "after an admissiond restart, so that their resources are accounted for until they "
+    "finish.");
+DEFINE_int32(admission_adoption_grace_period_ms, 10000,
+    "(Advanced) After an admissiond starts, it admits queries only when every "
+    "coordinator in the cluster membership has reported its still running queries in a "
+    "heartbeat (--admission_adopt_running_queries), or at the latest this many "
+    "milliseconds after it received its first admission rpc. Raised to at least "
+    "--admission_heartbeat_rpc_timeout_ms + 2 x --admission_heartbeat_frequency_ms, the "
+    "time a coordinator may need to report. 0 disables the wait.");
+
+DECLARE_int32(admission_heartbeat_frequency_ms);
+DECLARE_int32(admission_heartbeat_rpc_timeout_ms);
 
 METRIC_DEFINE_histogram(server, admission_control_service_incoming_queue_time,
     "Admission Control Service RPC Queue Time", kudu::MetricUnit::kMicroseconds,
@@ -148,8 +164,10 @@ void AdmissionControlService::Join() {
   cleanup_thread_->Join();
 }
 
+std::atomic<int64_t> AdmissionControlService::proxy_generation_{0};
+
 Status AdmissionControlService::GetProxy(
-    unique_ptr<AdmissionControlServiceProxy>* proxy) {
+    unique_ptr<AdmissionControlServiceProxy>* proxy, int64_t* generation) {
   NetworkAddressPB admission_service_address;
   RETURN_IF_ERROR(ExecEnv::GetInstance()->GetAdmissionServiceAddress(
       admission_service_address));
@@ -157,13 +175,76 @@ Status AdmissionControlService::GetProxy(
   RETURN_IF_ERROR(ExecEnv::GetInstance()->rpc_mgr()->GetProxy(
       admission_service_address, FLAGS_admission_service_host,
       proxy));
+  // KRPC shares one connection per remote address and network plane; a new plane name
+  // gives a new connection.
+  int64_t current = proxy_generation_.load();
+  if (current > 0) (*proxy)->set_network_plane(Substitute("admission-$0", current));
+  if (generation != nullptr) *generation = current;
   return Status::OK();
+}
+
+void AdmissionControlService::UseNewConnection(int64_t stale_generation) {
+  int64_t expected = stale_generation;
+  if (proxy_generation_.compare_exchange_strong(expected, stale_generation + 1)) {
+    LOG(INFO) << "Admission service rpc timed out; using a new connection (generation "
+              << stale_generation + 1 << ")";
+  }
+}
+
+void AdmissionControlService::RecordFirstContact() {
+  if (first_contact_ms_.load() != 0) return;
+  int64_t expected = 0;
+  first_contact_ms_.compare_exchange_strong(expected, MonotonicMillis());
+}
+
+bool AdmissionControlService::AllCoordinatorsReported() {
+  ClusterMembershipMgr::SnapshotPtr snapshot =
+      AdmissiondEnv::GetInstance()->cluster_membership_mgr()->GetSnapshot();
+  if (snapshot == nullptr) return false;
+  int num_coordinators = 0;
+  lock_guard<mutex> l(heartbeat_lock_);
+  for (const auto& entry : snapshot->current_backends) {
+    if (!entry.second.is_coordinator()) continue;
+    ++num_coordinators;
+    auto it = coord_id_to_heartbeat_.find(entry.second.backend_id());
+    if (it == coord_id_to_heartbeat_.end() || !it->second.reported) return false;
+  }
+  return num_coordinators > 0;
+}
+
+void AdmissionControlService::WaitForAdoptionGracePeriod() {
+  if (adoption_grace_over_.load() || !FLAGS_admission_adopt_running_queries
+      || FLAGS_admission_adoption_grace_period_ms <= 0) {
+    return;
+  }
+  // A coordinator reports within one heartbeat rpc timeout plus two heartbeat periods:
+  // a heartbeat in flight may time out, or carry no admitted queries until a response
+  // asks for them, and the full report follows one period later.
+  int64_t grace_period_ms = max<int64_t>(FLAGS_admission_adoption_grace_period_ms,
+      FLAGS_admission_heartbeat_rpc_timeout_ms
+          + 2 * FLAGS_admission_heartbeat_frequency_ms);
+  int64_t start = MonotonicMillis();
+  while (!shutdown_.load()) {
+    int64_t first = first_contact_ms_.load();
+    bool timed_out = first > 0 && MonotonicMillis() >= first + grace_period_ms;
+    if (timed_out || AllCoordinatorsReported()) {
+      if (!adoption_grace_over_.exchange(true)) {
+        LOG(INFO) << "Admitting queries: "
+                  << (timed_out ? "adoption grace period over" :
+                                  "all coordinators reported their running queries")
+                  << " (waited " << MonotonicMillis() - start << " ms)";
+      }
+      return;
+    }
+    SleepForMs(50);
+  }
 }
 
 void AdmissionControlService::AdmitQuery(
     const AdmitQueryRequestPB* req, AdmitQueryResponsePB* resp, RpcContext* rpc_context) {
   VLOG(1) << "AdmitQuery: query_id=" << req->query_id()
           << " coordinator=" << req->coord_id();
+  RecordFirstContact();
 
   shared_ptr<AdmissionState> admission_state =
       make_shared<AdmissionState>(req->query_id(), req->coord_id());
@@ -228,7 +309,13 @@ void AdmissionControlService::GetQueryStatus(const GetQueryStatusRequestPB* req,
       }
 
       if (admission_state->admission_done) {
-        if (admission_state->admit_status.ok()) {
+        if (admission_state->admit_status.ok() && admission_state->schedule == nullptr) {
+          // An adopted query: its coordinator already has the schedule and does not ask
+          // for it again.
+          DCHECK(admission_state->adopted);
+          status = Status(Substitute("Query $0 was admitted by another admissiond; its "
+              "schedule is not available here.", PrintId(req->query_id())));
+        } else if (admission_state->admit_status.ok()) {
           *resp->mutable_query_schedule() = *admission_state->schedule.get();
           // Free TQueryExecRequest since it's not required after admission is done
           admission_state->ReleaseQueryExecRequest();
@@ -289,6 +376,7 @@ void AdmissionControlService::ReleaseQuery(const ReleaseQueryRequestPB* req,
   // Use async cleanup as the centralized way for admission state deletion, the
   // client should not need to handle deletion errors of this internal map.
   CleanupAdmissionStateMapAsync(req->query_id(), __func__);
+  if (admission_state->adopted) ForgetAdoptedQuery(req->query_id());
   RespondAndReleaseRpc(Status::OK(), resp, rpc_context);
 }
 
@@ -334,11 +422,18 @@ void AdmissionControlService::CancelAdmission(const CancelAdmissionRequestPB* re
 void AdmissionControlService::AdmissionHeartbeat(const AdmissionHeartbeatRequestPB* req,
     AdmissionHeartbeatResponsePB* resp, kudu::rpc::RpcContext* rpc_context) {
   VLOG(2) << "AdmissionHeartbeat: host_id=" << req->host_id();
+  RecordFirstContact();
 
   if(!CheckAndUpdateHeartbeat(req->host_id(), req->version())) {
     VLOG(1) << "Stale heartbeat received for coord_id: "<< req->host_id();
+    resp->set_report_admitted_queries(
+        NeedsAdmittedQueries(req->host_id(), IsInMembership(req->host_id())));
     RespondAndReleaseRpc(Status::OK(), resp, rpc_context);
     return;
+  }
+  bool in_membership = false;
+  if (FLAGS_admission_adopt_running_queries) {
+    in_membership = AdoptOrReleaseReportedQueries(*req);
   }
   std::unordered_set<UniqueIdPB> query_ids;
   for (const UniqueIdPB& query_id : req->query_ids()) {
@@ -350,9 +445,153 @@ void AdmissionControlService::AdmissionHeartbeat(const AdmissionHeartbeatRequest
 
   for (const UniqueIdPB& query_id : cleaned_up) {
     CleanupAdmissionStateMapAsync(query_id, __func__);
+    ForgetAdoptedQuery(query_id);
   }
+  if (in_membership && req->all_admitted_queries()) {
+    lock_guard<mutex> l(heartbeat_lock_);
+    coord_id_to_heartbeat_[req->host_id()].reported = true;
+  }
+  resp->set_report_admitted_queries(NeedsAdmittedQueries(req->host_id(), in_membership));
 
   RespondAndReleaseRpc(Status::OK(), resp, rpc_context);
+}
+
+bool AdmissionControlService::NeedsAdmittedQueries(
+    const UniqueIdPB& coord_id, bool in_membership) {
+  if (!FLAGS_admission_adopt_running_queries) return false;
+  // Queries of a coordinator outside the membership are not adopted. Ask for them
+  // anyway until admission starts, so that a coordinator that joins the membership
+  // meanwhile has sent its report by then, but not later: a coordinator that never
+  // joins would otherwise send its full report with every heartbeat.
+  if (!in_membership && adoption_grace_over_.load()) return false;
+  lock_guard<mutex> l(heartbeat_lock_);
+  auto it = coord_id_to_heartbeat_.find(coord_id);
+  return it == coord_id_to_heartbeat_.end() || !it->second.reported;
+}
+
+bool AdmissionControlService::IsInMembership(const UniqueIdPB& coord_id) {
+  ClusterMembershipMgr::SnapshotPtr snapshot =
+      AdmissiondEnv::GetInstance()->cluster_membership_mgr()->GetSnapshot();
+  return snapshot != nullptr
+      && snapshot->current_backends.find(PrintId(coord_id))
+          != snapshot->current_backends.end();
+}
+
+bool AdmissionControlService::AdoptOrReleaseReportedQueries(
+    const AdmissionHeartbeatRequestPB& req) {
+  const UniqueIdPB& coord_id = req.host_id();
+  AdmissionController* admission_controller =
+      AdmissiondEnv::GetInstance()->admission_controller();
+  bool in_membership = IsInMembership(coord_id);
+  // Pool configs are looked up through JNI; fetch each at most once per heartbeat.
+  RequestPoolService* request_pool_service =
+      AdmissiondEnv::GetInstance()->request_pool_service();
+  std::unordered_map<string, TPoolConfig> pool_configs;
+  auto get_pool_config = [&](const string& pool, const TPoolConfig** cfg) -> Status {
+    auto it = pool_configs.find(pool);
+    if (it == pool_configs.end()) {
+      TPoolConfig loaded;
+      RETURN_IF_ERROR(request_pool_service->GetPoolConfig(pool, &loaded));
+      it = pool_configs.emplace(pool, std::move(loaded)).first;
+    }
+    *cfg = &it->second;
+    return Status::OK();
+  };
+
+  for (const AdmittedQueryPB& admitted_query : req.admitted_queries()) {
+    const UniqueIdPB& query_id = admitted_query.query_id();
+    bool was_adopted;
+    {
+      lock_guard<mutex> l(adopted_lock_);
+      was_adopted = adopted_query_ids_.find(query_id) != adopted_query_ids_.end();
+    }
+    if (admitted_query.released()) {
+      // An adoption from a heartbeat that was sent before the coordinator released the
+      // query; the release itself did not find the query here. Undo it.
+      if (!was_adopted) continue;
+      shared_ptr<AdmissionState> admission_state;
+      if (admission_state_map_.Get(query_id, &admission_state).ok()) {
+        bool release = false;
+        {
+          lock_guard<mutex> l(admission_state->lock);
+          if (!admission_state->released) {
+            admission_state->released = true;
+            release = true;
+          }
+        }
+        if (release) {
+          LOG(INFO) << "Releasing adopted query " << PrintId(query_id)
+                    << " that its coordinator " << PrintId(coord_id)
+                    << " reports as released.";
+          admission_controller->ReleaseQuery(query_id, coord_id, -1,
+              /* release_remaining_backends */ true);
+        }
+        // If an older full heartbeat processed concurrently re-adopts the query before
+        // this delete runs, the delete removes that adoption's state while the admission
+        // controller still counts the query; CleanupQueriesForHost() releases it once
+        // the coordinator unregisters the query.
+        CleanupAdmissionStateMapAsync(query_id, __func__);
+      }
+      ForgetAdoptedQuery(query_id);
+      continue;
+    }
+    if (was_adopted || !in_membership) continue;
+    shared_ptr<AdmissionState> existing;
+    if (admission_state_map_.Get(query_id, &existing).ok()) continue;
+
+    bool adopted = false;
+    const TPoolConfig* pool_cfg = nullptr;
+    const TPoolConfig* root_cfg = nullptr;
+    Status status = admitted_query.request_pool().empty() ?
+        Status("no request pool") :
+        get_pool_config(admitted_query.request_pool(), &pool_cfg);
+    if (status.ok()) status = get_pool_config("root", &root_cfg);
+    if (status.ok()) {
+      // A ReleaseQueryBackends rpc arriving between this call and the insertion into
+      // 'admission_state_map_' below gets INVALID_QUERY_HANDLE; its backends stay
+      // accounted for until ReleaseQuery (release_remaining_backends).
+      status = admission_controller->AdoptRunningQuery(
+          coord_id, admitted_query, *pool_cfg, *root_cfg, &adopted);
+    }
+    if (!status.ok()) {
+      LOG(WARNING) << "Could not adopt query " << PrintId(query_id) << " of coordinator "
+                   << PrintId(coord_id) << ": " << status.GetDetail();
+      continue;
+    }
+    if (!adopted) continue;
+    shared_ptr<AdmissionState> admission_state =
+        make_shared<AdmissionState>(query_id, coord_id);
+    admission_state->summary_profile =
+        RuntimeProfile::Create(&admission_state->profile_pool, "Summary");
+    admission_state->submitted = true;
+    admission_state->admission_done = true;
+    admission_state->adopted = true;
+    admission_state->request_pool = admitted_query.request_pool();
+    for (const BackendAllocationPB& backend : admitted_query.unreleased_backends()) {
+      admission_state->unreleased_backends.emplace(backend.address());
+    }
+    {
+      // Hold 'adopted_lock_' so that a concurrent heartbeat does not see the query as
+      // unknown between the two insertions.
+      lock_guard<mutex> l(adopted_lock_);
+      if (!admission_state_map_.Add(query_id, admission_state).ok()) {
+        // An AdmitQuery for the same id arrived meanwhile. The coordinator only reports
+        // queries it holds a schedule for, so this is not expected; undo the adoption.
+        LOG(WARNING) << "Query " << PrintId(query_id)
+                     << " was submitted while being adopted, releasing the adoption.";
+        admission_controller->ReleaseQuery(query_id, coord_id, -1,
+            /* release_remaining_backends */ true);
+        continue;
+      }
+      adopted_query_ids_.insert(query_id);
+    }
+  }
+  return in_membership;
+}
+
+void AdmissionControlService::ForgetAdoptedQuery(const UniqueIdPB& query_id) {
+  lock_guard<mutex> l(adopted_lock_);
+  adopted_query_ids_.erase(query_id);
 }
 
 void AdmissionControlService::CancelQueriesOnFailedCoordinators(
@@ -365,11 +604,21 @@ void AdmissionControlService::CancelQueriesOnFailedCoordinators(
   for (const auto& entry : cleaned_up) {
     for (const UniqueIdPB& query_id : entry.second) {
       CleanupAdmissionStateMapAsync(query_id, __func__);
+      ForgetAdoptedQuery(query_id);
+    }
+  }
+  // Their running queries were released: a coordinator that comes back (e.g. after a
+  // transient membership drop) must report them again to have them adopted.
+  lock_guard<mutex> l(heartbeat_lock_);
+  for (auto& entry : coord_id_to_heartbeat_) {
+    if (current_backends.find(entry.first) == current_backends.end()) {
+      entry.second.reported = false;
     }
   }
 }
 
 void AdmissionControlService::AdmitFromThreadPool(const UniqueIdPB& query_id) {
+  WaitForAdoptionGracePeriod();
   shared_ptr<AdmissionState> admission_state;
   Status s = admission_state_map_.Get(query_id, &admission_state);
   if (!s.ok()) {
@@ -425,9 +674,9 @@ void AdmissionControlService::RespondAndReleaseRpc(
 bool AdmissionControlService::CheckAndUpdateHeartbeat(
     const UniqueIdPB& coord_id, int64_t update_version) {
   lock_guard<mutex> l(heartbeat_lock_);
-  auto& curr_version = coord_id_to_heartbeat_[coord_id];
-  if(curr_version < update_version){
-    curr_version = update_version;
+  CoordinatorHeartbeat& heartbeat = coord_id_to_heartbeat_[coord_id];
+  if (heartbeat.version < update_version) {
+    heartbeat.version = update_version;
     return true;
   }
   return false;
