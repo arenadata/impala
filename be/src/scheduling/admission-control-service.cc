@@ -150,7 +150,8 @@ Status AdmissionControlService::Init() {
   RETURN_IF_ERROR(Thread::Create("admission-control-service",
       "admission-state-map-cleanup",
       &AdmissionControlService::AdmissionStateMapCleanupLoop, this, &cleanup_thread_));
-  if (FLAGS_admission_coordinator_heartbeat_timeout_s > 0) {
+  // With admissiond HA the loop also drops the adoption floor and tracks the fence.
+  if (FLAGS_admission_coordinator_heartbeat_timeout_s > 0 || FLAGS_enable_admissiond_ha) {
     RETURN_IF_ERROR(Thread::Create("admission-control-service",
         "admission-coordinator-ageing", &AdmissionControlService::CoordinatorAgeingLoop,
         this, &ageing_thread_));
@@ -614,7 +615,9 @@ void AdmissionControlService::CoordinatorAgeingLoop() {
           + FLAGS_admission_heartbeat_frequency_ms);
   int64_t timeout_ms = max<int64_t>(
       FLAGS_admission_coordinator_heartbeat_timeout_s * MILLIS_PER_SEC, min_timeout_ms);
-  if (timeout_ms > FLAGS_admission_coordinator_heartbeat_timeout_s * MILLIS_PER_SEC) {
+  bool ageing = FLAGS_admission_coordinator_heartbeat_timeout_s > 0;
+  if (ageing
+      && timeout_ms > FLAGS_admission_coordinator_heartbeat_timeout_s * MILLIS_PER_SEC) {
     LOG(WARNING) << "--admission_coordinator_heartbeat_timeout_s raised to "
                  << timeout_ms / MILLIS_PER_SEC
                  << " s (3 x heartbeat rpc timeout + period)";
@@ -635,6 +638,7 @@ void AdmissionControlService::CoordinatorAgeingLoop() {
       fenced_metric_->SetValue(fenced ? 1 : 0);
       active_metric_->SetValue(IsActive() && !fenced ? 1 : 0);
     }
+    if (!ageing) continue;
     vector<UniqueIdPB> coord_ids =
         admission_controller->GetCoordinatorsWithRunningQueries();
     int64_t now = MonotonicMillis();
@@ -760,7 +764,9 @@ void AdmissionControlService::MaybeDropAdoptionFloor(int64_t timeout_ms) {
   bool expired =
       timeout_ms > 0 && MonotonicMillis() - promoted_ms_.load() >= timeout_ms;
   if (!all_reported && !expired) return;
-  if (!floor_active_.exchange(false)) return;
+  // Serialized with Promote() and Demote(), which also set the floor and the retain flag.
+  lock_guard<mutex> l(role_lock_);
+  if (!IsActive() || !floor_active_.exchange(false)) return;
   AdmissionController* admission_controller =
       AdmissiondEnv::GetInstance()->admission_controller();
   // Stats deleted from now on belong to no failover of this promotion.

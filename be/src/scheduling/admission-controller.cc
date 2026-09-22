@@ -2168,8 +2168,8 @@ void AdmissionController::PoolStats::FreezeRemoteStats(
   frozen = host_stats;
   // Coordinators resubmit their queued queries to the new active admissiond.
   frozen.num_queued = 0;
-  VLOG_QUERY << "Keeping the last stats of pool " << name_ << " from " << host_id
-             << ": " << DebugPoolStats(frozen);
+  LOG(INFO) << "Keeping the last stats of pool " << name_ << " from failed " << host_id
+            << ": " << DebugPoolStats(frozen);
 }
 
 bool AdmissionController::PoolStats::ClearFrozenStats() {
