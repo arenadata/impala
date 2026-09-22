@@ -17,6 +17,8 @@
 
 #include "scheduling/admissiond-env.h"
 
+#include <gflags/gflags.h>
+
 #include "common/daemon-env.h"
 #include "rpc/rpc-mgr.h"
 #include "runtime/mem-tracker.h"
@@ -35,6 +37,11 @@
 
 DEFINE_int32(
     admission_service_port, 29500, "The port where the admission control service runs");
+DEFINE_int32(admissiond_ha_statestore_subscriber_timeout_s, 10, "(Advanced) With "
+    "admissiond HA, the admissiond's --statestore_subscriber_timeout_seconds unless that "
+    "flag is set: an active admissiond without statestore heartbeats stops admitting "
+    "(--admissiond_ha_statestore_lease_ms) and admits again only after it re-registered, "
+    "e.g. with a restarted statestore, so it should notice a lost statestore soon.");
 
 DECLARE_string(state_store_host);
 DECLARE_int32(state_store_port);
@@ -45,6 +52,7 @@ DECLARE_string(hostname);
 DECLARE_string(cluster_membership_topic_id);
 DECLARE_bool(enable_admissiond_ha);
 DECLARE_bool(force_admissiond_active);
+DECLARE_int32(statestore_subscriber_timeout_seconds);
 
 namespace impala {
 
@@ -65,6 +73,15 @@ AdmissiondEnv::AdmissiondEnv()
       MakeNetworkAddress(FLAGS_state_store_host, FLAGS_state_store_port);
   TNetworkAddress statestore2_address =
       MakeNetworkAddress(FLAGS_state_store_2_host, FLAGS_state_store_2_port);
+  if (FLAGS_enable_admissiond_ha
+      && FLAGS_admissiond_ha_statestore_subscriber_timeout_s > 0
+      && google::GetCommandLineFlagInfoOrDie("statestore_subscriber_timeout_seconds")
+             .is_default) {
+    FLAGS_statestore_subscriber_timeout_seconds =
+        FLAGS_admissiond_ha_statestore_subscriber_timeout_s;
+    LOG(INFO) << "Admissiond HA: --statestore_subscriber_timeout_seconds="
+              << FLAGS_statestore_subscriber_timeout_seconds;
+  }
   string subscriber_id = Substitute("admissiond@$0",
       TNetworkAddressToString(admission_service_addr));
   if (!FLAGS_cluster_membership_topic_id.empty()) {
