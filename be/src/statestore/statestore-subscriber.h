@@ -148,6 +148,11 @@ class StatestoreSubscriber {
   /// Adds a callback for notification of updating the active admissiond.
   void AddUpdateAdmissiondTopic(const UpdateAdmissiondCallback& callback);
 
+  /// Milliseconds since the last heartbeat (or registration) from the active statestore.
+  /// Used by admissiond HA to stop admitting when the statestore may have designated
+  /// another admissiond.
+  int64_t MilliSecondsSinceActiveStatestoreHeartbeat();
+
   /// Sets the registration info of this admissiond, sent to the statestore on every
   /// registration, with 'is_active' telling whether it is the active admissiond at that
   /// time. Must be called before Start().
@@ -375,6 +380,12 @@ class StatestoreSubscriber {
       return MonotonicMillis() - last_registration_ms_.Load();
     }
 
+    /// Milliseconds since the last heartbeat or registration.
+    int64_t MilliSecondsSinceLastHeartbeat() const {
+      return MonotonicMillis()
+          - std::max(last_heartbeat_ms_.Load(), last_registration_ms_.Load());
+    }
+
     int64_t MilliSecondsSinceLastFailover() const {
       int64_t time_ms = MonotonicMillis() - last_failover_time_.Load();
       DCHECK_GE(time_ms, 0);
@@ -541,6 +552,9 @@ class StatestoreSubscriber {
 
     /// Monotonic timestamp of the last successful registration.
     AtomicInt64 last_registration_ms_{0};
+
+    /// MonotonicMillis() of the last heartbeat for the current registration.
+    AtomicInt64 last_heartbeat_ms_{0};
   };
 
   /// Set to true if statestored HA is enabled.

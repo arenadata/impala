@@ -82,6 +82,13 @@ DEFINE_int32(admission_adoption_grace_period_ms, 10000,
     "--admission_heartbeat_rpc_timeout_ms + 2 x --admission_heartbeat_frequency_ms, the "
     "time a coordinator may need to report. 0 disables the wait.");
 
+DEFINE_int64(admissiond_ha_statestore_lease_ms, 5000, "(Advanced) With admissiond HA, "
+    "an active admissiond stops admitting queries while it has had no heartbeat from the "
+    "active statestore for this many milliseconds, so that it does not admit after the "
+    "statestore may have designated the other admissiond. Must be shorter than the "
+    "statestore's failure detection (--statestore_max_missed_heartbeats x "
+    "--statestore_heartbeat_frequency_ms). 0 disables it.");
+
 DECLARE_int32(admission_heartbeat_frequency_ms);
 DECLARE_int32(admission_heartbeat_rpc_timeout_ms);
 DECLARE_bool(enable_admissiond_ha);
@@ -106,6 +113,7 @@ AdmissionControlService::AdmissionControlService(MetricGroup* metric_group)
     active_admissiond_version_checker_(new ActiveCatalogdVersionChecker()) {
   active_metric_ =
       metric_group->AddGauge("admission-control-service.active", IsActive() ? 1 : 0);
+  fenced_metric_ = metric_group->AddGauge("admission-control-service.fenced", 0);
   MemTracker* process_mem_tracker = AdmissiondEnv::GetInstance()->process_mem_tracker();
   bool is_percent; // not used
   int64_t bytes_limit =
@@ -231,7 +239,9 @@ void AdmissionControlService::WaitForAdoptionGracePeriod() {
   while (!shutdown_.load()) {
     int64_t first = first_contact_ms_.load();
     bool timed_out = first > 0 && MonotonicMillis() >= first + grace_period_ms;
-    if (timed_out || AllCoordinatorsReported()) {
+    bool all_reported = AllCoordinatorsReported();
+    if (all_reported) MaybeDropAdoptionFloor(0);
+    if (timed_out || all_reported) {
       if (!adoption_grace_over_.exchange(true)) {
         LOG(INFO) << "Admitting queries: "
                   << (timed_out ? "adoption grace period over" :
@@ -613,6 +623,16 @@ void AdmissionControlService::CoordinatorAgeingLoop() {
       AdmissiondEnv::GetInstance()->admission_controller();
   while (!shutdown_.load()) {
     SleepForMs(MILLIS_PER_SEC);
+    MaybeDropAdoptionFloor(timeout_ms);
+    bool fenced = IsActive() && IsFenced();
+    if (fenced != (fenced_metric_->GetValue() == 1)) {
+      LOG(WARNING) << (fenced ? "Fenced: no heartbeat from the active statestore for "
+                                "more than --admissiond_ha_statestore_lease_ms, not "
+                                "admitting queries until heartbeats resume." :
+                                "Not fenced any more: statestore heartbeats resumed.");
+      fenced_metric_->SetValue(fenced ? 1 : 0);
+      active_metric_->SetValue(IsActive() && !fenced ? 1 : 0);
+    }
     vector<UniqueIdPB> coord_ids =
         admission_controller->GetCoordinatorsWithRunningQueries();
     int64_t now = MonotonicMillis();
@@ -711,13 +731,42 @@ void AdmissionControlService::AdmitFromThreadPool(const UniqueIdPB& query_id) {
   }
 }
 
+bool AdmissionControlService::IsFenced() const {
+  if (!FLAGS_enable_admissiond_ha || FLAGS_admissiond_ha_statestore_lease_ms <= 0) {
+    return false;
+  }
+  return AdmissiondEnv::GetInstance()
+             ->subscriber()
+             ->MilliSecondsSinceActiveStatestoreHeartbeat()
+      > FLAGS_admissiond_ha_statestore_lease_ms;
+}
+
 bool AdmissionControlService::RejectIfNotActive(RpcContext* rpc_context) {
-  if (LIKELY(IsActive())) return false;
+  bool active = IsActive();
+  if (LIKELY(active && !IsFenced())) return false;
   mem_tracker_->Release(rpc_context->GetTransferSize());
   rpc_context->RespondRpcFailure(kudu::rpc::ErrorStatusPB::ERROR_UNAVAILABLE,
-      kudu::Status::ServiceUnavailable(Substitute("admissiond $0:$1 $2", FLAGS_hostname,
-          FLAGS_admission_service_port, NOT_ACTIVE_MSG)));
+      kudu::Status::ServiceUnavailable(Substitute("admissiond $0:$1 $2$3", FLAGS_hostname,
+          FLAGS_admission_service_port, NOT_ACTIVE_MSG,
+          active ? " (fenced: no heartbeat from the active statestore)" : "")));
   return true;
+}
+
+void AdmissionControlService::MaybeDropAdoptionFloor(int64_t timeout_ms) {
+  if (!floor_active_.load()) return;
+  bool all_reported = AllCoordinatorsReported();
+  bool expired =
+      timeout_ms > 0 && MonotonicMillis() - promoted_ms_.load() >= timeout_ms;
+  if (!all_reported && !expired) return;
+  if (!floor_active_.exchange(false)) return;
+  AdmissionController* admission_controller =
+      AdmissiondEnv::GetInstance()->admission_controller();
+  // Stats deleted from now on belong to no failover of this promotion.
+  admission_controller->SetRetainRemoteStats(false);
+  bool dropped = admission_controller->DropAdoptionFloor();
+  LOG(INFO) << "Adoption floor " << (dropped ? "dropped" : "empty") << ": "
+            << (all_reported ? "all coordinators reported their running queries" :
+                               "coordinator heartbeat timeout since the promotion");
 }
 
 void AdmissionControlService::UpdateActiveAdmissiond(bool reset_version,
@@ -751,6 +800,11 @@ void AdmissionControlService::Promote() {
   // time and report within a heartbeat.
   first_contact_ms_.store(MonotonicMillis());
   adoption_grace_over_.store(false);
+  // Keep counting the queries of the previous active admissiond (its last published
+  // stats) until their coordinators report them.
+  promoted_ms_.store(MonotonicMillis());
+  AdmissiondEnv::GetInstance()->admission_controller()->StartAdoptionFloor();
+  floor_active_.store(true);
   is_active_.store(true);
   active_metric_->SetValue(1);
   LOG(INFO) << "This admissiond is now the active admissiond.";
@@ -788,6 +842,10 @@ void AdmissionControlService::Demote() {
     lock_guard<mutex> l(adopted_lock_);
     adopted_query_ids_.clear();
   }
+  floor_active_.store(false);
+  admission_controller->DropAdoptionFloor();
+  // As a standby, keep the stats of the active admissiond when it fails.
+  admission_controller->SetRetainRemoteStats(true);
   LOG(INFO) << "This admissiond is now a standby admissiond: cancelled " << num_cancelled
             << " queued and released " << num_released << " running queries.";
 }

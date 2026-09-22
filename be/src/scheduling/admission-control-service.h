@@ -100,6 +100,12 @@ class AdmissionControlService : public AdmissionControlServiceIf,
   /// otherwise only while the statestore designates it as the active admissiond.
   bool IsActive() const { return is_active_.load(); }
 
+  /// Admissiond HA lease: true if this admissiond has had no heartbeat from the active
+  /// statestore for --admissiond_ha_statestore_lease_ms. The statestore may then have
+  /// designated the other admissiond (it does so only after missing more heartbeats), so
+  /// an active admissiond stops admitting until heartbeats resume.
+  bool IsFenced() const;
+
   /// Statestore callback with the active admissiond (admissiond HA). Promotes this
   /// admissiond if the active one is this instance and demotes it otherwise, see
   /// Promote() and Demote().
@@ -255,8 +261,22 @@ class AdmissionControlService : public AdmissionControlServiceIf,
   /// True while this admissiond admits queries, see IsActive().
   std::atomic_bool is_active_;
 
-  /// Metric for 'is_active_' (1 or 0), read by the autoscaler.
+  /// Metric for 'is_active_' (1 or 0, 0 while fenced), read by the autoscaler.
   IntGauge* active_metric_ = nullptr;
+
+  /// 1 while an active admissiond is fenced, see IsFenced().
+  IntGauge* fenced_metric_ = nullptr;
+
+  /// True from a promotion until the adoption floor is dropped, see Promote().
+  std::atomic_bool floor_active_{false};
+
+  /// MonotonicMillis() of the last promotion.
+  std::atomic<int64_t> promoted_ms_{0};
+
+  /// Drops the adoption floor once every coordinator has reported its queries, or after
+  /// the coordinator heartbeat timeout 'timeout_ms' from the promotion. Called from the
+  /// coordinator ageing loop and the admission gate.
+  void MaybeDropAdoptionFloor(int64_t timeout_ms);
 
   /// Protects 'active_admissiond_version_checker_' and serializes role changes.
   std::mutex role_lock_;

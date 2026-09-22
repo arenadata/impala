@@ -453,6 +453,12 @@ void StatestoreSubscriber::UpdateCatalogd(
   }
 }
 
+int64_t StatestoreSubscriber::MilliSecondsSinceActiveStatestoreHeartbeat() {
+  StatestoreStub* active_statestore = GetActiveStatestore();
+  if (active_statestore == nullptr) active_statestore = statestore_;
+  return active_statestore->MilliSecondsSinceLastHeartbeat();
+}
+
 void StatestoreSubscriber::UpdateAdmissiond(
     const TAdmissiondRegistration& admissiond_registration,
     const RegistrationId& registration_id, const TUniqueId& statestore_id,
@@ -993,6 +999,7 @@ void StatestoreSubscriber::StatestoreStub::Heartbeat(
     heartbeat_interval_metric_->Update(
         heartbeat_interval_timer_.LapTime() / (1000.0 * 1000.0 * 1000.0));
     failure_detector_->UpdateHeartbeat(STATESTORE_ID, true);
+    last_heartbeat_ms_.Store(MonotonicMillis());
   } else {
     VLOG_RPC << "Heartbeat: " << status.GetDetail();
   }

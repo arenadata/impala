@@ -1546,6 +1546,81 @@ TEST_F(AdmissionControllerTest, PoolStats) {
 
 /// Test re-registering ("adopting") a query admitted by another admissiond instance and
 /// releasing it again, as the admission control service does after a restart.
+// Admissiond HA: the last stats of a failed active admissiond keep the slots of its
+// running queries until their coordinators report them (adoption floor).
+TEST_F(AdmissionControllerTest, AdoptionFloor) {
+  UniqueIdPB* coord_id = pool_.Add(new UniqueIdPB());
+  coord_id->set_hi(1);
+  coord_id->set_lo(2);
+  AdmissionController* admission_controller = MakeAdmissionController(coord_id);
+  const string QUEUE = "unused";
+  const string OTHER = "admissiond-1:29500";
+  TPoolConfig pool_cfg;
+  TPoolConfig root_cfg;
+  ASSERT_OK(admission_controller->request_pool_service_->GetPoolConfig(QUEUE, &pool_cfg));
+  ASSERT_OK(
+      admission_controller->request_pool_service_->GetPoolConfig(QUEUE_ROOT, &root_cfg));
+  admission_controller->SetRetainRemoteStats(true);
+  vector<TTopicDelta> outgoing;
+
+  // The active admissiond publishes 2 running and 1 queued queries, then fails.
+  TTopicDelta update = MakeTopicDelta(true);
+  AddStatsToTopic(&update, OTHER, QUEUE, MakePoolStats(1000, 2, 1));
+  StatestoreSubscriber::TopicDeltaMap deltas;
+  deltas.emplace(Statestore::IMPALA_REQUEST_QUEUE_TOPIC, update);
+  admission_controller->UpdatePoolStats(deltas, &outgoing);
+  AdmissionController::PoolStats* pool_stats = admission_controller->GetPoolStats(QUEUE);
+  ASSERT_EQ(2, pool_stats->agg_num_running());
+  TTopicDelta deletion = MakeTopicDelta(true);
+  TTopicItem item;
+  item.key = AdmissionController::MakePoolTopicKey(QUEUE, OTHER);
+  item.deleted = true;
+  deletion.topic_entries.push_back(item);
+  deltas.clear();
+  deltas.emplace(Statestore::IMPALA_REQUEST_QUEUE_TOPIC, deletion);
+  admission_controller->UpdatePoolStats(deltas, &outgoing);
+  // Its running queries still count; its queued ones are resubmitted, so they do not.
+  admission_controller->StartAdoptionFloor();
+  ASSERT_EQ(2, pool_stats->agg_num_running());
+  ASSERT_EQ(0, pool_stats->agg_num_queued());
+
+  // Adopting one of them does not add to the count.
+  AdmittedQueryPB admitted_query;
+  admitted_query.mutable_query_id()->set_hi(3);
+  admitted_query.mutable_query_id()->set_lo(4);
+  admitted_query.set_request_pool(QUEUE);
+  bool adopted = false;
+  ASSERT_OK(admission_controller->AdoptRunningQuery(
+      *coord_id, admitted_query, pool_cfg, root_cfg, &adopted));
+  ASSERT_TRUE(adopted);
+  ASSERT_EQ(2, pool_stats->agg_num_running());
+  // Releasing it frees its slot; the other unreported query keeps its slot.
+  admission_controller->ReleaseQuery(admitted_query.query_id(), *coord_id, -1,
+      /* release_remaining_backends */ true);
+  admission_controller->UpdatePoolStats(StatestoreSubscriber::TopicDeltaMap(), &outgoing);
+  ASSERT_EQ(1, pool_stats->agg_num_running());
+
+  // A query beyond the frozen ones counts on top.
+  AdmittedQueryPB second = admitted_query;
+  second.mutable_query_id()->set_lo(5);
+  AdmittedQueryPB third = admitted_query;
+  third.mutable_query_id()->set_lo(6);
+  ASSERT_OK(admission_controller->AdoptRunningQuery(
+      *coord_id, second, pool_cfg, root_cfg, &adopted));
+  ASSERT_EQ(1, pool_stats->agg_num_running());
+  ASSERT_OK(admission_controller->AdoptRunningQuery(
+      *coord_id, third, pool_cfg, root_cfg, &adopted));
+  ASSERT_EQ(2, pool_stats->agg_num_running());
+
+  // Dropping the floor leaves the local queries.
+  ASSERT_TRUE(admission_controller->DropAdoptionFloor());
+  ASSERT_EQ(2, pool_stats->agg_num_running());
+  ASSERT_FALSE(admission_controller->DropAdoptionFloor());
+  admission_controller->ReleaseQuery(second.query_id(), *coord_id, -1, true);
+  admission_controller->ReleaseQuery(third.query_id(), *coord_id, -1, true);
+  CheckPoolStatsEmpty(pool_stats);
+}
+
 TEST_F(AdmissionControllerTest, AdoptRunningQuery) {
   UniqueIdPB* coord_id = pool_.Add(new UniqueIdPB());
   coord_id->set_hi(1);

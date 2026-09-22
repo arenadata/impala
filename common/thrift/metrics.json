@@ -2289,6 +2289,16 @@
     "key": "admission-control-service.active"
   },
   {
+    "description": "1 while this active admissiond does not admit queries because it has had no heartbeat from the active statestore for --admissiond_ha_statestore_lease_ms (admissiond HA); 0 otherwise.",
+    "contexts": [
+      "ADMISSIOND"
+    ],
+    "label": "Admission Control Service Fenced",
+    "units": "NONE",
+    "kind": "GAUGE",
+    "key": "admission-control-service.fenced"
+  },
+  {
     "description": "The address of active admission daemon (admissiond HA).",
     "contexts": [
       "STATESTORE"

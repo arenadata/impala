@@ -451,6 +451,25 @@ class AdmissionController {
   /// Returns the ids of the coordinators that have running queries.
   std::vector<UniqueIdPB> GetCoordinatorsWithRunningQueries();
 
+  /// Admissiond HA, adoption floor. With 'retain' true, the pool and per-host stats that
+  /// another admissiond published in the request queue topic are kept ("frozen") when
+  /// the statestore deletes them, i.e. when that admissiond failed: they are its last
+  /// view of the running queries. Only used in the context of the admission control
+  /// service.
+  void SetRetainRemoteStats(bool retain);
+
+  /// Called when this admissiond becomes the active one. Until DropAdoptionFloor(), each
+  /// pool counts max(0, frozen running - queries adopted since this call) on top of its
+  /// own queries, so the queries the previous active admissiond admitted keep their
+  /// slots until their coordinators report them; frozen memory and per-host stats keep
+  /// counting in full (conservative). Frozen queued counts are ignored because
+  /// coordinators resubmit their queued queries. Logs the floor.
+  void StartAdoptionFloor();
+
+  /// Forgets all frozen stats, e.g. once every coordinator has reported its queries.
+  /// Returns true if there were any.
+  bool DropAdoptionFloor();
+
   /// Releases the resources of all running queries of the coordinator 'coord_id', e.g.
   /// because it stopped sending heartbeats to this admissiond. Queued queries are not
   /// touched. Returns the queries that were released. Only used in the context of the
@@ -560,6 +579,13 @@ class AdmissionController {
   /// PerHostStats. Used to get a full view of the cluster state while making admission
   /// decisions. Updated via statestore updates.
   std::unordered_map<std::string, PerHostStats> remote_per_host_stats_;
+
+  /// Admissiond HA, see SetRetainRemoteStats(): true to freeze deleted remote stats.
+  bool retain_remote_stats_ = false;
+
+  /// Hosts whose entries in 'remote_per_host_stats_' are frozen (their topic entries
+  /// were deleted while 'retain_remote_stats_' was set).
+  std::set<std::string> frozen_per_host_stats_hosts_;
 
   /// Counter of the number of times dequeuing a query failed because of a resource
   /// issue on the coordinator (which therefore cannot be resolved by adding more
@@ -726,6 +752,20 @@ class AdmissionController {
     /// are removed (i.e. topic deletion).
     void UpdateRemoteStats(const std::string& backend_id, TPoolStats* host_stats);
 
+    /// Admissiond HA adoption floor (see AdmissionController::StartAdoptionFloor()).
+    /// Keeps 'host_stats' of a deleted remote host, without its queued queries.
+    void FreezeRemoteStats(const std::string& backend_id, const TPoolStats& host_stats);
+    /// Starts counting adopted queries against the frozen running queries.
+    void StartAdoptionFloor() { num_adopted_since_floor_ = 0; }
+    /// Forgets the frozen stats of 'backend_id', which publishes again.
+    void UnfreezeRemoteStats(const std::string& backend_id) {
+      frozen_stats_.erase(backend_id);
+    }
+    /// Forgets the frozen stats. Returns true if there were any.
+    bool ClearFrozenStats();
+    /// Frozen running queries not accounted for by adopted ones.
+    int64_t FloorRunning() const;
+
     /// Maps from host id to memory reserved and memory admitted, both aggregates over all
     /// pools. See the class doc for a detailed definition of reserved and admitted.
     /// Protected by admission_ctrl_lock_.
@@ -745,6 +785,7 @@ class AdmissionController {
     // A map from the id of a host to the TPoolStats about that host.
     typedef boost::unordered_map<std::string, TPoolStats> RemoteStatsMap;
     const RemoteStatsMap& remote_stats() const { return remote_stats_; }
+    const RemoteStatsMap& frozen_stats() const { return frozen_stats_; }
 
     /// Return the TPoolStats for a remote host in remote_stats_ if it can be found.
     /// Return nullptr otherwise.
@@ -832,6 +873,13 @@ class AdmissionController {
     /// statestore updates; updated by UpdateRemoteStats() and used by UpdateAggregates().
     RemoteStatsMap remote_stats_;
 
+    /// Admissiond HA: last stats of remote hosts whose topic entries were deleted while
+    /// the controller retained them, see AdmissionController::SetRetainRemoteStats().
+    RemoteStatsMap frozen_stats_;
+
+    /// Queries adopted since the adoption floor started, see FloorRunning().
+    int64_t num_adopted_since_floor_ = 0;
+
     /// Per-pool metrics, created by InitMetrics().
     PoolMetrics metrics_;
 
@@ -871,6 +919,7 @@ class AdmissionController {
     FRIEND_TEST(AdmissionControllerTest, EraseHostStats);
     FRIEND_TEST(AdmissionControllerTest, UserAndGroupQuotas);
     FRIEND_TEST(AdmissionControllerTest, AdoptRunningQuery);
+    FRIEND_TEST(AdmissionControllerTest, AdoptionFloor);
     FRIEND_TEST(AdmissionControllerTest, AdoptRunningQueryUserQuota);
     friend class AdmissionControllerTest;
   };
@@ -1421,6 +1470,7 @@ class AdmissionController {
 
   FRIEND_TEST(AdmissionControllerTest, AggregatedUserLoads);
   FRIEND_TEST(AdmissionControllerTest, AdoptRunningQuery);
+  FRIEND_TEST(AdmissionControllerTest, AdoptionFloor);
   FRIEND_TEST(AdmissionControllerTest, AdoptRunningQueryUserQuota);
   FRIEND_TEST(AdmissionControllerTest, CanAdmitRequestCount);
   FRIEND_TEST(AdmissionControllerTest, CanAdmitRequestMemory);

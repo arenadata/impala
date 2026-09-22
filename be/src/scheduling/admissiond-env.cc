@@ -148,6 +148,8 @@ Status AdmissiondEnv::Init() {
         admission_control_svc_->CancelQueriesOnFailedCoordinators(current_backends);
       });
   RETURN_IF_ERROR(admission_controller_->Init());
+  // Admissiond HA: a standby keeps the stats of the active admissiond when it fails.
+  if (FLAGS_enable_admissiond_ha) admission_controller_->SetRetainRemoteStats(true);
   return Status::OK();
 }
 

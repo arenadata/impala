@@ -18,6 +18,7 @@
 #include "statestore/statestore.h"
 
 #include <algorithm>
+#include <fstream>
 #include <tuple>
 #include <utility>
 
@@ -1377,6 +1378,17 @@ ThreadPool<Statestore::ScheduledSubscriberUpdate>* Statestore::GetThreadPool(
 Status Statestore::SendHeartbeat(Subscriber* subscriber) {
   if (disable_network_.Load()) {
     return Status("Don't send heartbeat since network is disabled.");
+  }
+  // Test hook for admissiond HA fencing: with STATESTORE_HEARTBEAT_FAIL in
+  // --debug_actions, heartbeats to subscribers whose id contains the first line of
+  // /tmp/STATESTORE_HEARTBEAT_FAIL fail, as if they were unreachable.
+  if (UNLIKELY(FLAGS_debug_actions.find("STATESTORE_HEARTBEAT_FAIL") != string::npos)) {
+    std::ifstream fail_file("/tmp/STATESTORE_HEARTBEAT_FAIL");
+    string pattern;
+    if (fail_file && std::getline(fail_file, pattern) && !pattern.empty()
+        && subscriber->id().find(pattern) != string::npos) {
+      return Status("Heartbeat failed by debug action STATESTORE_HEARTBEAT_FAIL");
+    }
   }
 
   MonotonicStopWatch sw;

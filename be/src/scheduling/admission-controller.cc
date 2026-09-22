@@ -769,8 +769,13 @@ void AdmissionController::PoolStats::AdoptQuery(
   local_mem_admitted_ += mem_admitted;
   metrics_.local_mem_admitted->Increment(mem_admitted);
 
-  agg_num_running_ += 1;
-  metrics_.agg_num_running->Increment(1L);
+  // An adopted query that the adoption floor counts already does not add to the
+  // aggregate (see FloorRunning()).
+  int64_t floor_before = FloorRunning();
+  ++num_adopted_since_floor_;
+  int64_t added = 1 - (floor_before - FloorRunning());
+  agg_num_running_ += added;
+  metrics_.agg_num_running->Increment(added);
 
   local_stats_.num_admitted_running += 1;
   metrics_.local_num_admitted_running->Increment(1L);
@@ -2106,11 +2111,26 @@ void AdmissionController::UpdatePoolStats(
       // Delta and non-delta updates are handled the same way, except for a full update
       // we first clear the backend TPoolStats. We then update the global map
       // and then re-compute the pool stats for any pools that changed.
+      // Admissiond HA: a host missing from a full update is gone like a deleted one.
+      std::map<string, PoolStats::RemoteStatsMap> before_full_update;
       if (!delta.is_delta) {
         VLOG_ROW << "Full impala-request-queue stats update";
-        for (auto& entry : pool_stats_) entry.second.ClearRemoteStats();
+        for (auto& entry : pool_stats_) {
+          if (retain_remote_stats_) {
+            before_full_update[entry.first] = entry.second.remote_stats();
+          }
+          entry.second.ClearRemoteStats();
+        }
       }
       HandleTopicUpdates(delta.topic_entries, pool_stats_removed_hosts);
+      for (const auto& pool : before_full_update) {
+        PoolStats* stats = GetPoolStats(pool.first);
+        for (const auto& host : pool.second) {
+          if (stats->FindTPoolStatsForRemoteHost(host.first) == nullptr) {
+            stats->FreezeRemoteStats(host.first, host.second);
+          }
+        }
+      }
     }
     UpdateClusterAggregates(pool_stats_removed_hosts);
     last_topic_update_time_ms_ = MonotonicMillis();
@@ -2142,6 +2162,70 @@ void AdmissionController::PoolStats::UpdateRemoteStats(
   }
 }
 
+void AdmissionController::PoolStats::FreezeRemoteStats(
+    const string& host_id, const TPoolStats& host_stats) {
+  TPoolStats& frozen = frozen_stats_[host_id];
+  frozen = host_stats;
+  // Coordinators resubmit their queued queries to the new active admissiond.
+  frozen.num_queued = 0;
+  VLOG_QUERY << "Keeping the last stats of pool " << name_ << " from " << host_id
+             << ": " << DebugPoolStats(frozen);
+}
+
+bool AdmissionController::PoolStats::ClearFrozenStats() {
+  bool had_frozen = !frozen_stats_.empty();
+  frozen_stats_.clear();
+  num_adopted_since_floor_ = 0;
+  return had_frozen;
+}
+
+int64_t AdmissionController::PoolStats::FloorRunning() const {
+  int64_t frozen_running = 0;
+  for (const auto& entry : frozen_stats_) {
+    frozen_running += entry.second.num_admitted_running;
+  }
+  return max<int64_t>(0, frozen_running - num_adopted_since_floor_);
+}
+
+void AdmissionController::SetRetainRemoteStats(bool retain) {
+  lock_guard<mutex> lock(admission_ctrl_lock_);
+  retain_remote_stats_ = retain;
+}
+
+void AdmissionController::StartAdoptionFloor() {
+  lock_guard<mutex> lock(admission_ctrl_lock_);
+  stringstream ss;
+  for (auto& entry : pool_stats_) {
+    entry.second.StartAdoptionFloor();
+    if (entry.second.FloorRunning() > 0) {
+      ss << " " << entry.first << "=" << entry.second.FloorRunning();
+    }
+  }
+  UpdateClusterAggregates(set<string>());
+  LOG(INFO) << "Adoption floor: running queries kept from the previous active "
+            << "admissiond until their coordinators report them:"
+            << (ss.str().empty() ? " none" : ss.str()) << "; frozen per-host stats of "
+            << frozen_per_host_stats_hosts_.size() << " host(s)";
+}
+
+bool AdmissionController::DropAdoptionFloor() {
+  lock_guard<mutex> lock(admission_ctrl_lock_);
+  bool dropped = false;
+  set<string> removed;
+  for (auto& entry : pool_stats_) {
+    for (const auto& frozen : entry.second.frozen_stats()) removed.insert(frozen.first);
+    dropped |= entry.second.ClearFrozenStats();
+  }
+  for (const string& host : frozen_per_host_stats_hosts_) {
+    remote_per_host_stats_.erase(host);
+    removed.insert(host);
+    dropped = true;
+  }
+  frozen_per_host_stats_hosts_.clear();
+  if (dropped) UpdateClusterAggregates(removed);
+  return dropped;
+}
+
 void AdmissionController::HandleTopicUpdates(
     const vector<TTopicItem>& topic_updates, set<string>& pool_stats_removed_nodes) {
   string topic_key_prefix;
@@ -2156,7 +2240,12 @@ void AdmissionController::HandleTopicUpdates(
       // from the statestore are likely already outdated.
       if (topic_backend_id == host_id_) continue;
       if (item.deleted) {
-        GetPoolStats(pool_name)->UpdateRemoteStats(topic_backend_id, nullptr);
+        PoolStats* stats = GetPoolStats(pool_name);
+        if (retain_remote_stats_) {
+          TPoolStats* last = stats->FindTPoolStatsForRemoteHost(topic_backend_id);
+          if (last != nullptr) stats->FreezeRemoteStats(topic_backend_id, *last);
+        }
+        stats->UpdateRemoteStats(topic_backend_id, nullptr);
         pool_stats_removed_nodes.insert(topic_backend_id);
         continue;
       }
@@ -2169,14 +2258,23 @@ void AdmissionController::HandleTopicUpdates(
         VLOG_QUERY << "Error deserializing pool update with key: " << item.key;
         continue;
       }
-      GetPoolStats(pool_name)->UpdateRemoteStats(topic_backend_id, &remote_update);
+      PoolStats* stats = GetPoolStats(pool_name);
+      stats->UnfreezeRemoteStats(topic_backend_id);
+      stats->UpdateRemoteStats(topic_backend_id, &remote_update);
     } else if (topic_key_prefix == TOPIC_KEY_STAT_PREFIX) {
       topic_backend_id = topic_key_suffix;
       if (topic_backend_id == host_id_) continue;
       if (item.deleted) {
-        remote_per_host_stats_.erase(topic_backend_id);
+        if (retain_remote_stats_
+            && remote_per_host_stats_.find(topic_backend_id)
+                != remote_per_host_stats_.end()) {
+          frozen_per_host_stats_hosts_.insert(topic_backend_id);
+        } else {
+          remote_per_host_stats_.erase(topic_backend_id);
+        }
         continue;
       }
+      frozen_per_host_stats_hosts_.erase(topic_backend_id);
       TPerHostStatsUpdate remote_update;
       uint32_t len = item.value.size();
       Status status =
@@ -2223,6 +2321,14 @@ void AdmissionController::PoolStats::UpdateAggregates(HostMemMap* host_mem_reser
     // TODO(IMPALA-8762): For multiple coordinators, need to track the number of running
     // queries per executor, i.e. every admission controller needs to send the full map to
     // everyone else.
+  }
+  // Admissiond HA adoption floor: the queries of a failed admissiond that its
+  // coordinators have not reported yet, and all of its memory (conservative).
+  num_running += FloorRunning();
+  for (const PoolStats::RemoteStatsMap::value_type& frozen_entry : frozen_stats_) {
+    new_agg_user_loads.add_loads(frozen_entry.second.user_loads);
+    mem_reserved += frozen_entry.second.backend_mem_reserved;
+    (*host_mem_reserved)[frozen_entry.first] += frozen_entry.second.backend_mem_reserved;
   }
   num_running += local_stats_.num_admitted_running;
   num_queued += local_stats_.num_queued;
