@@ -45,12 +45,15 @@ class StatestoreCatalogdMgr {
   /// Constructor with explicit election settings. It's used to elect the active
   /// admissiond with the same rules; TAdmissiondRegistration is then carried in
   /// TCatalogRegistration (address, HA and force flags, registration time).
+  /// 'role' names the daemon in log messages.
   StatestoreCatalogdMgr(bool enable_catalogd_ha, bool use_subscriber_id_as_priority,
-      int64_t preemption_wait_period_ms, bool failover_on_active_reregistration)
+      int64_t preemption_wait_period_ms, bool failover_on_active_reregistration,
+      const std::string& role)
     : enable_catalogd_ha_(enable_catalogd_ha),
       use_subscriber_id_as_priority_(use_subscriber_id_as_priority),
       preemption_wait_period_ms_(preemption_wait_period_ms),
       failover_on_active_reregistration_(failover_on_active_reregistration),
+      role_(role),
       is_active_catalogd_assigned_(false),
       num_registered_catalogd_(0),
       first_catalogd_register_time_(0),
@@ -111,6 +114,7 @@ class StatestoreCatalogdMgr {
   const bool use_subscriber_id_as_priority_;
   const int64_t preemption_wait_period_ms_;
   const bool failover_on_active_reregistration_;
+  const std::string role_;
 
   /// Indicate if the active catalogd has been assigned.
   bool is_active_catalogd_assigned_;

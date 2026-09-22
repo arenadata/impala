@@ -181,7 +181,7 @@ const SubscriberId ADMISSIOND_B = "admissiond@admissiond-1:29500";
 TEST_F(StatestoreCatalogdMgrTest, AdmissiondSettingsIgnoreCatalogdFlags) {
   StatestoreCatalogdMgr mgr(true, /* use_subscriber_id_as_priority */ true,
       /* preemption_wait_period_ms */ 100000,
-      /* failover_on_active_reregistration */ true);
+      /* failover_on_active_reregistration */ true, "admissiond");
   EXPECT_FALSE(mgr.RegisterCatalogd(
       false, ADMISSIOND_B, NewRegistrationId(1), Registration("10.0.0.2")));
   EXPECT_FALSE(mgr.CheckActiveCatalog());
@@ -196,7 +196,7 @@ TEST_F(StatestoreCatalogdMgrTest, AdmissiondSettingsIgnoreCatalogdFlags) {
 // same admissiond.
 TEST_F(StatestoreCatalogdMgrTest, AdmissiondPriorityIndependentOfOrder) {
   for (bool a_first : {true, false}) {
-    StatestoreCatalogdMgr mgr(true, true, 100000, true);
+    StatestoreCatalogdMgr mgr(true, true, 100000, true, "admissiond");
     const SubscriberId& first = a_first ? ADMISSIOND_A : ADMISSIOND_B;
     const SubscriberId& second = a_first ? ADMISSIOND_B : ADMISSIOND_A;
     EXPECT_FALSE(mgr.RegisterCatalogd(
@@ -210,7 +210,7 @@ TEST_F(StatestoreCatalogdMgrTest, AdmissiondPriorityIndependentOfOrder) {
 // The standby admissiond takes over when the active one fails, and the failed one comes
 // back as standby (no failback).
 TEST_F(StatestoreCatalogdMgrTest, AdmissiondFailoverWithoutFailback) {
-  StatestoreCatalogdMgr mgr(true, true, 100000, true);
+  StatestoreCatalogdMgr mgr(true, true, 100000, true, "admissiond");
   EXPECT_FALSE(mgr.RegisterCatalogd(
       false, ADMISSIOND_A, NewRegistrationId(1), Registration("10.0.0.1")));
   EXPECT_TRUE(mgr.RegisterCatalogd(
@@ -234,7 +234,7 @@ TEST_F(StatestoreCatalogdMgrTest, AdmissiondFailoverWithoutFailback) {
 // away and keeps it when the other one registers; the reporting admissiond is
 // registered with force_catalogd_active as the statestore does.
 TEST_F(StatestoreCatalogdMgrTest, AdmissiondActiveClaimAfterStatestoreRestart) {
-  StatestoreCatalogdMgr mgr(true, true, 100000, true);
+  StatestoreCatalogdMgr mgr(true, true, 100000, true, "admissiond");
   ASSERT_TRUE(mgr.MayKeepActiveRole(ADMISSIOND_B));
   EXPECT_TRUE(mgr.RegisterCatalogd(false, ADMISSIOND_B, NewRegistrationId(1),
       Registration("10.0.0.2", /* force */ true)));
@@ -249,7 +249,7 @@ TEST_F(StatestoreCatalogdMgrTest, AdmissiondActiveClaimAfterStatestoreRestart) {
 // broke for a moment): it keeps the role. After a restart it is not active any more and
 // the standby takes over.
 TEST_F(StatestoreCatalogdMgrTest, AdmissiondActiveReregistration) {
-  StatestoreCatalogdMgr mgr(true, true, 100000, true);
+  StatestoreCatalogdMgr mgr(true, true, 100000, true, "admissiond");
   EXPECT_FALSE(mgr.RegisterCatalogd(
       false, ADMISSIOND_A, NewRegistrationId(1), Registration("10.0.0.1")));
   EXPECT_TRUE(mgr.RegisterCatalogd(
@@ -268,7 +268,7 @@ TEST_F(StatestoreCatalogdMgrTest, AdmissiondActiveReregistration) {
 // An admissiond that still believes it is active after it was evicted (e.g. it lost the
 // statestore) does not take the role back from the admissiond designated meanwhile.
 TEST_F(StatestoreCatalogdMgrTest, AdmissiondStaleActiveClaimIgnored) {
-  StatestoreCatalogdMgr mgr(true, true, 100000, true);
+  StatestoreCatalogdMgr mgr(true, true, 100000, true, "admissiond");
   EXPECT_FALSE(mgr.RegisterCatalogd(
       false, ADMISSIOND_A, NewRegistrationId(1), Registration("10.0.0.1")));
   EXPECT_TRUE(mgr.RegisterCatalogd(

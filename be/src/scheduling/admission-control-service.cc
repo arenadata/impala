@@ -626,8 +626,9 @@ void AdmissionControlService::CoordinatorAgeingLoop() {
       AdmissiondEnv::GetInstance()->admission_controller();
   while (!shutdown_.load()) {
     SleepForMs(MILLIS_PER_SEC);
-    MaybeDropAdoptionFloor(timeout_ms);
     bool fenced = IsActive() && IsFenced();
+    // While fenced, coordinators cannot report, so the floor does not expire then.
+    MaybeDropAdoptionFloor(fenced ? 0 : timeout_ms);
     if (fenced != (fenced_metric_->GetValue() == 1)) {
       LOG(WARNING) << (fenced ? "Fenced: no heartbeat from the active statestore for "
                                 "more than --admissiond_ha_statestore_lease_ms, not "
@@ -637,8 +638,17 @@ void AdmissionControlService::CoordinatorAgeingLoop() {
                                               "Not fenced any more: no longer active."));
       fenced_metric_->SetValue(fenced ? 1 : 0);
       active_metric_->SetValue(IsActive() && !fenced ? 1 : 0);
+      if (!fenced) {
+        // Heartbeats were rejected while fenced; that silence is not the coordinators'.
+        // The floor gets a full timeout again for their reports.
+        int64_t now = MonotonicMillis();
+        if (floor_active_.load()) promoted_ms_.store(now);
+        lock_guard<mutex> l(heartbeat_lock_);
+        for (auto& entry : coord_id_to_heartbeat_) entry.second.last_seen_ms = now;
+      }
     }
-    if (!ageing) continue;
+    // A fenced admissiond rejects the coordinators' heartbeats, so it does not age them.
+    if (!ageing || fenced) continue;
     vector<UniqueIdPB> coord_ids =
         admission_controller->GetCoordinatorsWithRunningQueries();
     int64_t now = MonotonicMillis();
@@ -801,8 +811,13 @@ void AdmissionControlService::UpdateActiveAdmissiond(bool reset_version,
 void AdmissionControlService::Promote() {
   // Re-arm the adoption gate before admitting anything.
   {
+    // Heartbeat state is from an earlier active period, if any.
+    int64_t now = MonotonicMillis();
     lock_guard<mutex> l(heartbeat_lock_);
-    for (auto& entry : coord_id_to_heartbeat_) entry.second.reported = false;
+    for (auto& entry : coord_id_to_heartbeat_) {
+      entry.second.reported = false;
+      entry.second.last_seen_ms = now;
+    }
   }
   // The grace period starts with the promotion: coordinators learn about it at the same
   // time and report within a heartbeat.

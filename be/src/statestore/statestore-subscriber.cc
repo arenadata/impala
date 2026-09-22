@@ -936,7 +936,7 @@ void StatestoreSubscriber::StatestoreStub::RecoveryModeChecker() {
           // Don't exit recovery mode, continue
           LOG(WARNING) << "Failed to re-register with statestore: "
                        << status.GetDetail();
-          SleepForMs(SLEEP_INTERVAL_MS);
+          SleepForMs(subscriber_->recovery_check_interval_ms_);
         }
         last_recovery_duration_metric_->SetValue(
             recovery_timer.ElapsedTime() / (1000.0 * 1000.0 * 1000.0));
@@ -964,7 +964,7 @@ void StatestoreSubscriber::StatestoreStub::RecoveryModeChecker() {
           nullptr, 0, &update_skipped);
       DCHECK(!update_skipped);
     }
-    SleepForMs(SLEEP_INTERVAL_MS);
+    SleepForMs(subscriber_->recovery_check_interval_ms_);
   }
 }
 

@@ -153,6 +153,12 @@ class StatestoreSubscriber {
   /// another admissiond.
   int64_t MilliSecondsSinceActiveStatestoreHeartbeat();
 
+  /// Sets how often the recovery-mode checker looks for a lost statestore and retries
+  /// registration (default 5 s). Must be called before Start().
+  void SetRecoveryCheckIntervalMs(int32_t interval_ms) {
+    recovery_check_interval_ms_ = interval_ms;
+  }
+
   /// Sets the registration info of this admissiond, sent to the statestore on every
   /// registration, with 'is_active' telling whether it is the active admissiond at that
   /// time. Must be called before Start().
@@ -597,6 +603,9 @@ class StatestoreSubscriber {
   /// Registration info of this admissiond, if set by SetAdmissiondRegistration().
   TAdmissiondRegistration admissiond_registration_;
   std::function<bool()> admissiond_is_active_;
+
+  /// See SetRecoveryCheckIntervalMs(); 5 s by default.
+  int32_t recovery_check_interval_ms_ = 5000;
   bool has_admissiond_registration_ = false;
 
   /// Statestore instance of the last accepted UpdateAdmissiond RPC. Versions of active

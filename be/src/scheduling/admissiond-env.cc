@@ -96,6 +96,11 @@ AdmissiondEnv::AdmissiondEnv()
   admissiond_registration.__set_address(admission_service_addr);
   admissiond_registration.__set_enable_admissiond_ha(FLAGS_enable_admissiond_ha);
   admissiond_registration.__set_force_admissiond_active(FLAGS_force_admissiond_active);
+  // A fenced active admissiond admits again only after it re-registered with a restarted
+  // statestore; look for a lost statestore every second.
+  if (FLAGS_enable_admissiond_ha) {
+    statestore_subscriber_->SetRecoveryCheckIntervalMs(MILLIS_PER_SEC);
+  }
   statestore_subscriber_->SetAdmissiondRegistration(admissiond_registration, [this]() {
     return admission_control_svc_ != nullptr && admission_control_svc_->IsActive();
   });

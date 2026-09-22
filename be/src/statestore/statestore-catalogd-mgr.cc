@@ -52,7 +52,7 @@ StatestoreCatalogdMgr::StatestoreCatalogdMgr(bool enable_catalogd_ha)
   : StatestoreCatalogdMgr(enable_catalogd_ha,
         FLAGS_use_subscriber_id_as_catalogd_priority,
         FLAGS_catalogd_ha_preemption_wait_period_ms,
-        FLAGS_catalogd_ha_failover_on_active_reregistration) {}
+        FLAGS_catalogd_ha_failover_on_active_reregistration, "catalogd") {}
 
 bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
     const SubscriberId& subscriber_id,
@@ -79,7 +79,7 @@ bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
         COPY_CATALOGD_REGISTRATION_FROM_MEMBER_VARIABLES(standby, active);
         COPY_CATALOGD_REGISTRATION_FROM_LOCAL_VARIABLES(active);
         LOG(INFO) << active_catalogd_subscriber_id_
-                  << " is re-registered with FLAGS_force_catalogd_active.";
+                  << " is re-registered with FLAGS_force_" << role_ << "_active.";
         ++active_catalogd_version_;
         last_update_catalogd_time_ = UnixMillis();
         return true;
@@ -96,7 +96,7 @@ bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
         COPY_CATALOGD_REGISTRATION_FROM_MEMBER_VARIABLES(active, standby);
         COPY_CATALOGD_REGISTRATION_FROM_LOCAL_VARIABLES(standby);
         LOG(INFO) << subscriber_id << " is re-registered while in active role. Fail over "
-                  << "active catalogd to " << active_catalogd_subscriber_id_;
+                  << "active " << role_ << " to " << active_catalogd_subscriber_id_;
         ++active_catalogd_version_;
         last_update_catalogd_time_ = UnixMillis();
         return true;
@@ -110,7 +110,7 @@ bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
         COPY_CATALOGD_REGISTRATION_FROM_LOCAL_VARIABLES(active);
         LOG(INFO) << active_catalogd_subscriber_id_
                   << " is re-registered after HA preemption waiting period and "
-                  << "is assigned as active catalogd.";
+                  << "is assigned as active " << role_ << ".";
         ++active_catalogd_version_;
         last_update_catalogd_time_ = UnixMillis();
         return true;
@@ -124,7 +124,7 @@ bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
       COPY_CATALOGD_REGISTRATION_FROM_LOCAL_VARIABLES(active);
       if (address_changed) {
         LOG(INFO) << subscriber_id << " is re-registered with a different address "
-                  << "and remains active catalogd.";
+                  << "and remains active " << role_ << ".";
         ++active_catalogd_version_;
         last_update_catalogd_time_ = UnixMillis();
         return true;
@@ -156,13 +156,15 @@ bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
       // waiting period is expired.
       is_active_catalogd_assigned_ = true;
       COPY_CATALOGD_REGISTRATION_FROM_LOCAL_VARIABLES(active);
-      LOG(INFO) << active_catalogd_subscriber_id_ << " is assigned as active catalogd.";
+      LOG(INFO) << active_catalogd_subscriber_id_ << " is assigned as active " << role_
+                << ".";
       ++active_catalogd_version_;
       last_update_catalogd_time_ = UnixMillis();
       return true;
     }
     // Wait second catalogd to be registered.
-    VLOG(3) << "Wait second catalogd to be registered during HA preemption waiting "
+    VLOG(3) << "Wait second " << role_
+            << " to be registered during HA preemption waiting "
             << "period.";
   } else {
     num_registered_catalogd_++;
@@ -178,15 +180,17 @@ bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
       is_active_catalogd_assigned_ = true;
       COPY_CATALOGD_REGISTRATION_FROM_LOCAL_VARIABLES(active);
       LOG(INFO) << active_catalogd_subscriber_id_
-                << " is registered with FLAGS_force_catalogd_active and is assigned as "
-                << "active catalogd.";
+                << " is registered with FLAGS_force_" << role_
+                << "_active and is assigned "
+                << "as active " << role_ << ".";
       ++active_catalogd_version_;
       last_update_catalogd_time_ = UnixMillis();
       return true;
     } else if (is_active_catalogd_assigned_) {
       // Existing one is already assigned as active catalogd.
       COPY_CATALOGD_REGISTRATION_FROM_LOCAL_VARIABLES(standby);
-      VLOG(3) << "There is another catalogd already assigned as active catalogd.";
+      VLOG(3) << "There is another " << role_ << " already assigned as active " << role_
+              << ".";
     } else {
       // Compare priority and assign the catalogd with high priority as active catalogd.
       is_active_catalogd_assigned_ = true;
@@ -201,7 +205,7 @@ bool StatestoreCatalogdMgr::RegisterCatalogd(bool is_reregistering,
         COPY_CATALOGD_REGISTRATION_FROM_MEMBER_VARIABLES(standby, first);
       }
       LOG(INFO) << active_catalogd_subscriber_id_
-                << " has higher priority and is assigned as active catalogd.";
+                << " has higher priority and is assigned as active " << role_ << ".";
       ++active_catalogd_version_;
       last_update_catalogd_time_ = UnixMillis();
       return true;
@@ -225,7 +229,7 @@ bool StatestoreCatalogdMgr::CheckActiveCatalog() {
   is_active_catalogd_assigned_ = true;
   COPY_CATALOGD_REGISTRATION_FROM_MEMBER_VARIABLES(active, first);
   LOG(INFO) << active_catalogd_subscriber_id_
-            << " is assigned as active catalogd after preemption waiting period.";
+            << " is assigned as active " << role_ << " after preemption waiting period.";
   ++active_catalogd_version_;
   last_update_catalogd_time_ = UnixMillis();
   return true;
@@ -242,7 +246,8 @@ bool StatestoreCatalogdMgr::UnregisterCatalogd(
       // Fail over to standby catalogd
       COPY_CATALOGD_REGISTRATION_FROM_MEMBER_VARIABLES(active, standby);
       RESET_CATALOGD_REGISTRATION_MEMBER_VARIABLES(standby);
-      LOG(INFO) << "Fail over active catalogd to " << active_catalogd_subscriber_id_;
+      LOG(INFO) << "Fail over active " << role_ << " to "
+                << active_catalogd_subscriber_id_;
       last_update_catalogd_time_ = UnixMillis();
       ++active_catalogd_version_;
       return true;
@@ -251,13 +256,13 @@ bool StatestoreCatalogdMgr::UnregisterCatalogd(
       // Don't need to wait second one to be registered.
       first_catalogd_register_time_ = MonotonicMillis() -
           preemption_wait_period_ms_ -1;
-      LOG(INFO) << "No active catalogd available in the cluster";
+      LOG(INFO) << "No active " << role_ << " available in the cluster";
     }
   } else if (num_registered_catalogd_ > 0) {
     // Unregister standby catalogd.
     DCHECK(unregistered_subscriber_id == standby_catalogd_subscriber_id_);
     RESET_CATALOGD_REGISTRATION_MEMBER_VARIABLES(standby);
-    VLOG(3) << "Unregister standby catalogd " << unregistered_subscriber_id;
+    VLOG(3) << "Unregister standby " << role_ << " " << unregistered_subscriber_id;
   } else {
     // Active catalogd has not been designated.
     DCHECK(!is_active_catalogd_assigned_);

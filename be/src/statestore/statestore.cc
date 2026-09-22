@@ -284,6 +284,21 @@ static TAdmissiondRegistration ToAdmissiondRegistration(const TCatalogRegistrati
   return result;
 }
 
+// Test hooks for admissiond HA fencing. With 'label' in --debug_actions, returns true
+// if 'subscriber_id' contains the first line of /tmp/<label>:
+// STATESTORE_HEARTBEAT_FAIL: heartbeats to the subscriber fail (it is evicted as if
+//   unreachable).
+// STATESTORE_HEARTBEAT_SKIP: heartbeats to the subscriber are not sent but count as
+//   successful, and its registrations are rejected, as if this statestore were down
+//   for the subscriber only (it is not evicted).
+static bool DebugActionMatchesSubscriber(const char* label, const string& subscriber_id) {
+  if (LIKELY(FLAGS_debug_actions.find(label) == string::npos)) return false;
+  std::ifstream file(string("/tmp/") + label);
+  string pattern;
+  return file && std::getline(file, pattern) && !pattern.empty()
+      && subscriber_id.find(pattern) != string::npos;
+}
+
 class StatestoreThriftIf : public StatestoreServiceIf {
  public:
   StatestoreThriftIf(Statestore* statestore)
@@ -719,7 +734,7 @@ Statestore::Statestore(MetricGroup* metrics)
     admissiond_manager_(FLAGS_enable_admissiond_ha,
         FLAGS_use_subscriber_id_as_admissiond_priority,
         FLAGS_admissiond_ha_preemption_wait_period_ms,
-        FLAGS_admissiond_ha_failover_on_active_reregistration),
+        FLAGS_admissiond_ha_failover_on_active_reregistration, "admissiond"),
     subscriber_topic_update_threadpool_("statestore-update",
         "subscriber-update-worker",
         FLAGS_statestore_num_update_threads,
@@ -1027,6 +1042,11 @@ Status Statestore::RegisterSubscriber(const SubscriberId& subscriber_id,
   bool is_registering_admissiond =
       subscriber_type == TStatestoreSubscriberType::ADMISSIOND
       && admissiond_registration != nullptr;
+  if (DebugActionMatchesSubscriber("STATESTORE_HEARTBEAT_SKIP", subscriber_id)) {
+    LOG(INFO) << "Rejecting registration of " << subscriber_id
+              << " (debug action STATESTORE_HEARTBEAT_SKIP)";
+    return Status("Registration rejected by debug action STATESTORE_HEARTBEAT_SKIP");
+  }
   if (subscriber_id.empty()) {
     return Status("Subscriber ID cannot be empty string");
   } else if (is_catalogd
@@ -1379,16 +1399,12 @@ Status Statestore::SendHeartbeat(Subscriber* subscriber) {
   if (disable_network_.Load()) {
     return Status("Don't send heartbeat since network is disabled.");
   }
-  // Test hook for admissiond HA fencing: with STATESTORE_HEARTBEAT_FAIL in
-  // --debug_actions, heartbeats to subscribers whose id contains the first line of
-  // /tmp/STATESTORE_HEARTBEAT_FAIL fail, as if they were unreachable.
-  if (UNLIKELY(FLAGS_debug_actions.find("STATESTORE_HEARTBEAT_FAIL") != string::npos)) {
-    std::ifstream fail_file("/tmp/STATESTORE_HEARTBEAT_FAIL");
-    string pattern;
-    if (fail_file && std::getline(fail_file, pattern) && !pattern.empty()
-        && subscriber->id().find(pattern) != string::npos) {
-      return Status("Heartbeat failed by debug action STATESTORE_HEARTBEAT_FAIL");
-    }
+  // Test hooks for admissiond HA fencing, see DebugActionMatchesSubscriber().
+  if (DebugActionMatchesSubscriber("STATESTORE_HEARTBEAT_FAIL", subscriber->id())) {
+    return Status("Heartbeat failed by debug action STATESTORE_HEARTBEAT_FAIL");
+  }
+  if (DebugActionMatchesSubscriber("STATESTORE_HEARTBEAT_SKIP", subscriber->id())) {
+    return Status::OK();
   }
 
   MonotonicStopWatch sw;
