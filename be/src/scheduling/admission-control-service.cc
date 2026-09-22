@@ -629,7 +629,9 @@ void AdmissionControlService::CoordinatorAgeingLoop() {
       LOG(WARNING) << (fenced ? "Fenced: no heartbeat from the active statestore for "
                                 "more than --admissiond_ha_statestore_lease_ms, not "
                                 "admitting queries until heartbeats resume." :
-                                "Not fenced any more: statestore heartbeats resumed.");
+                                (IsActive() ? "Not fenced any more: statestore "
+                                              "heartbeats resumed." :
+                                              "Not fenced any more: no longer active."));
       fenced_metric_->SetValue(fenced ? 1 : 0);
       active_metric_->SetValue(IsActive() && !fenced ? 1 : 0);
     }
