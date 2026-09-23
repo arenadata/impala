@@ -60,6 +60,9 @@ RemoteAdmissionControlClient::RemoteAdmissionControlClient(const TQueryCtx& quer
 Status RemoteAdmissionControlClient::TryAdmitQuery(AdmissionControlServiceProxy* proxy,
     const TQueryExecRequest& request, AdmitQueryRequestPB* req,
     kudu::Status* rpc_status) {
+  // The caller retries while this says network error or timeout, so a return that never
+  // reached the rpc must not leave the previous attempt's status in place.
+  *rpc_status = kudu::Status::OK();
   AdmitQueryResponsePB resp;
   RpcController rpc_controller;
   rpc_controller.set_timeout(
