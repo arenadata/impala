@@ -70,7 +70,7 @@ fi
 # WARNING: If changing this value, also run these commands:
 # cd ${IMPALA_HOME}/java
 # mvn versions:set -DnewVersion=YOUR_NEW_VERSION
-export IMPALA_VERSION=4.5.0.3-4.4.0-0
+export IMPALA_VERSION=4.5.0.3-4.4.0-1
 
 # Whether to build the backend on Avro C++ library or C.
 # This is added temporarily to help transitioning from Avro C to C++ library.
