@@ -37,6 +37,17 @@ NUM_DOWNLOAD_ATTEMPTS = 8
 
 PYPI_MIRROR = os.environ.get('PYPI_MIRROR', 'https://pypi.python.org')
 
+# PyPI serves the package files from a separate host and only redirects
+# /packages/ to it; that redirect answers 503 whenever it is unhealthy, which
+# leaves every download retrying against a dead endpoint. Ask the file host
+# directly. A mirror serves the files itself, so only PyPI is rewritten.
+PYPI_FILES_MIRROR = os.environ.get('PYPI_FILES_MIRROR')
+if not PYPI_FILES_MIRROR:
+  if 'pypi.org' in PYPI_MIRROR or 'pypi.python.org' in PYPI_MIRROR:
+    PYPI_FILES_MIRROR = 'https://files.pythonhosted.org'
+  else:
+    PYPI_FILES_MIRROR = PYPI_MIRROR
+
 # The requirement files that list all of the required packages and versions.
 REQUIREMENTS_FILES = ['requirements.txt', 'setuptools-requirements.txt',
                       'kudu-requirements.txt', 'adls-requirements.txt',
@@ -130,7 +141,7 @@ def download_package(pkg_name, pkg_version, is_canceled=None):
     return True
   if is_canceled and is_canceled.is_set():
     return False
-  pkg_url = '{0}/packages/{1}'.format(PYPI_MIRROR, path)
+  pkg_url = '{0}/packages/{1}'.format(PYPI_FILES_MIRROR, path)
   print('Downloading {0} from {1}'.format(file_name, pkg_url))
   if 0 != subprocess.check_call(["wget", pkg_url, "-q", "-O", file_name]):
     return False

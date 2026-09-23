@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Maven settings used by the in-container Impala and Hadoop builds (no
+  credentials: every repository used is public).
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                              http://maven.apache.org/xsd/settings-1.0.0.xsd">
+
+  <!--
+    Resolve standard artifacts from Maven Central instead of the Cloudera, Apache
+    and HWX repositories java/pom.xml lists, which proxy the same artifacts and
+    were hanging the build while serving plain Apache plugins. mirrorOf=external:*
+    catches central + the Cloudera/Apache/HWX release repos, but EXCLUDES (with !)
+    the repos that host artifacts NOT on Maven Central, so those still resolve
+    from their real source:
+      - impala.cdp.repo / impala.toolchain.kudu.repo : CDP & Kudu jars (S3)
+      - arenadata                                     : Arenadata artifacts (maven.arenadata.io)
+      - cdh.rcs.releases.repo                         : cup-maven-plugin 1.6-cdh (fe/pom.xml);
+                                                        limited to those groupIds by
+                                                        docker/ci/maven-repo-filters/
+      - *.snapshots / cdh.snapshots.repo              : snapshots (no snapshots on Central)
+      - shibboleth (declared in the profile below)    : xmlsectool only, limited by
+                                                        docker/ci/maven-repo-filters/
+    If some artifact turns out to live only on Cloudera/HWX, add its repo id to the
+    exclusion list (e.g. ) to send it back to its origin.
+  -->
+  <mirrors>
+    <mirror>
+      <id>central-fast</id>
+      <name>Maven Central, in place of the Cloudera/Apache/HWX proxies</name>
+      <url>https://repo1.maven.org/maven2</url>
+      <mirrorOf>external:*,!shibboleth,!cdh.rcs.releases.repo,!impala.cdp.repo,!impala.toolchain.kudu.repo,!arenadata,!apache.snapshots,!apache.snapshots.https,!cdh.snapshots.repo</mirrorOf>
+    </mirror>
+  </mirrors>
+
+  <!--
+    xmlsectool (a transitive frontend dependency) is not on Maven Central. The Hive
+    parent POM declares the Shibboleth repo that has it (at an old URL that now
+    redirects here), but that declaration does not reach the frontend's dependency
+    resolution, so declare it for every build under the same id.
+  -->
+  <profiles>
+    <profile>
+      <id>ci-extra-repos</id>
+      <repositories>
+        <!--
+          Repositories from an active settings profile are tried before the ones
+          a POM declares, and the Arenadata forks declare maven.arenadata.io,
+          a Nexus group that also proxies Central. Without this, every ordinary
+          artifact is fetched from there; with it, only the Arenadata-specific
+          versions fall through (after a 404 from Central).
+        -->
+        <repository>
+          <id>central-first</id>
+          <url>https://repo1.maven.org/maven2</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+        <repository>
+          <id>shibboleth</id>
+          <url>https://build.shibboleth.net/maven/releases</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+      </repositories>
+    </profile>
+  </profiles>
+  <activeProfiles>
+    <activeProfile>ci-extra-repos</activeProfile>
+  </activeProfiles>
+</settings>

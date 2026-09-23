@@ -1,0 +1,73 @@
+# Frontend tests skipped in CI (docker/ci/run-unit-tests.sh runs every other FE
+# test class): they need the minicluster. One surefire -Dtest pattern per line:
+# a class, a package path pattern, or Class#method for a single method; prefer
+# the narrowest one that covers the failure.
+# Tests that only need a metastore client run against the embedded Derby HMS
+# (hms-embedded/hive-site.xml), which has no tables.
+
+# Start their own Impala cluster or services (LDAP, JWT, Kerberos, Kudu + HMS).
+org/apache/impala/customcluster/**
+org/apache/impala/customservice/**
+
+# Query an impalad or HiveServer2 over JDBC.
+org.apache.impala.service.JdbcTest
+org.apache.impala.catalog.local.CatalogdMetaProviderTest
+org.apache.impala.catalog.PartialCatalogInfoWriteIdTest
+org.apache.impala.extdatasource.jdbc.JdbcDataSourceTest
+
+# Need the Ranger admin server.
+org.apache.impala.analysis.AnalyzeAuthStmtsTest
+org.apache.impala.authorization.AuthorizationStmtTest
+org/apache/impala/authorization/ranger/**
+
+# Need HMS notification events or a catalogd-hosted metastore.
+org/apache/impala/catalog/events/**
+org/apache/impala/catalog/metastore/**
+
+# Need Kudu.
+org.apache.impala.analysis.AnalyzeKuduDDLTest
+org.apache.impala.analysis.AuditingKuduTest
+
+# Need the functional/tpcds test databases and their files.
+org.apache.impala.analysis.AnalyzeDDLTest
+org.apache.impala.analysis.AnalyzeExprsTest
+org.apache.impala.analysis.AnalyzeModifyStmtsTest
+org.apache.impala.analysis.AnalyzeStmtsTest
+org.apache.impala.analysis.AnalyzeSubqueriesTest
+org.apache.impala.analysis.AnalyzeUpsertStmtTest
+org.apache.impala.analysis.AnalyzerTest
+org.apache.impala.analysis.AuditingTest
+org.apache.impala.analysis.ExprCardinalityTest
+org.apache.impala.analysis.ExprNdvTest
+org.apache.impala.analysis.ExprRewriteRulesTest
+org.apache.impala.analysis.ExprRewriterTest
+org.apache.impala.analysis.ExprSelectivityTest
+org.apache.impala.analysis.StmtMetadataLoaderTest
+org.apache.impala.analysis.ToSqlTest
+org.apache.impala.analysis.ToSqlUtilsTest
+org.apache.impala.analysis.TypesUtilTest
+org.apache.impala.catalog.CatalogObjectToFromThriftTest
+org.apache.impala.catalog.CatalogTest
+org.apache.impala.catalog.CatalogdTableInvalidatorTest
+org.apache.impala.catalog.FileMetadataLoaderTest
+org.apache.impala.catalog.HdfsPartitionSdCompareTest
+org.apache.impala.catalog.IcebergContentFileStoreTest
+org.apache.impala.catalog.PartialCatalogInfoTest
+org.apache.impala.catalog.local.LocalCatalogTest
+org.apache.impala.catalog.monitor.CatalogTableMetricsTest
+org.apache.impala.planner.CardinalityTest
+org.apache.impala.planner.ClusterSizeTest
+org.apache.impala.planner.ColumnsTest
+org.apache.impala.planner.ExplainTest
+org.apache.impala.planner.PlannerTest
+org.apache.impala.planner.TestCaseLoaderTest
+org.apache.impala.planner.TpcdsCpuCostPlannerTest
+org.apache.impala.planner.TpcdsPlannerTest
+org.apache.impala.planner.TupleCacheTest
+org.apache.impala.service.FrontendTest
+
+# Need the minicluster's generated config files (core-site.xml, keystore) or HDFS.
+org.apache.impala.common.FileSystemUtilTest
+org.apache.impala.util.TestRequestPoolService
+org.apache.impala.service.JniFrontendTest#testGetSecretFromKeyStore
+org.apache.impala.catalog.HdfsPartitionTest#testCloneWithNewHostIndex

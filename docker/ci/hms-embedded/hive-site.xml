@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Test-only Hive Metastore settings for CI (docker/ci/run-unit-tests.sh puts this
+  directory on the test classpath). With no metastore URI the Hive client runs an
+  embedded metastore in-process; this backs it with an empty Derby database so
+  unit tests that only need a working metastore client (FeSupport init, the
+  in-process impalad) start without a minicluster. The database is in memory, so
+  every test JVM starts from a fresh metastore. The driver is named explicitly
+  because the Hive 4 default (org.apache.derby.iapi.jdbc.AutoloadedDriver) needs
+  Derby 10.15+, while Impala's test classpath has IMPALA_DERBY_VERSION (10.14).
+-->
+<configuration>
+  <property>
+    <name>javax.jdo.option.ConnectionURL</name>
+    <value>jdbc:derby:memory:impala-ci-hms;create=true</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionDriverName</name>
+    <value>org.apache.derby.jdbc.EmbeddedDriver</value>
+  </property>
+  <property>
+    <name>datanucleus.schema.autoCreateAll</name>
+    <value>true</value>
+  </property>
+  <!-- Both names: HiveConf (used by Impala) only knows the hive.* one and turns
+       autoCreateAll off while it considers schema verification enabled. -->
+  <property>
+    <name>metastore.schema.verification</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>hive.metastore.schema.verification</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>metastore.warehouse.dir</name>
+    <value>file:///tmp/impala-ci-hms/warehouse</value>
+  </property>
+</configuration>
