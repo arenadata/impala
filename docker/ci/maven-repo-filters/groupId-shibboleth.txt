@@ -1,0 +1,4 @@
+# Maven remote repository filter (aether.remoteRepositoryFilter.groupId) for the
+# shibboleth repo (settings.xml): only xmlsectool, which the frontend needs and
+# which is not on Maven Central, is looked up there.
+net.shibboleth.tool
