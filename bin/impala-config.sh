@@ -253,8 +253,8 @@ export APACHE_KNOX_VERSION=2.0.0
 export APACHE_PARQUET_VERSION=1.17.1
 export APACHE_RANGER_VERSION=2.6.0.8-2.3.0-3
 export APACHE_TEZ_VERSION=0.10.5.2-4.4.0-0
-export APACHE_HIVE_VERSION=4.3.0.2-4.4.0-1
-export APACHE_HIVE_STORAGE_API_VERSION=4.3.0.2-4.4.0-1
+export APACHE_HIVE_VERSION=4.3.0.2-4.4.0-2
+export APACHE_HIVE_STORAGE_API_VERSION=4.3.0.2-4.4.0-2
 export APACHE_OZONE_VERSION=2.1.0.1-4.3.0-5
 
 # Java dependencies that are not also runtime components. Declaring versions here allows
