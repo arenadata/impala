@@ -1,0 +1,7 @@
+# Maven remote repository filter (aether.remoteRepositoryFilter.groupId) for
+# cdh.rcs.releases.repo: only these groupIds are looked up there. They are the
+# Cloudera-only cup-maven-plugin / java-cup artifacts fe/pom.xml needs; everything
+# else resolves from Maven Central (see settings.xml), so Maven does not probe
+# repository.cloudera.com for every dependency.
+net.sourceforge.czt
+net.sourceforge.czt.dev

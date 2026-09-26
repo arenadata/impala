@@ -1,0 +1,16 @@
+# The CI environment image (docker/ci/env.Dockerfile) is built from this
+# directory but copies only the files below; the Impala source is bind-mounted
+# into the container at run time (docker/ci/run-in-env.sh), never copied in.
+# Everything else is excluded so that a build here does not send the working
+# tree (build output alone is several GB) to the daemon.
+*
+!docker/ci/**
+!bin/impala-config.sh
+!bin/impala-config-branch.sh
+!bin/impala-config-java.sh
+!bin/bootstrap_toolchain.py
+# The Python requirements lists and their download script; the packages
+# themselves are gitignored and downloaded during the image build.
+!infra/python/deps/*requirements.txt
+!infra/python/deps/download_requirements
+!infra/python/deps/pip_download.py

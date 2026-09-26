@@ -1,0 +1,134 @@
+name: CI (build, unit tests)
+
+# Builds Impala with its tests and runs the unit tests that need no minicluster
+# inside the CI environment image (docker/ci/env.Dockerfile, env-image.sh): build
+# dependencies, JDK 21, Maven and the native toolchain, published to GHCR under a
+# tag that is a hash of its inputs. Each stage runs in a fresh container of it with
+# the checkout bind-mounted (docker/ci/run-in-env.sh); ccache is carried between
+# runs through the Actions cache. The steps only call scripts in docker/ci/, which
+# work the same way locally.
+
+# Runs unless a change only touches files the build and unit tests do not read
+# (docs, the Python end-to-end tests, packaging, other Docker images). Patterns
+# apply in order, so docker/ci/** is re-included after docker/** is excluded.
+# Keep the push and pull_request lists identical.
+on:
+  push:
+    branches: ['develop/**', 'release/**', 'master']
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!tests/**'
+      - '!**/*.md'
+      - '!package/**'
+      - '!docker/**'
+      - 'docker/ci/**'
+  pull_request:
+    branches: ['develop/**', 'release/**', 'master']
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!tests/**'
+      - '!**/*.md'
+      - '!package/**'
+      - '!docker/**'
+      - 'docker/ci/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pushes (env image, cache cleanup) except from fork PRs, which get a read-only token.
+  PUSH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      packages: write
+      checks: write
+
+    steps:
+      # The env image, the build tree with test binaries and the caches do not fit
+      # in the space a stock runner has free.
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@3f13feab2962a87273d379ebc36ea159527e6cc9  # v1.3.2
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # CI_STATE_DIR holds the directories the container mounts between steps (see
+      # docker/ci/run-in-env.sh); actions/cache rejects paths containing '..', so
+      # it is set here from RUNNER_TEMP rather than relative to the workspace.
+      - name: Resolve the CI environment
+        run: |
+          echo "ENV_IMAGE=$(docker/ci/env-image.sh tag)" >> "$GITHUB_ENV"
+          echo "CI_STATE_DIR=$RUNNER_TEMP/ci-cache" >> "$GITHUB_ENV"
+
+      # Builds the image only when one of its inputs changed.
+      - name: Ensure the CI environment image
+        timeout-minutes: 90
+        run: |
+          if [ "$PUSH" = true ]; then docker/ci/env-image.sh ensure --push
+          else docker/ci/env-image.sh ensure; fi
+
+      # Restored here and saved at the end even when tests fail: the compiled
+      # objects are just as reusable.
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CI_STATE_DIR }}/ccache
+          key: impala-ci-ccache-${{ github.run_id }}
+          restore-keys: impala-ci-ccache-
+
+      - name: Build Impala
+        timeout-minutes: 240
+        run: docker/ci/run-in-env.sh "$ENV_IMAGE" docker/ci/ci-build.sh
+
+      - name: Run unit tests
+        timeout-minutes: 90
+        run: docker/ci/run-in-env.sh "$ENV_IMAGE" docker/ci/run-unit-tests.sh ci-results
+
+      - name: Publish test report
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: 'ci-results/**/*.xml'
+          check_name: Unit tests
+          annotate_only: ${{ env.PUSH != 'true' }}
+          detailed_summary: true
+          require_tests: true
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: ci-results
+          if-no-files-found: ignore
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CI_STATE_DIR }}/ccache
+          key: impala-ci-ccache-${{ github.run_id }}
