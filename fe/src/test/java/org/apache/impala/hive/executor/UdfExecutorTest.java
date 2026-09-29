@@ -394,7 +394,13 @@ public class UdfExecutorTest {
       case DOUBLE:
         double expected = ((ImpalaDoubleWritable)expectedValue).get();
         double actual = UnsafeUtil.UNSAFE.getDouble(r);
-        if (expected != actual) {
+        // Allow a few ULPs: Math.log etc. may differ from StrictMath by 1 ULP per
+        // call (see the java.lang.Math javadoc), so an expected value such as
+        // Math.log(3) / Math.log(10) can be 2 ULPs away from Hive's UDFLog result.
+        boolean equal = Double.compare(expected, actual) == 0
+            || (Double.isFinite(expected)
+                && Math.abs(expected - actual) <= 4 * Math.ulp(expected));
+        if (!equal) {
           errMsgs.add("Expected double: " + expected);
           errMsgs.add("Actual double:   " + actual);
         }

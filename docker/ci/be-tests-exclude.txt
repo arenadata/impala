@@ -1,0 +1,12 @@
+# Backend ctest names skipped in CI (docker/ci/run-unit-tests.sh): they need a
+# running minicluster (HDFS/HMS/impalad) or a real disk layout. One regex per
+# line; ctest can only skip a whole binary, so an entry drops all of its cases.
+session-expiry-test       # checkConfiguration() rejects the local filesystem (IMPALA-1850)
+data-cache-test           # LargeFootprint needs ~76 GB free disk in /tmp
+internal-server-test      # impalad startup rejects a local default FS (IMPALA-1850); needs HDFS
+client-cache-test         # connects to an impalad at 127.0.0.1:25000
+buffer-pool-test          # *SpillToRemote cases spill to the default FS (HDFS in the minicluster)
+disk-io-mgr-test          # WriteToRemote* cases write to the default FS (HDFS in the minicluster)
+rpc-mgr-kerberized-test   # KDC principal uses the hostname, clients resolve 127.0.0.1 to localhost
+thrift-server-test        # Kerberos+SSL case: same sandbox hostname/localhost principal mismatch
+tmp-file-mgr-test         # TestOneDirPerDevice needs /tmp on a /proc/partitions device, not overlayfs

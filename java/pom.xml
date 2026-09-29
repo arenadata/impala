@@ -103,8 +103,8 @@ under the License.
     -->
     <repository>
       <id>arenadata</id>
-      <name>Arenadata ADH GitHub Packages</name>
-      <url>https://maven.pkg.github.com/arenadata/*</url>
+      <name>Arenadata public Maven repository</name>
+      <url>https://maven.arenadata.io/arenadata</url>
       <releases>
         <enabled>true</enabled>
       </releases>
