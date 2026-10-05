@@ -33,6 +33,7 @@ add_library(Io
   scan-range.cc
   scan-buffer-manager.cc
   hdfs-file-reader.cc
+  s3-native-client.cc
   local-file-reader.cc
   local-file-writer.cc
   hdfs-monitored-ops.cc

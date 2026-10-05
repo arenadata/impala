@@ -419,6 +419,17 @@ find_package(KerberosPrograms)
 find_package(Curl REQUIRED)
 IMPALA_ADD_THIRDPARTY_LIB(curl ${CURL_INCLUDE_DIR} ${CURL_STATIC_LIB} "")
 
+# find aws-sdk-cpp (S3) for the experimental native S3 reader. Optional: only used when
+# AWS_SDK_CPP_HOME points to a static aws-sdk-cpp build.
+if (DEFINED ENV{AWS_SDK_CPP_HOME} AND NOT "$ENV{AWS_SDK_CPP_HOME}" STREQUAL "")
+  set(AWS_SDK_CPP_ROOT $ENV{AWS_SDK_CPP_HOME})
+  find_package(AwsSdkCpp REQUIRED)
+  include_directories(SYSTEM ${AWS_SDK_CPP_INCLUDE_DIR})
+  add_definitions(-DIMPALA_HAVE_AWS_SDK_CPP)
+else()
+  message(STATUS "AWS_SDK_CPP_HOME is not set, building without the native S3 reader")
+endif()
+
 # find calloncehack headers and libs
 find_package(CallOnceHack REQUIRED)
 IMPALA_ADD_THIRDPARTY_LIB(calloncehack ${CALLONCEHACK_INCLUDE_DIR} ""
