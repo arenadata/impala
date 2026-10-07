@@ -389,6 +389,7 @@ class ScanRange : public RequestRange {
   friend class RequestContext;
   friend class HdfsFileReader;
   friend class LocalFileReader;
+  friend class S3NativeFileReader;
   friend class RemoteOperRange;
 
   /// Initialize internal fields
