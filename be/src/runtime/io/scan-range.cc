@@ -20,6 +20,8 @@
 #include "runtime/io/disk-io-mgr.h"
 #include "runtime/io/hdfs-file-reader.h"
 #include "runtime/io/local-file-reader.h"
+#include "runtime/io/s3-native-client.h"
+#include "runtime/io/s3-native-file-reader.h"
 #include "util/error-util.h"
 #include "util/hdfs-util.h"
 
@@ -512,7 +514,12 @@ void ScanRange::Reset(const FileInfo &fi, int64_t len, int64_t offset, int disk_
          buffer_opts.client_buffer_len_ >= len_);
   fs_ = fi.fs;
   if (fs_ != nullptr) {
-    file_reader_ = make_unique<HdfsFileReader>(this, fs_, false);
+    if (S3NativeClientEnabled() && IsS3APath(fi.filename)) {
+      // Experimental: read s3a:// files with aws-sdk-cpp (--s3_native_reader).
+      file_reader_ = make_unique<S3NativeFileReader>(this);
+    } else {
+      file_reader_ = make_unique<HdfsFileReader>(this, fs_, false);
+    }
     local_buffer_reader_ = make_unique<LocalFileReader>(this);
   } else {
     file_reader_ = make_unique<LocalFileReader>(this);

@@ -199,6 +199,9 @@ do
     -fe_only)
       BUILD_FE_ONLY=1
       ;;
+    -no_aws_sdk)
+      export IMPALA_BUILD_AWS_SDK_CPP=false
+      ;;
     -ninja)
       MAKE_CMD=ninja
       ;;
@@ -260,6 +263,8 @@ do
       echo "[-metastore_snapshot_file <file_name>]: Load the hive metastore snapshot"
       echo "[-so|-build_shared_libs] : Dynamically link executables (default is static)"
       echo "[-fe_only] : Build just the frontend"
+      echo "[-no_aws_sdk] : Do not build aws-sdk-cpp for the native S3 reader (impalad is"\
+           "built without it unless AWS_SDK_CPP_HOME points to an installed SDK)"
       echo "[-ninja] : Use ninja instead of make"
       echo "[-cmake_only] : Generate makefiles only, instead of doing a full build"
       echo "[-package] : Generate a package for deployment."
@@ -451,6 +456,12 @@ bootstrap_dependencies() {
   fi
   if [[ "${USE_APACHE_HIVE}" = true ]]; then
     "$IMPALA_HOME/testdata/bin/patch_hive.sh"
+  fi
+  # aws-sdk-cpp for the experimental native S3 reader, built with the toolchain compiler.
+  # Not needed for a frontend-only build.
+  if [[ "${IMPALA_BUILD_AWS_SDK_CPP}" = true && "${BUILD_FE_ONLY}" -ne 1 ]]; then
+    echo ">>> Building aws-sdk-cpp for the native S3 reader"
+    "$IMPALA_HOME/bin/build-aws-sdk-cpp.sh"
   fi
 }
 

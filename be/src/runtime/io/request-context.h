@@ -248,6 +248,7 @@ class RequestContext {
   friend class DiskIoMgr;
   friend class ScanRange;
   friend class HdfsFileReader;
+  friend class S3NativeFileReader;
   friend class WriteRange;
   friend class RemoteOperRange;
   friend class LocalFileWriter;
