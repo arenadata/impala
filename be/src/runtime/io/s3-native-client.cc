@@ -17,6 +17,7 @@
 
 #include "runtime/io/s3-native-client.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <memory>
 
@@ -51,13 +52,17 @@ DEFINE_string(s3_native_credentials_file, "", "(Experimental) AWS credentials fi
     "~/.aws/credentials). Keys are deliberately not taken from flags, which are visible "
     "on the debug web pages.");
 DEFINE_int32(s3_native_max_connections, 64, "(Experimental) Maximum number of HTTP "
-    "connections of the native S3 reader.");
+    "connections of the native S3 reader. Raised to --num_s3_io_threads if lower: every "
+    "S3 I/O thread holds one connection during a read, and aws-sdk-cpp waits without a "
+    "time limit for a free connection.");
 DEFINE_int32(s3_native_connect_timeout_ms, 10000, "(Experimental) Connect timeout of the "
     "native S3 reader, in milliseconds.");
 DEFINE_int32(s3_native_request_timeout_ms, 30000, "(Experimental) Request timeout of the "
     "native S3 reader, in milliseconds.");
 DEFINE_string(s3_native_ca_file, "", "(Experimental) CA certificates file used to verify "
     "the S3 endpoint over HTTPS. Empty means the system CA store.");
+
+DECLARE_int32(num_s3_io_threads);
 
 using strings::Substitute;
 
@@ -104,7 +109,14 @@ Status InitS3NativeClient() {
   // Reads only: there is no request payload to sign.
   config.payloadSigningPolicy =
       Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never;
-  config.maxConnections = FLAGS_s3_native_max_connections;
+  int pool_size = S3NativeConnectionPoolSize(
+      FLAGS_s3_native_max_connections, FLAGS_num_s3_io_threads);
+  if (pool_size != FLAGS_s3_native_max_connections) {
+    LOG(WARNING) << "--s3_native_max_connections=" << FLAGS_s3_native_max_connections
+                 << " is lower than --num_s3_io_threads=" << FLAGS_num_s3_io_threads
+                 << ", using " << pool_size << " connections";
+  }
+  config.maxConnections = pool_size;
   config.connectTimeoutMs = FLAGS_s3_native_connect_timeout_ms;
   config.requestTimeoutMs = FLAGS_s3_native_request_timeout_ms;
   if (!FLAGS_s3_native_ca_file.empty()) config.caFile = FLAGS_s3_native_ca_file.c_str();
@@ -123,7 +135,7 @@ Status InitS3NativeClient() {
             << Aws::Version::GetVersionString() << "), endpoint '"
             << FLAGS_s3_native_endpoint << "', region " << FLAGS_s3_native_region
             << ", path-style " << (FLAGS_s3_native_path_style ? "on" : "off")
-            << ", max connections " << FLAGS_s3_native_max_connections;
+            << ", max connections " << pool_size;
   return Status::OK();
 #else
   return Status("--s3_native_reader is set, but impalad was built without aws-sdk-cpp");
@@ -157,6 +169,32 @@ Status ParseS3Path(const string& path, string* bucket, string* key) {
     break;
   }
   return Status(Substitute("Not a valid S3 path (expected s3a://bucket/key): $0", path));
+}
+
+int S3NativeConnectionPoolSize(int max_connections, int num_io_threads) {
+  return std::max(max_connections, num_io_threads);
+}
+
+Status CheckS3RangeRead(int64_t bytes_requested, int64_t bytes_written,
+    int64_t content_length, int64_t* bytes_read, bool* eof) {
+  DCHECK_GT(bytes_requested, 0);
+  *bytes_read = 0;
+  *eof = false;
+  if (bytes_written < 0) {
+    return Status("Failed to write the response body into the read buffer");
+  }
+  if (bytes_written > bytes_requested) {
+    return Status(Substitute("Response body has $0 bytes, more than the $1 bytes "
+        "requested", bytes_written, bytes_requested));
+  }
+  if (content_length > 0 && content_length != bytes_written) {
+    return Status(Substitute("Response body has $0 bytes, but Content-Length is $1",
+        bytes_written, content_length));
+  }
+  *bytes_read = bytes_written;
+  // A shorter body means the range went past the end of the object.
+  *eof = bytes_written < bytes_requested;
+  return Status::OK();
 }
 
 } // namespace impala

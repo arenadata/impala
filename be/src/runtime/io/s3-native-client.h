@@ -46,6 +46,26 @@ Aws::S3::S3Client* GetS3NativeClient();
 
 /// Splits an S3 path ('s3a://bucket/key', also 's3://' and 's3n://') into 'bucket' and
 /// 'key'. Returns an error if 'path' is not such a path or has an empty bucket or key.
+/// The key is not percent-decoded: Impala file paths hold the literal object key (the
+/// frontend decodes listing URIs, and Hive-escaped partition values like 'p=a%3Ab' are
+/// part of the key), and the SDK encodes the key once when it builds the request URI.
 Status ParseS3Path(const std::string& path, std::string* bucket, std::string* key);
+
+/// Returns the size of the native S3 client's HTTP connection pool: 'max_connections'
+/// (--s3_native_max_connections), raised to 'num_io_threads' (--num_s3_io_threads) if
+/// lower. Every S3 I/O thread holds one connection during a read, and aws-sdk-cpp waits
+/// without a time limit for a free connection when the pool is exhausted.
+int S3NativeConnectionPoolSize(int max_connections, int num_io_threads);
+
+/// Checks the result of one successful ranged GET request for 'bytes_requested' bytes
+/// and sets 'bytes_read' and 'eof'. 'bytes_written' is the number of body bytes written
+/// into the read buffer (the response stream position), -1 if the stream failed.
+/// 'content_length' is the Content-Length header as reported by aws-sdk-cpp, which is 0
+/// when the header is absent (chunked transfer encoding). A ranged GET never returns an
+/// empty body for a valid range, so 0 is treated as "unknown" and the stream position is
+/// what counts. Returns an error if the body does not fit the request or disagrees with
+/// a present Content-Length header.
+Status CheckS3RangeRead(int64_t bytes_requested, int64_t bytes_written,
+    int64_t content_length, int64_t* bytes_read, bool* eof);
 
 } // namespace impala

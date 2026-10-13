@@ -23,6 +23,7 @@
 #include <aws/core/utils/stream/PreallocatedStreamBuf.h>
 #include <aws/s3/S3Client.h>
 #include <aws/s3/model/GetObjectRequest.h>
+#include <aws/s3/model/GetObjectResult.h>
 #endif
 
 #include "gutil/strings/substitute.h"
@@ -114,12 +115,17 @@ Status S3NativeFileReader::ReadFromPos(DiskQueue* queue, int64_t file_offset,
             string(error.GetMessage().c_str())));
   }
 
-  int64_t content_length = outcome.GetResult().GetContentLength();
-  DCHECK_GE(content_length, 0);
-  DCHECK_LE(content_length, bytes_to_read);
-  *bytes_read = content_length;
-  // A shorter response means the range went past the end of the object.
-  if (*bytes_read < bytes_to_read) *eof = true;
+  // The body size is taken from the stream position, not only from Content-Length:
+  // aws-sdk-cpp reports 0 when the header is absent (chunked transfer encoding).
+  const Aws::S3::Model::GetObjectResult& result = outcome.GetResult();
+  int64_t bytes_written = static_cast<int64_t>(result.GetBody().tellp());
+  Status status = CheckS3RangeRead(
+      bytes_to_read, bytes_written, result.GetContentLength(), bytes_read, eof);
+  if (!status.ok()) {
+    return Status(TErrorCode::DISK_IO_ERROR, GetBackendString(),
+        Substitute("Error reading S3 object s3a://$0/$1 at offset $2 ($3 bytes): $4",
+            bucket_, key_, file_offset, bytes_to_read, status.msg().msg()));
+  }
   queue->read_size()->Update(*bytes_read);
   return Status::OK();
 #else
