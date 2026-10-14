@@ -1550,7 +1550,7 @@ class ImpalaTestSuite(BaseTestSuite):
     pattern = re.compile(line_regex, re.DOTALL)
 
     for i in range(0, timeout_s):
-      log_file_path = self.__build_log_path(daemon, level)
+      log_file_path = self.build_log_path(daemon, level)
       with open(log_file_path) as log:
         ret = pattern.search(log.read())
         if ret is not None:
@@ -1561,7 +1561,7 @@ class ImpalaTestSuite(BaseTestSuite):
         "contents matching the regex '{}'".format(line_regex)
 
   def assert_log_contains(self, daemon, level, line_regex, expected_count=1, timeout_s=6,
-      dry_run=False):
+      dry_run=False, sleep_s=1):
     """
     Assert that the daemon log with specified level (e.g. ERROR, WARNING, INFO) contains
     expected_count lines with a substring matching the regex. When expected_count is -1,
@@ -1588,7 +1588,7 @@ class ImpalaTestSuite(BaseTestSuite):
     while True:
       try:
         found = 0
-        log_file_path = self.__build_log_path(daemon, level)
+        log_file_path = self.build_log_path(daemon, level)
         last_re_result = None
         with open(log_file_path, 'rb') as log_file:
           for line in log_file:
@@ -1619,7 +1619,7 @@ class ImpalaTestSuite(BaseTestSuite):
           raise
         LOG.info("Expected log lines could not be found, sleeping before retrying: %s",
             str(e))
-        time.sleep(1)
+        time.sleep(sleep_s)
 
   def validate_exec_option_dimension(self, vector):
     """Validate that test dimension with name matching query option name is
@@ -1646,7 +1646,7 @@ class ImpalaTestSuite(BaseTestSuite):
         pytest.fail("{}[{}]={} does not match against dimension {}={}.".format(
           EXEC_OPTION, name, exec_option[name], name, vector.get_value(name)))
 
-  def __build_log_path(self, daemon, level):
+  def build_log_path(self, daemon, level):
     """Builds a path to a log file for a particular daemon. Does not assert that file
        actually exists.
 
@@ -1678,7 +1678,7 @@ class ImpalaTestSuite(BaseTestSuite):
 
         Return: nothing
     """
-    actual_log_path = self.__build_log_path(daemon, level)
+    actual_log_path = self.build_log_path(daemon, level)
 
     def exists_func():
       return os.path.exists(actual_log_path)
