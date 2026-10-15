@@ -17,7 +17,9 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 #include "common/status.h"
 
@@ -52,10 +54,23 @@ Aws::S3::S3Client* GetS3NativeClient();
 Status ParseS3Path(const std::string& path, std::string* bucket, std::string* key);
 
 /// Returns the size of the native S3 client's HTTP connection pool: 'max_connections'
-/// (--s3_native_max_connections), raised to 'num_io_threads' (--num_s3_io_threads) if
-/// lower. Every S3 I/O thread holds one connection during a read, and aws-sdk-cpp waits
-/// without a time limit for a free connection when the pool is exhausted.
-int S3NativeConnectionPoolSize(int max_connections, int num_io_threads);
+/// (--s3_native_max_connections), raised to 'num_request_threads' if lower: the S3 I/O
+/// threads (--num_s3_io_threads) plus, with parallel reads, the client's executor threads
+/// (--s3_native_executor_threads). Every such thread holds one connection during a
+/// request, and aws-sdk-cpp waits without a time limit for a free connection when the
+/// pool is exhausted.
+int S3NativeConnectionPoolSize(int max_connections, int num_request_threads);
+
+/// Returns the part size for a read of 'len' bytes: 'part_size' if the read is split into
+/// parallel parts (--s3_native_parallel_read_min_size = 'min_size' > 0, 'len' at least
+/// 'min_size' and larger than 'part_size'), otherwise 'len' (one request).
+int64_t S3ReadPartSize(int64_t len, int64_t min_size, int64_t part_size);
+
+/// Returns the number of bytes read by a split read of 'len' bytes in parts of
+/// 'part_size' bytes, given the bytes received per part. The parts up to and including
+/// the first short part count: bytes after a short part are past the end of the object.
+int64_t S3PartsBytesRead(int64_t len, int64_t part_size,
+    const std::vector<int64_t>& received);
 
 /// Checks the result of one successful ranged GET request for 'bytes_requested' bytes
 /// and sets 'bytes_read' and 'eof'. 'bytes_written' is the number of body bytes written

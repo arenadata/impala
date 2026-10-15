@@ -38,6 +38,8 @@
 #include "runtime/hbase-table-factory.h"
 #include "runtime/hdfs-fs-cache.h"
 #include "runtime/io/disk-io-mgr.h"
+#include "runtime/io/s3-native-client.h"
+#include "runtime/io/s3-native-file-cache.h"
 #include "runtime/krpc-data-stream-mgr.h"
 #include "runtime/lib-cache.h"
 #include "runtime/mem-tracker.h"
@@ -135,6 +137,7 @@ DECLARE_int32(num_cores);
 DECLARE_int32(krpc_port);
 DECLARE_string(mem_limit);
 DECLARE_bool(mem_limit_includes_jvm);
+DECLARE_int32(s3_native_file_cache_max_mem_percent);
 DECLARE_string(buffer_pool_limit);
 DECLARE_string(buffer_pool_clean_pages_limit);
 DECLARE_int64(min_buffer_size);
@@ -401,6 +404,14 @@ Status ExecEnv::Init() {
     LOG(INFO) << "CodeGen Cache is disabled.";
   }
 
+  if (S3NativeClientEnabled()) {
+    // Preserve the memory for the native S3 file cache, like for the codegen cache.
+    int64_t max_percent =
+        min(max(FLAGS_s3_native_file_cache_max_mem_percent, 0), 100);
+    admit_mem_limit_ -= io::InitS3NativeFileCache(admit_mem_limit_ * max_percent / 100);
+    DCHECK_GT(admit_mem_limit_, 0);
+  }
+
   // Initialize the tuple cache
   RETURN_IF_ERROR(tuple_cache_mgr_->Init());
 
@@ -641,6 +652,19 @@ void ExecEnv::InitMemTracker(int64_t bytes_limit) {
         JvmMemoryMetric::HEAP_MAX_USAGE, -1, "JVM: max heap size", mem_tracker_.get()));
     obj_pool_->Add(new MemTracker(JvmMemoryMetric::NON_HEAP_COMMITTED, -1,
         "JVM: non-heap committed", mem_tracker_.get()));
+  }
+  io::S3NativeFileCache* s3_file_cache = io::GetS3NativeFileCache();
+  if (s3_file_cache != nullptr
+      && ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_TOTAL_BYTES != nullptr) {
+    // The cached files are process memory not tracked against queries. Queries take
+    // priority: the cache gives memory back when the process is over its limit. Its GC
+    // function is added before the buffer pool's: GcMemory() stops after a function
+    // that leaves the process over its limit, so a later function would not run.
+    obj_pool_->Add(new MemTracker(ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_TOTAL_BYTES,
+        -1, "Native S3 File Cache", mem_tracker_.get()));
+    mem_tracker_->AddGcFunction([s3_file_cache] (int64_t bytes_to_free) {
+      s3_file_cache->ReleaseMemory(bytes_to_free);
+    });
   }
   if (buffer_pool_ != nullptr) {
     // Tests can create multiple buffer pools, meaning that the metrics are not usable.

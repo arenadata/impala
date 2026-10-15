@@ -28,6 +28,7 @@
 #include <aws/core/Version.h>
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/client/ClientConfiguration.h>
+#include <aws/core/utils/threading/PooledThreadExecutor.h>
 #include <aws/s3/S3Client.h>
 #include <aws/s3/S3ClientConfiguration.h>
 #endif
@@ -51,16 +52,48 @@ DEFINE_string(s3_native_credentials_file, "", "(Experimental) AWS credentials fi
     "Empty means the default AWS credentials chain (environment variables, "
     "~/.aws/credentials). Keys are deliberately not taken from flags, which are visible "
     "on the debug web pages.");
-DEFINE_int32(s3_native_max_connections, 64, "(Experimental) Maximum number of HTTP "
-    "connections of the native S3 reader. Raised to --num_s3_io_threads if lower: every "
-    "S3 I/O thread holds one connection during a read, and aws-sdk-cpp waits without a "
-    "time limit for a free connection.");
+DEFINE_int32(s3_native_max_connections, 128, "(Experimental) Maximum number of HTTP "
+    "connections of the native S3 reader. Raised to --num_s3_io_threads (plus "
+    "--s3_native_executor_threads when reads are split into parallel parts) if lower: "
+    "every thread holds one connection during a request, and aws-sdk-cpp waits without "
+    "a time limit for a free connection.");
 DEFINE_int32(s3_native_connect_timeout_ms, 10000, "(Experimental) Connect timeout of the "
     "native S3 reader, in milliseconds.");
 DEFINE_int32(s3_native_request_timeout_ms, 30000, "(Experimental) Request timeout of the "
     "native S3 reader, in milliseconds.");
 DEFINE_string(s3_native_ca_file, "", "(Experimental) CA certificates file used to verify "
     "the S3 endpoint over HTTPS. Empty means the system CA store.");
+DEFINE_int64(s3_native_parallel_read_min_size, 0, "(Experimental) Reads of at least "
+    "this many bytes are split into parts of --s3_native_parallel_read_part_size bytes "
+    "that are fetched in parallel, each with its own ranged GET. Helps only when one "
+    "connection to the S3 gateway is slow. 0 (the default) turns splitting off.");
+DEFINE_int64(s3_native_parallel_read_part_size, 1024 * 1024, "(Experimental) Size in "
+    "bytes of the parts of a read split by --s3_native_parallel_read_min_size.");
+DEFINE_int32(s3_native_executor_threads, 64, "(Experimental) Number of threads of the "
+    "native S3 client that fetch the parts of split reads (the first part of a read is "
+    "fetched by the I/O thread itself). Only used if --s3_native_parallel_read_min_size "
+    "is set; otherwise the client has one such thread.");
+
+DEFINE_int64(s3_native_whole_file_max_size, 8L * 1024 * 1024, "(Experimental) Files "
+    "of at most this many bytes are read whole with one GET on their first read and "
+    "kept in the native S3 file cache, so that later reads of the file (footer, column "
+    "chunks, later queries) are served from memory. 0 turns this off.");
+DEFINE_int64(s3_native_file_cache_capacity, 2L * 1024 * 1024 * 1024, "(Experimental) "
+    "Capacity in bytes of the native S3 file cache (--s3_native_whole_file_max_size, "
+    "--s3_native_block_size). "
+    "Limited to --s3_native_file_cache_max_mem_percent of the memory admitted for "
+    "queries; the capacity is subtracted from that memory. 0 turns the cache off.");
+DEFINE_int32(s3_native_file_cache_max_mem_percent, 25, "(Experimental) Maximum share, "
+    "in percent of the memory admitted for queries, of the native S3 file cache.");
+DEFINE_int64(s3_native_block_size, 128 * 1024, "(Experimental) Reads of files larger "
+    "than --s3_native_whole_file_max_size go through the native S3 file cache in blocks "
+    "of this many bytes: cached blocks are copied from memory, each run of missing "
+    "blocks is fetched with one GET and cached, so data read again soon (another scan "
+    "of the same table, the next query, the footer) is not downloaded again. 0 turns "
+    "this off.");
+DEFINE_int32(s3_native_file_cache_protected_percent, 80, "(Experimental) Share, in "
+    "percent of the capacity, of the protected segment of the native S3 file cache: "
+    "files read by more than one scan. One large scan evicts only the rest.");
 
 DECLARE_int32(num_s3_io_threads);
 
@@ -109,14 +142,25 @@ Status InitS3NativeClient() {
   // Reads only: there is no request payload to sign.
   config.payloadSigningPolicy =
       Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never;
-  int pool_size = S3NativeConnectionPoolSize(
-      FLAGS_s3_native_max_connections, FLAGS_num_s3_io_threads);
+  bool parallel_reads = FLAGS_s3_native_parallel_read_min_size > 0
+      && FLAGS_s3_native_parallel_read_part_size > 0;
+  int executor_threads = std::max(FLAGS_s3_native_executor_threads, 1);
+  int request_threads =
+      FLAGS_num_s3_io_threads + (parallel_reads ? executor_threads : 0);
+  int pool_size =
+      S3NativeConnectionPoolSize(FLAGS_s3_native_max_connections, request_threads);
   if (pool_size != FLAGS_s3_native_max_connections) {
     LOG(WARNING) << "--s3_native_max_connections=" << FLAGS_s3_native_max_connections
-                 << " is lower than --num_s3_io_threads=" << FLAGS_num_s3_io_threads
-                 << ", using " << pool_size << " connections";
+                 << " is lower than the number of request threads (--num_s3_io_threads="
+                 << FLAGS_num_s3_io_threads << (parallel_reads ? Substitute(
+                     " + --s3_native_executor_threads=$0", executor_threads) : "")
+                 << "), using " << pool_size << " connections";
   }
   config.maxConnections = pool_size;
+  // Fetches the parts of split reads (GetObjectCallable). The default executor would
+  // start a thread per request. Only split reads use it: one thread if they are off.
+  config.executor = Aws::MakeShared<Aws::Utils::Threading::PooledThreadExecutor>(
+      kAllocationTag, parallel_reads ? executor_threads : 1);
   config.connectTimeoutMs = FLAGS_s3_native_connect_timeout_ms;
   config.requestTimeoutMs = FLAGS_s3_native_request_timeout_ms;
   if (!FLAGS_s3_native_ca_file.empty()) config.caFile = FLAGS_s3_native_ca_file.c_str();
@@ -135,7 +179,10 @@ Status InitS3NativeClient() {
             << Aws::Version::GetVersionString() << "), endpoint '"
             << FLAGS_s3_native_endpoint << "', region " << FLAGS_s3_native_region
             << ", path-style " << (FLAGS_s3_native_path_style ? "on" : "off")
-            << ", max connections " << pool_size;
+            << ", max connections " << pool_size << ", parallel reads "
+            << (parallel_reads ? Substitute("from $0 bytes in parts of $1 bytes",
+                   FLAGS_s3_native_parallel_read_min_size,
+                   FLAGS_s3_native_parallel_read_part_size) : string("off"));
   return Status::OK();
 #else
   return Status("--s3_native_reader is set, but impalad was built without aws-sdk-cpp");
@@ -171,8 +218,25 @@ Status ParseS3Path(const string& path, string* bucket, string* key) {
   return Status(Substitute("Not a valid S3 path (expected s3a://bucket/key): $0", path));
 }
 
-int S3NativeConnectionPoolSize(int max_connections, int num_io_threads) {
-  return std::max(max_connections, num_io_threads);
+int S3NativeConnectionPoolSize(int max_connections, int num_request_threads) {
+  return std::max(max_connections, num_request_threads);
+}
+
+int64_t S3ReadPartSize(int64_t len, int64_t min_size, int64_t part_size) {
+  if (min_size <= 0 || part_size <= 0 || len < min_size || len <= part_size) return len;
+  return part_size;
+}
+
+int64_t S3PartsBytesRead(int64_t len, int64_t part_size,
+    const std::vector<int64_t>& received) {
+  int64_t total = 0;
+  for (size_t i = 0; i < received.size(); ++i) {
+    int64_t expected = std::min(part_size, len - static_cast<int64_t>(i) * part_size);
+    total += received[i];
+    // Bytes after a short part are past the end of the object.
+    if (received[i] < expected) break;
+  }
+  return total;
 }
 
 Status CheckS3RangeRead(int64_t bytes_requested, int64_t bytes_written,
