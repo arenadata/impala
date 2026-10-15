@@ -72,7 +72,7 @@ struct HdfsFileDesc {
 
   io::ScanRange::FileInfo GetFileInfo() const {
     return io::ScanRange::FileInfo{
-        filename.c_str(), fs, mtime, is_encrypted, is_erasure_coded};
+        filename.c_str(), fs, mtime, is_encrypted, is_erasure_coded, file_length};
   }
 
   /// Connection to the filesystem containing the file.
@@ -152,6 +152,11 @@ class ScanRangeSharedState {
   /// Given a partition_id and filename returns the related file descriptor DCHECK ensures
   /// there is always file descriptor returned.
   const HdfsFileDesc* GetFileDesc(int64_t partition_id, const std::string& filename);
+
+  /// Like GetFileDesc(), but returns nullptr if there is no file descriptor and does not
+  /// insert an entry.
+  const HdfsFileDesc* FindFileDesc(
+      int64_t partition_id, const std::string& filename) const;
 
   /// Sets the scanner specific metadata for 'partition_id' and 'filename'.
   /// Scanners can use this to store file header information. Thread safe.
