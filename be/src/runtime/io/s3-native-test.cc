@@ -116,4 +116,33 @@ TEST(S3NativeTest, CheckS3RangeRead) {
   ExpectReadError(1024, 1024, 100);
 }
 
+TEST(S3NativeTest, ReadPartSize) {
+  const int64_t MiB = 1024 * 1024;
+  // Large reads are split into parts.
+  EXPECT_EQ(MiB, S3ReadPartSize(8 * MiB, 2 * MiB, MiB));
+  EXPECT_EQ(MiB, S3ReadPartSize(2 * MiB, 2 * MiB, MiB));
+  // Smaller than the threshold: one request.
+  EXPECT_EQ(2 * MiB - 1, S3ReadPartSize(2 * MiB - 1, 2 * MiB, MiB));
+  EXPECT_EQ(100, S3ReadPartSize(100, 2 * MiB, MiB));
+  // Not larger than one part: one request.
+  EXPECT_EQ(MiB, S3ReadPartSize(MiB, 512 * 1024, MiB));
+  // Splitting off.
+  EXPECT_EQ(8 * MiB, S3ReadPartSize(8 * MiB, 0, MiB));
+  EXPECT_EQ(8 * MiB, S3ReadPartSize(8 * MiB, 2 * MiB, 0));
+}
+
+TEST(S3NativeTest, PartsBytesRead) {
+  // 2.5 parts of 100 bytes: all received.
+  EXPECT_EQ(250, S3PartsBytesRead(250, 100, {100, 100, 50}));
+  // The object ends in the second part: later parts do not count.
+  EXPECT_EQ(130, S3PartsBytesRead(250, 100, {100, 30, 0}));
+  EXPECT_EQ(130, S3PartsBytesRead(250, 100, {100, 30, 50}));
+  // The object ends exactly at a part boundary.
+  EXPECT_EQ(200, S3PartsBytesRead(300, 100, {100, 100, 0}));
+  // Nothing at the offset (HTTP 416 on the first part).
+  EXPECT_EQ(0, S3PartsBytesRead(300, 100, {0, 0, 0}));
+  // One request.
+  EXPECT_EQ(42, S3PartsBytesRead(100, 100, {42}));
+}
+
 } // namespace impala

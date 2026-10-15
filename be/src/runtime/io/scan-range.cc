@@ -538,6 +538,7 @@ void ScanRange::Reset(const FileInfo &fi, int64_t len, int64_t offset, int disk_
   // HDFS ranges must have an mtime > 0. Local ranges do not use mtime.
   mtime_ = fi.mtime;
   if (fs_) DCHECK_GT(mtime_, 0);
+  file_length_ = fi.file_length;
   meta_data_ = meta_data;
   if (buffer_opts.client_buffer_ != nullptr) {
     buffer_manager_->set_client_buffer();

@@ -73,6 +73,32 @@ const char* ImpaladMetricKeys::IO_MGR_REMOTE_DATA_CACHE_MISS_COUNT =
     "impala-server.io-mgr.remote-data-cache-miss-count";
 const char* ImpaladMetricKeys::IO_MGR_REMOTE_DATA_CACHE_TOTAL_BYTES =
     "impala-server.io-mgr.remote-data-cache-total-bytes";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_GET_COUNT =
+    "impala-server.io-mgr.s3-native-get-count";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_GET_BYTES =
+    "impala-server.io-mgr.s3-native-get-bytes";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_PARALLEL_READ_COUNT =
+    "impala-server.io-mgr.s3-native-parallel-read-count";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_HIT_COUNT =
+    "impala-server.io-mgr.s3-native-file-cache-hit-count";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_HIT_BYTES =
+    "impala-server.io-mgr.s3-native-file-cache-hit-bytes";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_MISS_COUNT =
+    "impala-server.io-mgr.s3-native-file-cache-miss-count";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_EVICTIONS =
+    "impala-server.io-mgr.s3-native-file-cache-evictions";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_PROMOTIONS =
+    "impala-server.io-mgr.s3-native-file-cache-promotions";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_TOTAL_BYTES =
+    "impala-server.io-mgr.s3-native-file-cache-total-bytes";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_NUM_ENTRIES =
+    "impala-server.io-mgr.s3-native-file-cache-num-entries";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_COUNT =
+    "impala-server.io-mgr.s3-native-block-cache-hit-count";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_BYTES =
+    "impala-server.io-mgr.s3-native-block-cache-hit-bytes";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_BLOCK_CACHE_MISS_COUNT =
+    "impala-server.io-mgr.s3-native-block-cache-miss-count";
 const char* ImpaladMetricKeys::IO_MGR_REMOTE_DATA_CACHE_NUM_ENTRIES =
     "impala-server.io-mgr.remote-data-cache-num-entries";
 const char* ImpaladMetricKeys::IO_MGR_REMOTE_DATA_CACHE_NUM_WRITES =
@@ -251,6 +277,19 @@ IntGauge* ImpaladMetrics::IO_MGR_CACHED_FILE_HANDLES_HIT_COUNT = nullptr;
 IntGauge* ImpaladMetrics::IO_MGR_CACHED_FILE_HANDLES_MISS_COUNT = nullptr;
 IntGauge* ImpaladMetrics::IO_MGR_REMOTE_DATA_CACHE_TOTAL_BYTES = nullptr;
 IntGauge* ImpaladMetrics::IO_MGR_REMOTE_DATA_CACHE_NUM_ENTRIES = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_GET_COUNT = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_GET_BYTES = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_PARALLEL_READ_COUNT = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_HIT_COUNT = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_HIT_BYTES = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_MISS_COUNT = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_EVICTIONS = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_PROMOTIONS = nullptr;
+IntGauge* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_TOTAL_BYTES = nullptr;
+IntGauge* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_NUM_ENTRIES = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_COUNT = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_BYTES = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_BLOCK_CACHE_MISS_COUNT = nullptr;
 IntGauge* ImpaladMetrics::NUM_FILES_OPEN_FOR_INSERT = nullptr;
 IntGauge* ImpaladMetrics::NUM_QUERIES_REGISTERED = nullptr;
 IntGauge* ImpaladMetrics::RESULTSET_CACHE_TOTAL_NUM_ROWS = nullptr;
@@ -430,6 +469,32 @@ void ImpaladMetrics::CreateMetrics(MetricGroup* m) {
       ImpaladMetricKeys::IO_MGR_REMOTE_DATA_CACHE_TOTAL_BYTES, 0);
   IO_MGR_REMOTE_DATA_CACHE_NUM_ENTRIES = IO_MGR_METRICS->AddGauge(
       ImpaladMetricKeys::IO_MGR_REMOTE_DATA_CACHE_NUM_ENTRIES, 0);
+  IO_MGR_S3_NATIVE_GET_COUNT = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_GET_COUNT, 0);
+  IO_MGR_S3_NATIVE_GET_BYTES = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_GET_BYTES, 0);
+  IO_MGR_S3_NATIVE_PARALLEL_READ_COUNT = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_PARALLEL_READ_COUNT, 0);
+  IO_MGR_S3_NATIVE_FILE_CACHE_HIT_COUNT = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_HIT_COUNT, 0);
+  IO_MGR_S3_NATIVE_FILE_CACHE_HIT_BYTES = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_HIT_BYTES, 0);
+  IO_MGR_S3_NATIVE_FILE_CACHE_MISS_COUNT = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_MISS_COUNT, 0);
+  IO_MGR_S3_NATIVE_FILE_CACHE_EVICTIONS = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_EVICTIONS, 0);
+  IO_MGR_S3_NATIVE_FILE_CACHE_PROMOTIONS = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_PROMOTIONS, 0);
+  IO_MGR_S3_NATIVE_FILE_CACHE_TOTAL_BYTES = IO_MGR_METRICS->AddGauge(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_TOTAL_BYTES, 0);
+  IO_MGR_S3_NATIVE_FILE_CACHE_NUM_ENTRIES = IO_MGR_METRICS->AddGauge(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_NUM_ENTRIES, 0);
+  IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_COUNT = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_COUNT, 0);
+  IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_BYTES = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_BYTES, 0);
+  IO_MGR_S3_NATIVE_BLOCK_CACHE_MISS_COUNT = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_BLOCK_CACHE_MISS_COUNT, 0);
   IO_MGR_REMOTE_DATA_CACHE_NUM_WRITES = IO_MGR_METRICS->AddCounter(
       ImpaladMetricKeys::IO_MGR_REMOTE_DATA_CACHE_NUM_WRITES, 0);
   IO_MGR_REMOTE_DATA_CACHE_DROPPED_BYTES = IO_MGR_METRICS->AddCounter(
