@@ -15,7 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <istream>
+#include <ostream>
 #include <string>
+#include <vector>
 
 #include "runtime/io/s3-native-client.h"
 #include "testutil/gtest-util.h"
@@ -143,6 +146,65 @@ TEST(S3NativeTest, PartsBytesRead) {
   EXPECT_EQ(0, S3PartsBytesRead(300, 100, {0, 0, 0}));
   // One request.
   EXPECT_EQ(42, S3PartsBytesRead(100, 100, {42}));
+}
+
+// Writes go to the segments one after another (empty segments are skipped); writes past
+// the last segment fail; tellp() is the number of bytes written.
+TEST(S3NativeTest, SegmentStreamBufWritesAcrossSegments) {
+  char a[3], b[1], c[5];
+  S3SegmentStreamBuf::Segments segments = {{reinterpret_cast<uint8_t*>(a), 3},
+      {reinterpret_cast<uint8_t*>(b), 0}, {reinterpret_cast<uint8_t*>(c), 5}};
+  S3SegmentStreamBuf buf(segments);
+  EXPECT_EQ(8, buf.size());
+  std::ostream out(&buf);
+  out.write("ab", 2);
+  EXPECT_EQ(2, static_cast<int64_t>(out.tellp()));
+  out.write("cde", 3);
+  EXPECT_EQ(5, static_cast<int64_t>(out.tellp()));
+  out.write("fgh", 3);
+  EXPECT_TRUE(out.good());
+  EXPECT_EQ(8, static_cast<int64_t>(out.tellp()));
+  EXPECT_EQ("abc", string(a, 3));
+  EXPECT_EQ("defgh", string(c, 5));
+  out.write("x", 1);
+  EXPECT_FALSE(out.good());
+}
+
+// A retry rewinds to the start; what was written can be read back.
+TEST(S3NativeTest, SegmentStreamBufSeekAndRead) {
+  char a[4], c[4];
+  S3SegmentStreamBuf::Segments segments = {
+      {reinterpret_cast<uint8_t*>(a), 4}, {reinterpret_cast<uint8_t*>(c), 4}};
+  S3SegmentStreamBuf buf(segments);
+  std::ostream out(&buf);
+  out.write("abcdefgh", 8);
+  out.seekp(0);
+  EXPECT_EQ(0, static_cast<int64_t>(out.tellp()));
+  out.write("XYZ", 3);
+  EXPECT_EQ(3, static_cast<int64_t>(out.tellp()));
+  out.seekp(6);
+  out.write("Q", 1);
+  EXPECT_EQ(7, static_cast<int64_t>(out.tellp()));
+  std::istream in(&buf);
+  in.seekg(0);
+  char read[8];
+  in.read(read, 8);
+  EXPECT_EQ(8, in.gcount());
+  EXPECT_EQ("XYZdefQh", string(read, 8));
+  in.seekg(5);
+  in.read(read, 3);
+  EXPECT_EQ("fQh", string(read, 3));
+  EXPECT_FALSE(out.seekp(9).good());
+}
+
+TEST(S3NativeTest, SegmentStreamBufEmpty) {
+  S3SegmentStreamBuf::Segments none;
+  S3SegmentStreamBuf buf(none);
+  EXPECT_EQ(0, buf.size());
+  std::ostream out(&buf);
+  EXPECT_EQ(0, static_cast<int64_t>(out.tellp()));
+  out.write("x", 1);
+  EXPECT_FALSE(out.good());
 }
 
 } // namespace impala

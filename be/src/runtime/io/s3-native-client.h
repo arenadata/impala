@@ -18,7 +18,9 @@
 #pragma once
 
 #include <cstdint>
+#include <streambuf>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "common/status.h"
@@ -82,5 +84,49 @@ int64_t S3PartsBytesRead(int64_t len, int64_t part_size,
 /// a present Content-Length header.
 Status CheckS3RangeRead(int64_t bytes_requested, int64_t bytes_written,
     int64_t content_length, int64_t* bytes_read, bool* eof);
+
+/// Stream buffer over several caller-owned buffers ('segments', each a pointer and a
+/// length), written one after another as if they were one buffer. Used as the response
+/// body of a GET that fills several cache blocks at once, so the body is written straight
+/// into the blocks. Writes past the last segment fail. Supports the positions the SDK and
+/// the reader use: tellp() (bytes written), seekp() / seekg() to an absolute position and
+/// reading back what was written.
+class S3SegmentStreamBuf : public std::streambuf {
+ public:
+  typedef std::vector<std::pair<uint8_t*, int64_t>> Segments;
+
+  explicit S3SegmentStreamBuf(const Segments& segments);
+
+  /// Total length of the segments.
+  int64_t size() const { return size_; }
+
+ protected:
+  int_type overflow(int_type c) override;
+  int_type underflow() override;
+  pos_type seekoff(off_type off, std::ios_base::seekdir dir,
+      std::ios_base::openmode which) override;
+  pos_type seekpos(pos_type pos, std::ios_base::openmode which) override;
+
+ private:
+  /// Index of the segment that holds byte 'pos' (0 <= pos < size_).
+  size_t SegmentAt(int64_t pos) const;
+
+  /// Sets the put (get) area to the segment that holds position 'pos', with the current
+  /// position at 'pos'. 'pos' == size_ leaves the area at the end of the last segment.
+  bool SetPutPosition(int64_t pos);
+  bool SetGetPosition(int64_t pos);
+
+  /// Current put (get) position.
+  int64_t PutPosition() const;
+  int64_t GetPosition() const;
+
+  Segments segments_;
+  /// Start of each segment in the concatenated buffer.
+  std::vector<int64_t> starts_;
+  int64_t size_ = 0;
+  /// Segments of the current put and get areas.
+  size_t put_segment_ = 0;
+  size_t get_segment_ = 0;
+};
 
 } // namespace impala
