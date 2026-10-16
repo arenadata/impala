@@ -346,6 +346,19 @@ if ! [ -z ${NATIVE_TOOLCHAIN_HOME-} ]; then
 fi
 export IMPALA_TOOLCHAIN_PACKAGES_HOME
 
+# aws-sdk-cpp (S3) for the experimental native S3 reader (--s3_native_reader). buildall.sh
+# builds it with bin/build-aws-sdk-cpp.sh from source with the toolchain gcc, curl and zlib
+# into the toolchain directory. IMPALA_BUILD_AWS_SDK_CPP=false (buildall.sh -no_aws_sdk)
+# skips that build; CMake uses the SDK only if AWS_SDK_CPP_HOME contains one, otherwise
+# impalad is built without the native S3 reader. AWS_SDK_CPP_HOME may point to an SDK
+# installed by other means.
+export IMPALA_AWS_SDK_CPP_VERSION=1.11.485
+export IMPALA_AWS_SDK_CPP_REPO=${IMPALA_AWS_SDK_CPP_REPO-\
+https://github.com/aws/aws-sdk-cpp.git}
+export IMPALA_BUILD_AWS_SDK_CPP=${IMPALA_BUILD_AWS_SDK_CPP-true}
+export AWS_SDK_CPP_HOME=${AWS_SDK_CPP_HOME-\
+${IMPALA_TOOLCHAIN_PACKAGES_HOME}/aws-sdk-cpp-${IMPALA_AWS_SDK_CPP_VERSION}}
+
 export CDP_HADOOP_URL=${CDP_HADOOP_URL-}
 export CDP_HBASE_URL=${CDP_HBASE_URL-}
 export CDP_HIVE_URL=${CDP_HIVE_URL-}
