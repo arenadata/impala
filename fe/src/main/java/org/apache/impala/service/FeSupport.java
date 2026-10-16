@@ -27,6 +27,7 @@ import org.apache.impala.analysis.Expr;
 import org.apache.impala.analysis.SlotRef;
 import org.apache.impala.analysis.TableName;
 import org.apache.impala.common.InternalException;
+import org.apache.impala.common.JniUtil;
 import org.apache.impala.common.Pair;
 import org.apache.impala.thrift.TAddressesList;
 import org.apache.impala.thrift.TCacheJarParams;
@@ -387,9 +388,7 @@ public class FeSupport {
       TSerializer serializer = new TSerializer(new TBinaryProtocol.Factory());
       byte[] result = GetPartitionStats(serializer.serialize(request));
       Preconditions.checkNotNull(result);
-      TDeserializer deserializer = new TDeserializer(new TBinaryProtocol.Factory());
-
-      deserializer.deserialize(response, result);
+      JniUtil.deserialize(new TBinaryProtocol.Factory(), response, result);
       if (response.getStatus().getStatus_code() != TErrorCode.OK) {
         throw new InternalException("Error requesting GetPartitionStats: "
             + Joiner.on("\n").join(response.getStatus().getError_msgs()));

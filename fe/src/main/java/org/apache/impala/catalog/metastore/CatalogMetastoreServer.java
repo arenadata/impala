@@ -147,7 +147,18 @@ public class CatalogMetastoreServer extends ThriftHiveMetastore implements
     public ServerContext createContext(TProtocol tProtocol, TProtocol tProtocol1) {
       CatalogMonitor.INSTANCE.getCatalogdHmsCacheMetrics()
           .getCounter(ACTIVE_CONNECTIONS_METRIC).inc();
-      return null;
+      // TThreadPoolServer sets the client address on the context, so it must not be null.
+      return new ServerContext() {
+        @Override
+        public <T> T unwrap(Class<T> iface) {
+          return null;
+        }
+
+        @Override
+        public boolean isWrapperFor(Class<?> iface) {
+          return false;
+        }
+      };
     }
 
     @Override
