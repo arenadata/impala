@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -74,17 +75,34 @@ class BufferIOStream : public Aws::IOStream {
   Aws::Utils::Stream::PreallocatedStreamBuf stream_buf_;
 };
 
-/// Ranged GET of 'len' bytes at 'offset' whose body is written into 'buffer'.
+/// Like BufferIOStream, but writes the body into several buffers one after another
+/// (S3SegmentStreamBuf), e.g. straight into the blocks of the native S3 file cache.
+class SegmentIOStream : public Aws::IOStream {
+ public:
+  explicit SegmentIOStream(const S3SegmentStreamBuf::Segments& segments)
+    : Aws::IOStream(&stream_buf_), stream_buf_(segments) {}
+
+ private:
+  S3SegmentStreamBuf stream_buf_;
+};
+
+/// Ranged GET of 'len' bytes at 'offset' whose body goes to the streams of 'factory'.
 Aws::S3::Model::GetObjectRequest MakeGetRequest(const string& bucket, const string& key,
-    int64_t offset, uint8_t* buffer, int64_t len) {
+    int64_t offset, int64_t len, std::function<Aws::IOStream*()> factory) {
   Aws::S3::Model::GetObjectRequest request;
   request.SetBucket(bucket.c_str());
   request.SetKey(key.c_str());
   request.SetRange(Substitute("bytes=$0-$1", offset, offset + len - 1).c_str());
-  request.SetResponseStreamFactory([buffer, len]() {
+  request.SetResponseStreamFactory(std::move(factory));
+  return request;
+}
+
+/// Ranged GET of 'len' bytes at 'offset' whose body is written into 'buffer'.
+Aws::S3::Model::GetObjectRequest MakeGetRequest(const string& bucket, const string& key,
+    int64_t offset, uint8_t* buffer, int64_t len) {
+  return MakeGetRequest(bucket, key, offset, len, [buffer, len]() {
     return Aws::New<BufferIOStream>(kAllocationTag, buffer, len);
   });
-  return request;
 }
 
 /// Checks the outcome of a ranged GET of 'len' bytes and sets 'bytes_read'. HTTP 416
@@ -212,6 +230,38 @@ Status S3NativeFileReader::GetRange(int64_t offset, uint8_t* buffer, int64_t len
 #endif
 }
 
+Status S3NativeFileReader::GetSegments(int64_t offset,
+    const S3NativeFileCache::Segments& segments, int64_t* bytes_read) {
+  *bytes_read = 0;
+#ifdef IMPALA_HAVE_AWS_SDK_CPP
+  int64_t len = 0;
+  for (const auto& segment : segments) len += segment.second;
+  DCHECK_GT(len, 0);
+  // The SDK creates a new stream for every attempt, so a retry writes from the start of
+  // the first segment again.
+  Aws::S3::Model::GetObjectOutcome outcome = GetS3NativeClient()->GetObject(
+      MakeGetRequest(bucket_, key_, offset, len, [segments]() {
+        return Aws::New<SegmentIOStream>(kAllocationTag, segments);
+      }));
+  Status status = CheckGetOutcome(outcome, len, bytes_read);
+  if (ImpaladMetrics::IO_MGR_S3_NATIVE_GET_COUNT != nullptr) {
+    ImpaladMetrics::IO_MGR_S3_NATIVE_GET_COUNT->Increment(1);
+  }
+  if (!status.ok()) {
+    return Status(TErrorCode::DISK_IO_ERROR, GetBackendString(),
+        Substitute("Error reading S3 object s3a://$0/$1 at offset $2 ($3 bytes): $4",
+            bucket_, key_, offset, len, status.msg().msg()));
+  }
+  if (ImpaladMetrics::IO_MGR_S3_NATIVE_GET_BYTES != nullptr) {
+    ImpaladMetrics::IO_MGR_S3_NATIVE_GET_BYTES->Increment(*bytes_read);
+  }
+  return Status::OK();
+#else
+  return Status("Native S3 reader is not available: impalad was built without "
+      "aws-sdk-cpp");
+#endif
+}
+
 Status S3NativeFileReader::ReadFromCachedFile(int64_t file_offset, uint8_t* buffer,
     int64_t bytes_to_read, int64_t file_length, int64_t* bytes_read) {
   *bytes_read = 0;
@@ -244,13 +294,14 @@ Status S3NativeFileReader::ReadFromCachedFile(int64_t file_offset, uint8_t* buff
 Status S3NativeFileReader::ReadFromCachedBlocks(int64_t file_offset, uint8_t* buffer,
     int64_t bytes_to_read, int64_t file_length, int64_t* bytes_read) {
   // The mtime is part of the key, so a rewritten file is never served from the cache.
-  string key_prefix = Substitute("$0/$1@$2#", bucket_, key_, scan_range_->mtime());
+  string file_key = Substitute("$0/$1@$2", bucket_, key_, scan_range_->mtime());
   S3NativeFileCache::BlockStats stats;
-  RETURN_IF_ERROR(GetS3NativeFileCache()->ReadBlocks(key_prefix, file_length,
+  RETURN_IF_ERROR(GetS3NativeFileCache()->ReadBlocks(file_key, file_length,
       FLAGS_s3_native_block_size, file_offset, buffer, bytes_to_read,
       scan_range_->reader_,
-      [this](int64_t offset, uint8_t* run, int64_t len, int64_t* received) {
-        return GetRange(offset, run, len, received);
+      [this](int64_t offset, const S3NativeFileCache::Segments& segments,
+          int64_t* received) {
+        return GetSegments(offset, segments, received);
       }, bytes_read, &stats));
   if (ImpaladMetrics::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_COUNT != nullptr) {
     ImpaladMetrics::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_COUNT->Increment(stats.hit_blocks);
