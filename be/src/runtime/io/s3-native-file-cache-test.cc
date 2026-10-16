@@ -34,6 +34,7 @@ namespace io {
 
 static const void* const OWNER_1 = reinterpret_cast<const void*>(0x1);
 static const void* const OWNER_2 = reinterpret_cast<const void*>(0x2);
+static const int64_t WHOLE = S3NativeFileCache::kWholeFile;
 
 // Loader that fills the file with 'fill' and counts its calls in 'calls'.
 static S3NativeFileCache::Loader FillLoader(char fill, std::atomic<int>* calls) {
@@ -175,46 +176,58 @@ TEST(S3NativeFileCacheTest, ReleaseMemoryEvictsOldestFirst) {
 TEST(S3NativeFileCacheTest, AcquireAndFill) {
   S3NativeFileCache cache(1000, 80);
   S3NativeFileCache::Ref first;
-  cache.Acquire("a", OWNER_1, &first);
+  cache.Acquire("a", WHOLE, OWNER_1, &first);
   ASSERT_TRUE(first.reserved);
   S3NativeFileCache::Ref second;
-  cache.Acquire("a", OWNER_2, &second);
+  cache.Acquire("a", WHOLE, OWNER_2, &second);
   ASSERT_FALSE(second.reserved);
   ASSERT_TRUE(second.pending.valid());
-  cache.Fill("a", OWNER_1, Status("injected error"), nullptr);
+  cache.Fill("a", WHOLE, OWNER_1, Status("injected error"), nullptr);
   EXPECT_FALSE(second.pending.get().first.ok());
   EXPECT_EQ(0, cache.NumEntries());
 
   S3NativeFileCache::Ref third;
-  cache.Acquire("a", OWNER_1, &third);
+  cache.Acquire("a", WHOLE, OWNER_1, &third);
   ASSERT_TRUE(third.reserved);
   S3NativeFileCache::Ref fourth;
-  cache.Acquire("a", OWNER_2, &fourth);
+  cache.Acquire("a", WHOLE, OWNER_2, &fourth);
   std::shared_ptr<S3NativeFileCache::File> file =
       std::make_shared<S3NativeFileCache::File>(10);
-  cache.Fill("a", OWNER_1, Status::OK(), file);
+  cache.Fill("a", WHOLE, OWNER_1, Status::OK(), file);
   EXPECT_EQ(10, fourth.pending.get().second->len);
   S3NativeFileCache::Ref fifth;
-  cache.Acquire("a", OWNER_2, &fifth);
+  cache.Acquire("a", WHOLE, OWNER_2, &fifth);
   EXPECT_EQ(file, fifth.file);
 }
 
-// A fake object of 'length' bytes whose byte at offset i is i % 251. Counts and records
-// the fetches.
+// A fake object of 'length' bytes whose byte at offset i is i % 251. Records the fetches
+// (offset, total length) and the lengths of the segments of the last fetch.
 class FakeObject {
  public:
   explicit FakeObject(int64_t length) : length_(length) {}
 
   S3NativeFileCache::Fetcher Fetcher() {
-    return [this](int64_t offset, uint8_t* buffer, int64_t len, int64_t* bytes_read) {
+    return [this](int64_t offset, const S3NativeFileCache::Segments& segments,
+               int64_t* bytes_read) {
       std::lock_guard<std::mutex> l(lock_);
+      int64_t len = 0;
+      last_segments_.clear();
+      for (const auto& segment : segments) {
+        len += segment.second;
+        last_segments_.push_back(segment.second);
+      }
       fetches_.emplace_back(offset, len);
       if (fail_) return Status("injected error");
       if (delay_ms_ > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms_));
       }
       *bytes_read = std::max<int64_t>(0, std::min(len, length_ - offset));
-      for (int64_t i = 0; i < *bytes_read; ++i) buffer[i] = (offset + i) % 251;
+      int64_t pos = 0;
+      for (const auto& segment : segments) {
+        for (int64_t i = 0; i < segment.second && pos < *bytes_read; ++i, ++pos) {
+          segment.first[i] = (offset + pos) % 251;
+        }
+      }
       return Status::OK();
     };
   }
@@ -226,6 +239,11 @@ class FakeObject {
     return result;
   }
 
+  vector<int64_t> LastSegments() {
+    std::lock_guard<std::mutex> l(lock_);
+    return last_segments_;
+  }
+
   int64_t length_;
   bool fail_ = false;
   int delay_ms_ = 0;
@@ -233,6 +251,7 @@ class FakeObject {
  private:
   std::mutex lock_;
   vector<std::pair<int64_t, int64_t>> fetches_;
+  vector<int64_t> last_segments_;
 };
 
 // Reads [offset, offset + len) of a file of 'file_length' bytes with blocks of 100 bytes
@@ -243,7 +262,7 @@ static int64_t ReadAndCheck(S3NativeFileCache* cache, FakeObject* object,
   vector<uint8_t> buffer(len, 0xff);
   int64_t bytes_read = -1;
   S3NativeFileCache::BlockStats local_stats;
-  Status status = cache->ReadBlocks("f@1#", file_length, 100, offset, buffer.data(),
+  Status status = cache->ReadBlocks("f@1", file_length, 100, offset, buffer.data(),
       len, owner, object->Fetcher(), &bytes_read, stats ? stats : &local_stats);
   EXPECT_TRUE(status.ok()) << status.GetDetail();
   for (int64_t i = 0; i < bytes_read; ++i) {
@@ -318,7 +337,7 @@ TEST(S3NativeFileCacheTest, ReadBlocksFetchError) {
   vector<uint8_t> buffer(300);
   int64_t bytes_read;
   S3NativeFileCache::BlockStats stats;
-  EXPECT_FALSE(cache.ReadBlocks("f@1#", 1000, 100, 0, buffer.data(), 300, OWNER_1,
+  EXPECT_FALSE(cache.ReadBlocks("f@1", 1000, 100, 0, buffer.data(), 300, OWNER_1,
       object.Fetcher(), &bytes_read, &stats).ok());
   EXPECT_EQ(0, cache.NumEntries());
   object.fail_ = false;
@@ -342,6 +361,73 @@ TEST(S3NativeFileCacheTest, ReadBlocksConcurrentReadsFetchOnce) {
   int64_t fetched = 0;
   for (const auto& f : object.TakeFetches()) fetched += f.second;
   EXPECT_EQ(500, fetched);
+}
+
+// A run of missing blocks is fetched straight into the blocks: one segment per block,
+// the last block of the file shorter.
+TEST(S3NativeFileCacheTest, ReadBlocksFetchesIntoBlocks) {
+  S3NativeFileCache cache(10000, 80);
+  FakeObject object(250);
+  EXPECT_EQ(250, ReadAndCheck(&cache, &object, 250, 0, 250));
+  EXPECT_EQ(Fetches({{0, 250}}), object.TakeFetches());
+  EXPECT_EQ(vector<int64_t>({100, 100, 50}), object.LastSegments());
+  EXPECT_EQ(3, cache.NumEntries());
+  EXPECT_EQ(250, cache.TotalBytes());
+}
+
+// Whole files and blocks of the same file key are separate entries.
+TEST(S3NativeFileCacheTest, WholeFileAndBlocksAreSeparate) {
+  S3NativeFileCache cache(10000, 80);
+  EXPECT_FALSE(Read(&cache, "f@1", 100, OWNER_1));
+  FakeObject object(1000);
+  EXPECT_EQ(100, ReadAndCheck(&cache, &object, 1000, 0, 100));
+  EXPECT_EQ(Fetches({{0, 100}}), object.TakeFetches());
+  EXPECT_TRUE(Read(&cache, "f@1", 100, OWNER_1));
+  EXPECT_EQ(2, cache.NumEntries());
+}
+
+// With several shards the totals cover all shards, each shard keeps to its share of the
+// capacity, and ReleaseMemory() frees entries in all shards.
+TEST(S3NativeFileCacheTest, ShardsKeepTotalsAndCapacity) {
+  S3NativeFileCache cache(1000, 80, 4);
+  EXPECT_EQ(4, cache.num_shards());
+  for (int i = 0; i < 40; ++i) Read(&cache, "f" + std::to_string(i), 100, OWNER_1);
+  EXPECT_LE(cache.TotalBytes(), 1000);
+  EXPECT_GT(cache.TotalBytes(), 0);
+  EXPECT_EQ(cache.TotalBytes(), cache.NumEntries() * 100);
+  cache.ReleaseMemory(cache.TotalBytes());
+  EXPECT_EQ(0, cache.TotalBytes());
+  EXPECT_EQ(0, cache.NumEntries());
+}
+
+// Concurrent block reads of many files in a sharded cache return the right data.
+TEST(S3NativeFileCacheTest, ShardedConcurrentReads) {
+  S3NativeFileCache cache(100000, 80, 8);
+  FakeObject object(1000);
+  vector<std::thread> threads;
+  for (int t = 0; t < 8; ++t) {
+    threads.emplace_back([&, t]() {
+      for (int i = 0; i < 50; ++i) {
+        string key = "f" + std::to_string((t * 7 + i) % 20);
+        vector<uint8_t> buffer(300);
+        int64_t bytes_read;
+        S3NativeFileCache::BlockStats stats;
+        int64_t offset = (i * 37) % 700;
+        Status status = cache.ReadBlocks(key, 1000, 100, offset, buffer.data(), 300,
+            OWNER_1, object.Fetcher(), &bytes_read, &stats);
+        EXPECT_TRUE(status.ok()) << status.GetDetail();
+        EXPECT_EQ(300, bytes_read);
+        for (int64_t j = 0; j < bytes_read; ++j) {
+          if (buffer[j] != (offset + j) % 251) {
+            ADD_FAILURE() << key << ": wrong byte at offset " << offset + j;
+            break;
+          }
+        }
+      }
+    });
+  }
+  for (std::thread& t : threads) t.join();
+  EXPECT_EQ(cache.TotalBytes(), cache.NumEntries() * 100);
 }
 
 } // namespace io

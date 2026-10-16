@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 
 #include <gflags/gflags.h>
@@ -74,10 +75,12 @@ DEFINE_int32(s3_native_executor_threads, 64, "(Experimental) Number of threads o
     "fetched by the I/O thread itself). Only used if --s3_native_parallel_read_min_size "
     "is set; otherwise the client has one such thread.");
 
-DEFINE_int64(s3_native_whole_file_max_size, 8L * 1024 * 1024, "(Experimental) Files "
-    "of at most this many bytes are read whole with one GET on their first read and "
-    "kept in the native S3 file cache, so that later reads of the file (footer, column "
-    "chunks, later queries) are served from memory. 0 turns this off.");
+DEFINE_int64(s3_native_whole_file_max_size, 0, "(Experimental) Files of at most this "
+    "many bytes are read whole with one GET on their first read and kept in the native "
+    "S3 file cache, so that later reads of the file (footer, column chunks, later "
+    "queries) are served from memory. 0 (the default) turns this off: all files go "
+    "through the block cache (--s3_native_block_size), which downloads only the parts "
+    "that are read; whole-file reads download columns a query does not need.");
 DEFINE_int64(s3_native_file_cache_capacity, 2L * 1024 * 1024 * 1024, "(Experimental) "
     "Capacity in bytes of the native S3 file cache (--s3_native_whole_file_max_size, "
     "--s3_native_block_size). "
@@ -237,6 +240,101 @@ int64_t S3PartsBytesRead(int64_t len, int64_t part_size,
     if (received[i] < expected) break;
   }
   return total;
+}
+
+S3SegmentStreamBuf::S3SegmentStreamBuf(const Segments& segments) {
+  for (const auto& segment : segments) {
+    DCHECK_GE(segment.second, 0);
+    DCHECK_LE(segment.second, std::numeric_limits<int>::max());
+    if (segment.second == 0) continue;
+    segments_.push_back(segment);
+    starts_.push_back(size_);
+    size_ += segment.second;
+  }
+  SetPutPosition(0);
+  SetGetPosition(0);
+}
+
+size_t S3SegmentStreamBuf::SegmentAt(int64_t pos) const {
+  DCHECK(pos >= 0 && pos < size_);
+  return std::upper_bound(starts_.begin(), starts_.end(), pos) - starts_.begin() - 1;
+}
+
+bool S3SegmentStreamBuf::SetPutPosition(int64_t pos) {
+  if (pos < 0 || pos > size_) return false;
+  if (segments_.empty()) {
+    setp(nullptr, nullptr);
+    return pos == 0;
+  }
+  put_segment_ = pos == size_ ? segments_.size() - 1 : SegmentAt(pos);
+  char* begin = reinterpret_cast<char*>(segments_[put_segment_].first);
+  setp(begin, begin + segments_[put_segment_].second);
+  pbump(static_cast<int>(pos - starts_[put_segment_]));
+  return true;
+}
+
+bool S3SegmentStreamBuf::SetGetPosition(int64_t pos) {
+  if (pos < 0 || pos > size_) return false;
+  if (segments_.empty()) {
+    setg(nullptr, nullptr, nullptr);
+    return pos == 0;
+  }
+  get_segment_ = pos == size_ ? segments_.size() - 1 : SegmentAt(pos);
+  char* begin = reinterpret_cast<char*>(segments_[get_segment_].first);
+  setg(begin, begin + (pos - starts_[get_segment_]),
+      begin + segments_[get_segment_].second);
+  return true;
+}
+
+int64_t S3SegmentStreamBuf::PutPosition() const {
+  return segments_.empty() ? 0 : starts_[put_segment_] + (pptr() - pbase());
+}
+
+int64_t S3SegmentStreamBuf::GetPosition() const {
+  return segments_.empty() ? 0 : starts_[get_segment_] + (gptr() - eback());
+}
+
+S3SegmentStreamBuf::int_type S3SegmentStreamBuf::overflow(int_type c) {
+  if (traits_type::eq_int_type(c, traits_type::eof())) return traits_type::not_eof(c);
+  // The put area is full: continue in the next segment, if any.
+  int64_t pos = PutPosition();
+  if (pos >= size_ || !SetPutPosition(pos)) return traits_type::eof();
+  *pptr() = traits_type::to_char_type(c);
+  pbump(1);
+  return c;
+}
+
+S3SegmentStreamBuf::int_type S3SegmentStreamBuf::underflow() {
+  if (gptr() < egptr()) return traits_type::to_int_type(*gptr());
+  int64_t pos = GetPosition();
+  if (pos >= size_ || !SetGetPosition(pos)) return traits_type::eof();
+  return traits_type::to_int_type(*gptr());
+}
+
+S3SegmentStreamBuf::pos_type S3SegmentStreamBuf::seekoff(off_type off,
+    std::ios_base::seekdir dir, std::ios_base::openmode which) {
+  const pos_type fail(off_type(-1));
+  bool out = (which & std::ios_base::out) != 0;
+  bool in = (which & std::ios_base::in) != 0;
+  int64_t base;
+  if (dir == std::ios_base::beg) {
+    base = 0;
+  } else if (dir == std::ios_base::end) {
+    base = size_;
+  } else {
+    // Relative to the current position: only one of the two positions at a time.
+    if (in && out) return fail;
+    base = out ? PutPosition() : GetPosition();
+  }
+  int64_t pos = base + off;
+  if (out && !SetPutPosition(pos)) return fail;
+  if (in && !SetGetPosition(pos)) return fail;
+  return (in || out) ? pos_type(pos) : fail;
+}
+
+S3SegmentStreamBuf::pos_type S3SegmentStreamBuf::seekpos(pos_type pos,
+    std::ios_base::openmode which) {
+  return seekoff(off_type(pos), std::ios_base::beg, which);
 }
 
 Status CheckS3RangeRead(int64_t bytes_requested, int64_t bytes_written,

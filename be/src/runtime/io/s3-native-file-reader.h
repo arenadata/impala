@@ -20,6 +20,7 @@
 #include <string>
 
 #include "runtime/io/file-reader.h"
+#include "runtime/io/s3-native-file-cache.h"
 
 namespace impala {
 namespace io {
@@ -32,10 +33,10 @@ namespace io {
 /// the caller's buffer. Reads of at least --s3_native_parallel_read_min_size bytes are
 /// split into parts of --s3_native_parallel_read_part_size bytes that are fetched in
 /// parallel (the first part by the I/O thread, the others on the client's executor), each
-/// into its own section of the buffer. Files of at most --s3_native_whole_file_max_size
-/// bytes are instead read whole on their first read and served from S3NativeFileCache
-/// (s3-native-file-cache.h); reads of larger files go through the same cache in blocks of
-/// --s3_native_block_size bytes. Open() makes no request: S3 has no file handles,
+/// into its own section of the buffer. With S3NativeFileCache (s3-native-file-cache.h),
+/// reads go through the cache in blocks of --s3_native_block_size bytes; files of at
+/// most --s3_native_whole_file_max_size bytes (off by default) are instead read whole on
+/// their first read. Open() makes no request: S3 has no file handles,
 /// and the file length is already known from the catalog. Not supported (yet): the
 /// remote data cache, HDFS caching and file handle caching.
 class S3NativeFileReader : public FileReader {
@@ -68,8 +69,14 @@ class S3NativeFileReader : public FileReader {
   Status ReadFromCachedFile(int64_t file_offset, uint8_t* buffer, int64_t bytes_to_read,
       int64_t file_length, int64_t* bytes_read);
 
+  /// One ranged GET at 'offset' whose body is written into 'segments' one after another
+  /// (the blocks of a run in S3NativeFileCache). Never split into parallel parts. Sets
+  /// 'bytes_read', less than the total length only at the end of the object.
+  Status GetSegments(int64_t offset, const S3NativeFileCache::Segments& segments,
+      int64_t* bytes_read);
+
   /// Reads through blocks of --s3_native_block_size bytes in S3NativeFileCache,
-  /// fetching each run of missing blocks with one GetRange(). Arguments as in
+  /// fetching each run of missing blocks with one GetSegments(). Arguments as in
   /// ReadFromCachedFile().
   Status ReadFromCachedBlocks(int64_t file_offset, uint8_t* buffer, int64_t bytes_to_read,
       int64_t file_length, int64_t* bytes_read);
