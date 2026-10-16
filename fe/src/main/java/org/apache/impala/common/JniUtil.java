@@ -38,11 +38,12 @@ import org.apache.impala.service.BackendConfig;
 import org.apache.impala.thrift.TGetJMXJsonResponse;
 import org.apache.impala.util.JMXJsonUtil;
 import org.apache.thrift.TBase;
+import org.apache.thrift.TConfiguration;
 import org.apache.thrift.TSerializer;
-import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TException;
 import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.protocol.TProtocolFactory;
+import org.apache.thrift.transport.TMemoryInputTransport;
 
 import com.google.common.base.Joiner;
 
@@ -136,13 +137,24 @@ public class JniUtil {
   public static <T extends TBase<?, ?>, F extends TProtocolFactory>
   void deserializeThrift(F protocolFactory, T result, byte[] thriftData)
       throws ImpalaException {
-    // TODO: avoid creating deserializer for each query?
     try {
-      TDeserializer deserializer = new TDeserializer(protocolFactory);
-      deserializer.deserialize(result, thriftData);
+      deserialize(protocolFactory, result, thriftData);
     } catch (TException e) {
       throw new InternalException(e.getMessage());
     }
+  }
+
+  /**
+   * Same as TDeserializer.deserialize(), but without its limit of
+   * TConfiguration.DEFAULT_MAX_MESSAGE_SIZE (100 MB): data passed between Impala
+   * components can be larger.
+   */
+  public static void deserialize(TProtocolFactory protocolFactory, TBase<?, ?> result,
+      byte[] thriftData) throws TException {
+    TConfiguration config = new TConfiguration(Integer.MAX_VALUE,
+        TConfiguration.DEFAULT_MAX_FRAME_SIZE, TConfiguration.DEFAULT_RECURSION_DEPTH);
+    result.read(protocolFactory.getProtocol(
+        new TMemoryInputTransport(config, thriftData)));
   }
 
   public static class OperationLog {

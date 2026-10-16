@@ -75,6 +75,7 @@ import org.apache.impala.catalog.SqlConstraints;
 import org.apache.impala.catalog.VirtualColumn;
 import org.apache.impala.catalog.local.LocalIcebergTable.TableParams;
 import org.apache.impala.common.InternalException;
+import org.apache.impala.common.JniUtil;
 import org.apache.impala.common.Pair;
 import org.apache.impala.common.PrintUtils;
 import org.apache.impala.service.BackendConfig;
@@ -115,7 +116,6 @@ import org.apache.impala.util.ListMap;
 import org.apache.impala.util.TByteBuffer;
 import org.apache.impala.util.ThreadNameAnnotator;
 import org.apache.thrift.TConfiguration;
-import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TException;
 import org.apache.thrift.TSerializer;
 import org.apache.thrift.protocol.TBinaryProtocol;
@@ -461,7 +461,7 @@ public class CatalogdMetaProvider implements MetaProvider {
       }
     }
     resp = new TGetPartialCatalogObjectResponse();
-    new TDeserializer().deserialize(resp, ret);
+    JniUtil.deserialize(new TBinaryProtocol.Factory(), resp, ret);
     if (resp.status.status_code != TErrorCode.OK) {
       // TODO(todd) do reasonable error handling
       throw new TException(resp.toString());
@@ -1039,7 +1039,7 @@ public class CatalogdMetaProvider implements MetaProvider {
     byte[] ret = FeSupport.GetLatestCompactions(
         new TSerializer(new TBinaryProtocol.Factory()).serialize(req));
     TGetLatestCompactionsResponse resp = new TGetLatestCompactionsResponse();
-    new TDeserializer(new TBinaryProtocol.Factory()).deserialize(resp, ret);
+    JniUtil.deserialize(new TBinaryProtocol.Factory(), resp, ret);
     if (resp.status.status_code != TErrorCode.OK) {
       throw new TException(Joiner.on("\n").join(resp.status.getError_msgs()));
     }
