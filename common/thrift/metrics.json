@@ -872,6 +872,16 @@
     "key": "impala-server.io-mgr.s3-native-file-cache-evictions"
   },
   {
+    "description": "Total number of bytes of the native S3 file cache given back because the process was over or close to its memory limit.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 File Cache Released Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-file-cache-released-bytes"
+  },
+  {
     "description": "Total number of files of the native S3 file cache moved to its protected segment.",
     "contexts": [
       "IMPALAD"

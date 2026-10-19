@@ -18,6 +18,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -25,6 +26,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -61,16 +63,32 @@ namespace io {
 /// probation. Entries are evicted from the end of probation first; when protected
 /// outgrows its share, its least recently used entries move back to probation.
 ///
-/// The memory is process memory within --mem_limit. ExecEnv preserves the cache capacity
-/// (it is subtracted from the memory admitted for queries, like for the codegen cache),
-/// shows the cache as "Native S3 File Cache" under the process MemTracker, and calls
-/// ReleaseMemory() when the process is over its memory limit.
+/// The memory is process memory within --mem_limit. ExecEnv preserves only the reserved
+/// part of the capacity (--s3_native_file_cache_reserved_capacity is subtracted from the
+/// memory admitted for queries, like for the codegen cache); the rest is elastic: it uses
+/// memory that queries leave free. ExecEnv shows the cache as "Native S3 File Cache"
+/// under the process MemTracker, calls ReleaseMemory() when the process is over its
+/// memory limit, and sets a headroom function: when the process may allocate less than
+/// --s3_native_file_cache_min_headroom more bytes, the cache gives the elastic part back
+/// (down to the reserved part) before queries run into the limit. The headroom is
+/// checked after new entries are filled and, every
+/// --s3_native_file_cache_headroom_check_ms, by a background thread, so that the cache
+/// also makes room while queries grow and the cache does not fill (joins, aggregations
+/// after their scans).
 ///
 /// Thread safe.
 class S3NativeFileCache {
  public:
   /// Block index of a whole file.
   static constexpr int64_t kWholeFile = -1;
+
+  /// Default headroom margin: the elastic part of the cache is given back when the
+  /// process may allocate less than this many more bytes (the same margin as
+  /// MemTracker::GcMemory() frees in excess).
+  static constexpr int64_t kDefaultMinHeadroom = 512L * 1024 * 1024;
+
+  /// Returns how many more bytes the process may allocate before its memory limit.
+  typedef std::function<int64_t()> HeadroomFn;
 
   /// One cached file or block. 'len' is the number of valid bytes in 'data'.
   struct File {
@@ -110,8 +128,23 @@ class S3NativeFileCache {
     int64_t missed_blocks = 0;
   };
 
-  /// 'capacity' bytes in total, split evenly into 'num_shards' shards.
-  S3NativeFileCache(int64_t capacity, int protected_percent, int num_shards = 1);
+  /// 'capacity' bytes in total, split evenly into 'num_shards' shards. Of them
+  /// 'reserved' bytes (all if negative or larger than 'capacity') are preserved memory
+  /// that the headroom check never gives back.
+  S3NativeFileCache(int64_t capacity, int protected_percent, int num_shards = 1,
+      int64_t reserved = -1);
+
+  /// Stops the headroom check thread, if any.
+  ~S3NativeFileCache();
+
+  /// Sets the function the cache uses to check the process headroom and the margin
+  /// 'min_headroom': below it the elastic part is given back. The headroom is checked
+  /// after filling new entries (at most every headroom check interval of filled bytes)
+  /// and, if 'check_interval_ms' is positive, every 'check_interval_ms' by a background
+  /// thread. Has no effect if the whole capacity is reserved. Must be called once,
+  /// before the cache is used.
+  void SetHeadroomFunction(HeadroomFn fn, int64_t min_headroom = kDefaultMinHeadroom,
+      int64_t check_interval_ms = 0);
 
   /// Returns in '*file' the whole file stored under 'file_key'. On a miss allocates a
   /// buffer of 'length' bytes and calls 'loader' to fill it; concurrent calls for the
@@ -143,12 +176,13 @@ class S3NativeFileCache {
       const Status& status, std::shared_ptr<const File> file);
 
   int64_t capacity() const { return capacity_; }
+  int64_t reserved() const { return reserved_; }
   int num_shards() const { return static_cast<int>(shards_.size()); }
 
   /// Evicts entries, least recently used first, until at least 'bytes_to_free' bytes are
-  /// released or the cache is empty. Called when the process is over its memory limit,
-  /// so that queries take priority over cached files. Entries still being read are freed
-  /// when their last reader is done.
+  /// released or the cache is empty, also the reserved part. Called when the process is
+  /// over its memory limit, so that queries take priority over cached files. Entries
+  /// still being read are freed when their last reader is done.
   void ReleaseMemory(int64_t bytes_to_free);
 
   /// Number of bytes and entries currently cached (not counting entries being loaded).
@@ -238,7 +272,37 @@ class S3NativeFileCache {
   /// Updates the size and entry count gauges.
   void UpdateGauges();
 
+  /// Evicts entries, least recently used first, until 'bytes_to_free' bytes are released
+  /// or at most 'keep_bytes' are left; returns the number of bytes released. Returns the
+  /// freed memory to the system and logs 'reason' (at most every few seconds).
+  int64_t Release(int64_t bytes_to_free, int64_t keep_bytes, const char* reason);
+
+  /// Called after 'filled' bytes of new entries were cached: every headroom check
+  /// interval of filled bytes calls ReleaseForHeadroom().
+  void CheckHeadroom(int64_t filled);
+
+  /// Asks 'headroom_fn_' and gives the elastic part back when the process headroom is
+  /// below 'min_headroom_'.
+  void ReleaseForHeadroom();
+
+  /// Body of the background thread: ReleaseForHeadroom() every 'interval_ms' until the
+  /// cache is destroyed.
+  void HeadroomCheckLoop(int64_t interval_ms);
+
   const int64_t capacity_;
+  /// Part of the capacity that the headroom check keeps.
+  const int64_t reserved_;
+  /// Filled bytes between two headroom checks.
+  const int64_t headroom_check_interval_;
+  HeadroomFn headroom_fn_;
+  int64_t min_headroom_ = kDefaultMinHeadroom;
+  /// Bytes filled since the last headroom check.
+  std::atomic<int64_t> filled_since_check_{0};
+  /// Background headroom check: the thread waits on 'stop_cv_' between checks.
+  std::thread headroom_thread_;
+  std::mutex stop_lock_;
+  std::condition_variable stop_cv_;
+  bool stop_ = false;
   std::vector<std::unique_ptr<Shard>> shards_;
   /// Totals over all shards, for the gauges and TotalBytes() / NumEntries().
   std::atomic<int64_t> total_bytes_{0};
@@ -247,10 +311,11 @@ class S3NativeFileCache {
 
 /// Creates the process-wide cache if --s3_native_file_cache_capacity and
 /// --s3_native_whole_file_max_size or --s3_native_block_size are positive, with the
-/// capacity limited to 'max_capacity' bytes. Returns the capacity of the cache, or 0 if
-/// it is disabled. Uses up to 16 shards, each at least 8 times the largest entry
+/// capacity limited to 'max_capacity' bytes. Returns the reserved part of the capacity
+/// (--s3_native_file_cache_reserved_capacity, at most the capacity), or 0 if the cache is
+/// disabled. Uses up to 16 shards, each at least 8 times the largest entry
 /// (max(--s3_native_whole_file_max_size, --s3_native_block_size)).
-/// Called by ExecEnv::Init(), which preserves that much memory for the cache like for
+/// Called by ExecEnv::Init(), which preserves the reserved part for the cache like for
 /// the codegen cache.
 int64_t InitS3NativeFileCache(int64_t max_capacity);
 

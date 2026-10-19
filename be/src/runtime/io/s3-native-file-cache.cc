@@ -18,19 +18,25 @@
 #include "runtime/io/s3-native-file-cache.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <vector>
 
 #include <gflags/gflags.h>
+#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
+#include <gperftools/malloc_extension.h>
+#endif
 
 #include "common/logging.h"
 #include "util/impalad-metrics.h"
 #include "util/metrics.h"
 #include "util/pretty-printer.h"
+#include "util/time.h"
 
 DECLARE_int64(s3_native_whole_file_max_size);
 DECLARE_int64(s3_native_block_size);
 DECLARE_int64(s3_native_file_cache_capacity);
+DECLARE_int64(s3_native_file_cache_reserved_capacity);
 DECLARE_int32(s3_native_file_cache_protected_percent);
 
 namespace impala {
@@ -41,11 +47,18 @@ namespace {
 // Created once by InitS3NativeFileCache() and kept for the lifetime of the process.
 std::unique_ptr<S3NativeFileCache> file_cache;
 
+// Release() logs at most once in this many milliseconds, with the bytes since then.
+constexpr int64_t RELEASE_LOG_INTERVAL_MS = 10000;
+
 } // anonymous namespace
 
 S3NativeFileCache::S3NativeFileCache(
-    int64_t capacity, int protected_percent, int num_shards)
-  : capacity_(capacity) {
+    int64_t capacity, int protected_percent, int num_shards, int64_t reserved)
+  : capacity_(capacity),
+    reserved_(reserved < 0 ? capacity : std::min(reserved, capacity)),
+    // Often enough that the process does not grow far past the headroom margin.
+    headroom_check_interval_(
+        std::max<int64_t>(std::min<int64_t>(64L * 1024 * 1024, capacity / 16), 1)) {
   num_shards = std::max(num_shards, 1);
   for (int i = 0; i < num_shards; ++i) {
     std::unique_ptr<Shard> shard = std::make_unique<Shard>();
@@ -102,7 +115,9 @@ void S3NativeFileCache::Fill(const std::string& file_key, int64_t block,
     load_promise = FillLocked(&shard, file_key, block, owner, status, file);
   }
   UpdateGauges();
+  int64_t filled = status.ok() && file != nullptr ? file->len : 0;
   load_promise->set_value(LoadResult(status, std::move(file)));
+  CheckHeadroom(filled);
 }
 
 S3NativeFileCache::FileEntries* S3NativeFileCache::FindFileLocked(
@@ -218,6 +233,7 @@ Status S3NativeFileCache::ReadBlocks(const std::string& file_key, int64_t file_l
     int64_t received = 0;
     if (status.ok()) status = fetch(run_offset, segments, &received);
     results.clear();
+    int64_t filled = 0;
     {
       std::lock_guard<std::mutex> l(shard.lock);
       for (int k = i; k < j; ++k) {
@@ -234,6 +250,7 @@ Status S3NativeFileCache::ReadBlocks(const std::string& file_key, int64_t file_l
         run_block->len =
             std::max<int64_t>(0, std::min(run_block->len, received - block_offset));
         refs[k].file = run_block;
+        filled += run_block->len;
         results.emplace_back(
             FillLocked(&shard, file_key, block, owner, Status::OK(), run_block),
             LoadResult(Status::OK(), run_block));
@@ -241,6 +258,7 @@ Status S3NativeFileCache::ReadBlocks(const std::string& file_key, int64_t file_l
     }
     UpdateGauges();
     for (auto& result : results) result.first->set_value(std::move(result.second));
+    CheckHeadroom(filled);
     stats->missed_blocks += j - i;
     i = j;
   }
@@ -342,6 +360,59 @@ void S3NativeFileCache::EvictLocked(Shard* shard, const LruItem& keep) {
 }
 
 void S3NativeFileCache::ReleaseMemory(int64_t bytes_to_free) {
+  Release(bytes_to_free, 0, "the process is over its memory limit");
+}
+
+S3NativeFileCache::~S3NativeFileCache() {
+  if (!headroom_thread_.joinable()) return;
+  {
+    std::lock_guard<std::mutex> l(stop_lock_);
+    stop_ = true;
+  }
+  stop_cv_.notify_all();
+  headroom_thread_.join();
+}
+
+void S3NativeFileCache::SetHeadroomFunction(
+    HeadroomFn fn, int64_t min_headroom, int64_t check_interval_ms) {
+  DCHECK(!headroom_fn_);
+  headroom_fn_ = std::move(fn);
+  min_headroom_ = std::max<int64_t>(min_headroom, 0);
+  if (check_interval_ms > 0 && reserved_ < capacity_) {
+    headroom_thread_ = std::thread([this, check_interval_ms] () {
+      HeadroomCheckLoop(check_interval_ms);
+    });
+  }
+}
+
+void S3NativeFileCache::CheckHeadroom(int64_t filled) {
+  if (filled <= 0 || !headroom_fn_ || reserved_ >= capacity_) return;
+  if (filled_since_check_.fetch_add(filled) + filled < headroom_check_interval_) return;
+  filled_since_check_ = 0;
+  ReleaseForHeadroom();
+}
+
+void S3NativeFileCache::ReleaseForHeadroom() {
+  int64_t headroom = headroom_fn_();
+  if (headroom >= min_headroom_) return;
+  Release(min_headroom_ - headroom, reserved_, "the process is close to its memory limit");
+}
+
+void S3NativeFileCache::HeadroomCheckLoop(int64_t interval_ms) {
+  std::unique_lock<std::mutex> l(stop_lock_);
+  while (!stop_cv_.wait_for(
+      l, std::chrono::milliseconds(interval_ms), [this] () { return stop_; })) {
+    l.unlock();
+    // Nothing to give back below the reserved part: skip the metric read.
+    if (total_bytes_.load() > reserved_) ReleaseForHeadroom();
+    l.lock();
+  }
+}
+
+int64_t S3NativeFileCache::Release(
+    int64_t bytes_to_free, int64_t keep_bytes, const char* reason) {
+  bytes_to_free = std::min(bytes_to_free, total_bytes_.load() - keep_bytes);
+  if (bytes_to_free <= 0) return 0;
   int64_t freed = 0;
   const int64_t num_shards = shards_.size();
   // First an equal share from every shard, then whatever is still missing.
@@ -360,10 +431,28 @@ void S3NativeFileCache::ReleaseMemory(int64_t bytes_to_free) {
     }
   }
   UpdateGauges();
-  if (freed > 0) {
-    LOG(INFO) << "Native S3 reader: released " << PrettyPrinter::PrintBytes(freed)
-              << " of the file cache because the process is over its memory limit";
+  if (freed <= 0) return 0;
+#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
+  // The freed blocks go to tcmalloc's free lists, which still count as process memory
+  // (memory.total-used): return them to the system so that the process headroom grows.
+  MallocExtension::instance()->ReleaseToSystem(freed);
+#endif
+  if (ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_BYTES != nullptr) {
+    ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_BYTES->Increment(freed);
   }
+  static std::atomic<int64_t> last_log_ms{0};
+  static std::atomic<int64_t> unlogged_bytes{0};
+  unlogged_bytes += freed;
+  int64_t now = MonotonicMillis();
+  int64_t last = last_log_ms.load();
+  if (now - last >= RELEASE_LOG_INTERVAL_MS
+      && last_log_ms.compare_exchange_strong(last, now)) {
+    LOG(INFO) << "Native S3 reader: released "
+              << PrettyPrinter::PrintBytes(unlogged_bytes.exchange(0))
+              << " of the file cache because " << reason << " (cache now "
+              << PrettyPrinter::PrintBytes(total_bytes_.load()) << ")";
+  }
+  return freed;
 }
 
 void S3NativeFileCache::UpdateGauges() {
@@ -400,6 +489,8 @@ int64_t InitS3NativeFileCache(int64_t max_capacity) {
                  << "file cache is disabled";
     return 0;
   }
+  int64_t reserved = std::min(
+      std::max<int64_t>(FLAGS_s3_native_file_cache_reserved_capacity, 0), capacity);
   int protected_percent =
       std::min(std::max(FLAGS_s3_native_file_cache_protected_percent, 0), 100);
   // Each shard holds at least 8 of the largest entries.
@@ -407,10 +498,12 @@ int64_t InitS3NativeFileCache(int64_t max_capacity) {
       std::max(FLAGS_s3_native_whole_file_max_size, FLAGS_s3_native_block_size);
   int num_shards = static_cast<int>(
       std::min<int64_t>(std::max<int64_t>(capacity / (8 * largest_entry), 1), 16));
-  file_cache =
-      std::make_unique<S3NativeFileCache>(capacity, protected_percent, num_shards);
+  file_cache = std::make_unique<S3NativeFileCache>(
+      capacity, protected_percent, num_shards, reserved);
   LOG(INFO) << "Native S3 reader: file cache capacity "
-            << PrettyPrinter::PrintBytes(capacity) << " in " << num_shards
+            << PrettyPrinter::PrintBytes(capacity) << " ("
+            << PrettyPrinter::PrintBytes(reserved) << " reserved, the rest uses memory "
+            << "queries leave free) in " << num_shards
             << " shards, protected segment " << protected_percent << "%; "
             << (FLAGS_s3_native_whole_file_max_size > 0
                    ? "files up to "
@@ -419,7 +512,7 @@ int64_t InitS3NativeFileCache(int64_t max_capacity) {
                    : std::string("whole-file reads off, "))
             << "files are cached in blocks of "
             << PrettyPrinter::PrintBytes(FLAGS_s3_native_block_size) << " (0 = off)";
-  return capacity;
+  return reserved;
 }
 
 S3NativeFileCache* GetS3NativeFileCache() {
