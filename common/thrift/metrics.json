@@ -882,6 +882,36 @@
     "key": "impala-server.io-mgr.s3-native-file-cache-released-bytes"
   },
   {
+    "description": "Bytes of the native S3 file cache given back because the process headroom was below --s3_native_file_cache_min_headroom.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 File Cache Released Headroom Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-file-cache-released-headroom-bytes"
+  },
+  {
+    "description": "Bytes of the native S3 file cache given back because the process was over its memory limit.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 File Cache Released Limit Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-file-cache-released-limit-bytes"
+  },
+  {
+    "description": "Bytes read through the native S3 file cache but not cached because the process headroom was low.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 File Cache Skipped Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-file-cache-skipped-bytes"
+  },
+  {
     "description": "Total number of files of the native S3 file cache moved to its protected segment.",
     "contexts": [
       "IMPALAD"

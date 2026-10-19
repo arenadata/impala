@@ -222,6 +222,54 @@ TEST(S3NativeFileCacheTest, ElasticPartReleasedWhenHeadroomLow) {
   EXPECT_EQ(1000, cache.TotalBytes());
 }
 
+// While the last headroom check found the headroom low, new entries above the reserved
+// part are not cached (the reader still gets the data); the next check with enough
+// headroom lets the cache fill again.
+TEST(S3NativeFileCacheTest, SkipsFillsWhileHeadroomLow) {
+  S3NativeFileCache cache(1000, 80, 1, 300);
+  std::atomic<int64_t> headroom(1000);
+  cache.SetHeadroomFunction([&headroom] () { return headroom.load(); }, 500);
+  for (char c = 'a'; c <= 'e'; ++c) Read(&cache, string(1, c), 100, OWNER_1);
+  EXPECT_EQ(500, cache.TotalBytes());
+
+  headroom = 0;
+  // Cached, then the check gives back down to the reserved part.
+  EXPECT_FALSE(Read(&cache, "f", 100, OWNER_1));
+  EXPECT_EQ(300, cache.TotalBytes());
+  // Not cached while the headroom is low.
+  EXPECT_FALSE(Read(&cache, "g", 100, OWNER_1));
+  EXPECT_EQ(300, cache.TotalBytes());
+  EXPECT_FALSE(Read(&cache, "g", 100, OWNER_1));
+  EXPECT_EQ(300, cache.TotalBytes());
+
+  headroom = 1000;
+  // Skipped: the flag is from the last check; this fill's check clears it.
+  EXPECT_FALSE(Read(&cache, "h", 100, OWNER_1));
+  EXPECT_EQ(300, cache.TotalBytes());
+  EXPECT_FALSE(Read(&cache, "i", 100, OWNER_1));
+  EXPECT_EQ(400, cache.TotalBytes());
+  EXPECT_TRUE(Read(&cache, "i", 100, OWNER_1));
+}
+
+// The function given to SetHeadroomFunction() runs after the headroom check gave memory
+// back, and only then.
+TEST(S3NativeFileCacheTest, AfterReleaseCalledOnlyAfterRelease) {
+  S3NativeFileCache cache(1000, 80, 1, 300);
+  std::atomic<int64_t> headroom(1000);
+  std::atomic<int> after(0);
+  cache.SetHeadroomFunction([&headroom] () { return headroom.load(); }, 500, 0,
+      [&after] () { ++after; });
+  for (char c = 'a'; c <= 'e'; ++c) Read(&cache, string(1, c), 100, OWNER_1);
+  EXPECT_EQ(0, after);
+  headroom = 0;
+  Read(&cache, "f", 100, OWNER_1);
+  EXPECT_EQ(300, cache.TotalBytes());
+  EXPECT_EQ(1, after);
+  // Low headroom, but nothing above the reserved part to give back: not called.
+  Read(&cache, "g", 100, OWNER_1);
+  EXPECT_EQ(1, after);
+}
+
 // The background check gives the elastic part back while nothing is filled (queries
 // grow after their scans), down to the reserved part; the destructor stops the thread.
 TEST(S3NativeFileCacheTest, BackgroundHeadroomCheck) {

@@ -672,9 +672,12 @@ void ExecEnv::InitMemTracker(int64_t bytes_limit) {
     // The elastic part is given back before queries run into the limit: the cached
     // blocks are not tracked against the process MemTracker between its refreshes, so
     // the cache checks the process memory itself, also while it does not fill
-    // (background check). The process limit also counts buffer pool reservations that
-    // are not backed by buffers yet (a join reserves its memory before it allocates
-    // it), so those count as used too, not only memory.total-used.
+    // (background check). Used memory is the larger of what the process limit compares
+    // (the process MemTracker: its metric at the last refresh plus what queries consumed
+    // since, reservations included) and memory.total-used plus buffer pool reservations
+    // not backed by buffers yet (a join reserves memory before it allocates it). After
+    // a release the tracker is refreshed from its metric, like MemTracker::GcMemory()
+    // does, so that it no longer counts the freed cache memory.
     MemTracker* process = mem_tracker_.get();
     s3_file_cache->SetHeadroomFunction([process] () {
       int64_t limit = process->limit();
@@ -684,9 +687,10 @@ void ExecEnv::InitMemTracker(int64_t bytes_limit) {
         used += std::max<int64_t>(BufferPoolMetric::UNUSED_RESERVATION_BYTES->GetValue(),
             0);
       }
-      return limit - used;
+      return limit - std::max(used, process->consumption());
     }, FLAGS_s3_native_file_cache_min_headroom,
-        FLAGS_s3_native_file_cache_headroom_check_ms);
+        FLAGS_s3_native_file_cache_headroom_check_ms,
+        [process] () { process->RefreshConsumptionFromMetric(); });
   }
   if (buffer_pool_ != nullptr) {
     // Tests can create multiple buffer pools, meaning that the metrics are not usable.
