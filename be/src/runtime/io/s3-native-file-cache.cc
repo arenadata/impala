@@ -31,6 +31,7 @@
 #include "util/impalad-metrics.h"
 #include "util/metrics.h"
 #include "util/pretty-printer.h"
+#include "util/thread.h"
 #include "util/time.h"
 
 DECLARE_int64(s3_native_whole_file_max_size);
@@ -158,7 +159,8 @@ S3NativeFileCache::FillLocked(Shard* shard, const std::string& file_key, int64_t
   DCHECK(entry.file == nullptr);
   std::shared_ptr<std::promise<LoadResult>> load_promise = std::move(entry.load_promise);
   DCHECK(load_promise != nullptr);
-  if (status.ok() && file != nullptr && file->len <= shard->capacity) {
+  if (status.ok() && file != nullptr && file->len <= shard->capacity
+      && !SkipFill(file->len)) {
     shard->probation.push_front(LruItem{entries, block});
     entry.file = file;
     entry.loading = std::shared_future<LoadResult>();
@@ -170,8 +172,8 @@ S3NativeFileCache::FillLocked(Shard* shard, const std::string& file_key, int64_t
     ++num_entries_;
     EvictLocked(shard, LruItem{entries, block});
   } else {
-    // Nothing to cache: either the load failed (the next caller retries it) or the
-    // entry is larger than the shard.
+    // Nothing to cache: the load failed (the next caller retries it), the entry is
+    // larger than the shard or the process headroom is low (SkipFill()).
     EraseLocked(shard, entries, block);
   }
   return load_promise;
@@ -360,28 +362,44 @@ void S3NativeFileCache::EvictLocked(Shard* shard, const LruItem& keep) {
 }
 
 void S3NativeFileCache::ReleaseMemory(int64_t bytes_to_free) {
-  Release(bytes_to_free, 0, "the process is over its memory limit");
+  // The next headroom check clears it; without a headroom check it stays unset.
+  if (headroom_fn_ && reserved_ < capacity_) low_headroom_ = true;
+  Release(bytes_to_free, 0, ReleaseReason::kProcessLimit);
+}
+
+bool S3NativeFileCache::SkipFill(int64_t len) {
+  if (!low_headroom_.load() || total_bytes_.load() + len <= reserved_) return false;
+  if (ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_SKIPPED_BYTES != nullptr) {
+    ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_SKIPPED_BYTES->Increment(len);
+  }
+  return true;
 }
 
 S3NativeFileCache::~S3NativeFileCache() {
-  if (!headroom_thread_.joinable()) return;
+  if (headroom_thread_ == nullptr) return;
   {
     std::lock_guard<std::mutex> l(stop_lock_);
     stop_ = true;
   }
   stop_cv_.notify_all();
-  headroom_thread_.join();
+  headroom_thread_->Join();
 }
 
-void S3NativeFileCache::SetHeadroomFunction(
-    HeadroomFn fn, int64_t min_headroom, int64_t check_interval_ms) {
+void S3NativeFileCache::SetHeadroomFunction(HeadroomFn fn, int64_t min_headroom,
+    int64_t check_interval_ms, AfterReleaseFn after_release) {
   DCHECK(!headroom_fn_);
   headroom_fn_ = std::move(fn);
+  after_release_fn_ = std::move(after_release);
   min_headroom_ = std::max<int64_t>(min_headroom, 0);
   if (check_interval_ms > 0 && reserved_ < capacity_) {
-    headroom_thread_ = std::thread([this, check_interval_ms] () {
-      HeadroomCheckLoop(check_interval_ms);
-    });
+    Status status = Thread::Create("s3-native-file-cache", "headroom-check",
+        [this, check_interval_ms] () { HeadroomCheckLoop(check_interval_ms); },
+        &headroom_thread_);
+    if (!status.ok()) {
+      LOG(WARNING) << "Native S3 reader: background headroom check of the file cache "
+                   << "not started, only the check on fill runs: " << status.GetDetail();
+      headroom_thread_.reset();
+    }
   }
 }
 
@@ -394,8 +412,12 @@ void S3NativeFileCache::CheckHeadroom(int64_t filled) {
 
 void S3NativeFileCache::ReleaseForHeadroom() {
   int64_t headroom = headroom_fn_();
-  if (headroom >= min_headroom_) return;
-  Release(min_headroom_ - headroom, reserved_, "the process is close to its memory limit");
+  bool low = headroom < min_headroom_;
+  low_headroom_ = low;
+  if (low && Release(min_headroom_ - headroom, reserved_, ReleaseReason::kHeadroom) > 0
+      && after_release_fn_) {
+    after_release_fn_();
+  }
 }
 
 void S3NativeFileCache::HeadroomCheckLoop(int64_t interval_ms) {
@@ -410,7 +432,7 @@ void S3NativeFileCache::HeadroomCheckLoop(int64_t interval_ms) {
 }
 
 int64_t S3NativeFileCache::Release(
-    int64_t bytes_to_free, int64_t keep_bytes, const char* reason) {
+    int64_t bytes_to_free, int64_t keep_bytes, ReleaseReason reason) {
   bytes_to_free = std::min(bytes_to_free, total_bytes_.load() - keep_bytes);
   if (bytes_to_free <= 0) return 0;
   int64_t freed = 0;
@@ -437,20 +459,28 @@ int64_t S3NativeFileCache::Release(
   // (memory.total-used): return them to the system so that the process headroom grows.
   MallocExtension::instance()->ReleaseToSystem(freed);
 #endif
+  const bool headroom = reason == ReleaseReason::kHeadroom;
   if (ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_BYTES != nullptr) {
     ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_BYTES->Increment(freed);
+    (headroom ? ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_HEADROOM_BYTES
+              : ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_LIMIT_BYTES)
+        ->Increment(freed);
   }
-  static std::atomic<int64_t> last_log_ms{0};
-  static std::atomic<int64_t> unlogged_bytes{0};
-  unlogged_bytes += freed;
+  // Logged per reason, at most once per interval, with the bytes since the last line.
+  static std::atomic<int64_t> last_log_ms[2] = {{0}, {0}};
+  static std::atomic<int64_t> unlogged_bytes[2] = {{0}, {0}};
+  const int r = static_cast<int>(reason);
+  unlogged_bytes[r] += freed;
   int64_t now = MonotonicMillis();
-  int64_t last = last_log_ms.load();
+  int64_t last = last_log_ms[r].load();
   if (now - last >= RELEASE_LOG_INTERVAL_MS
-      && last_log_ms.compare_exchange_strong(last, now)) {
+      && last_log_ms[r].compare_exchange_strong(last, now)) {
     LOG(INFO) << "Native S3 reader: released "
-              << PrettyPrinter::PrintBytes(unlogged_bytes.exchange(0))
-              << " of the file cache because " << reason << " (cache now "
-              << PrettyPrinter::PrintBytes(total_bytes_.load()) << ")";
+              << PrettyPrinter::PrintBytes(unlogged_bytes[r].exchange(0))
+              << " of the file cache because "
+              << (headroom ? "the process is close to its memory limit"
+                           : "the process is over its memory limit")
+              << " (cache now " << PrettyPrinter::PrintBytes(total_bytes_.load()) << ")";
   }
   return freed;
 }
