@@ -17,6 +17,7 @@
 
 #include "runtime/exec-env.h"
 
+#include <limits>
 #include <vector>
 
 #include <boost/algorithm/string.hpp>
@@ -138,6 +139,8 @@ DECLARE_int32(krpc_port);
 DECLARE_string(mem_limit);
 DECLARE_bool(mem_limit_includes_jvm);
 DECLARE_int32(s3_native_file_cache_max_mem_percent);
+DECLARE_int64(s3_native_file_cache_min_headroom);
+DECLARE_int64(s3_native_file_cache_headroom_check_ms);
 DECLARE_string(buffer_pool_limit);
 DECLARE_string(buffer_pool_clean_pages_limit);
 DECLARE_int64(min_buffer_size);
@@ -405,7 +408,8 @@ Status ExecEnv::Init() {
   }
 
   if (S3NativeClientEnabled()) {
-    // Preserve the memory for the native S3 file cache, like for the codegen cache.
+    // Preserve the reserved part of the native S3 file cache, like for the codegen
+    // cache. The rest of its capacity uses memory that queries leave free.
     int64_t max_percent =
         min(max(FLAGS_s3_native_file_cache_max_mem_percent, 0), 100);
     admit_mem_limit_ -= io::InitS3NativeFileCache(admit_mem_limit_ * max_percent / 100);
@@ -665,6 +669,24 @@ void ExecEnv::InitMemTracker(int64_t bytes_limit) {
     mem_tracker_->AddGcFunction([s3_file_cache] (int64_t bytes_to_free) {
       s3_file_cache->ReleaseMemory(bytes_to_free);
     });
+    // The elastic part is given back before queries run into the limit: the cached
+    // blocks are not tracked against the process MemTracker between its refreshes, so
+    // the cache checks the process memory itself, also while it does not fill
+    // (background check). The process limit also counts buffer pool reservations that
+    // are not backed by buffers yet (a join reserves its memory before it allocates
+    // it), so those count as used too, not only memory.total-used.
+    MemTracker* process = mem_tracker_.get();
+    s3_file_cache->SetHeadroomFunction([process] () {
+      int64_t limit = process->limit();
+      if (limit < 0) return std::numeric_limits<int64_t>::max();
+      int64_t used = AggregateMemoryMetrics::TOTAL_USED->GetValue();
+      if (BufferPoolMetric::UNUSED_RESERVATION_BYTES != nullptr) {
+        used += std::max<int64_t>(BufferPoolMetric::UNUSED_RESERVATION_BYTES->GetValue(),
+            0);
+      }
+      return limit - used;
+    }, FLAGS_s3_native_file_cache_min_headroom,
+        FLAGS_s3_native_file_cache_headroom_check_ms);
   }
   if (buffer_pool_ != nullptr) {
     // Tests can create multiple buffer pools, meaning that the metrics are not usable.

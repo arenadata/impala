@@ -81,11 +81,26 @@ DEFINE_int64(s3_native_whole_file_max_size, 0, "(Experimental) Files of at most 
     "queries) are served from memory. 0 (the default) turns this off: all files go "
     "through the block cache (--s3_native_block_size), which downloads only the parts "
     "that are read; whole-file reads download columns a query does not need.");
-DEFINE_int64(s3_native_file_cache_capacity, 2L * 1024 * 1024 * 1024, "(Experimental) "
+DEFINE_int64(s3_native_file_cache_capacity, 4L * 1024 * 1024 * 1024, "(Experimental) "
     "Capacity in bytes of the native S3 file cache (--s3_native_whole_file_max_size, "
     "--s3_native_block_size). "
     "Limited to --s3_native_file_cache_max_mem_percent of the memory admitted for "
-    "queries; the capacity is subtracted from that memory. 0 turns the cache off.");
+    "queries; only --s3_native_file_cache_reserved_capacity of it is subtracted from "
+    "that memory. 0 turns the cache off.");
+DEFINE_int64(s3_native_file_cache_reserved_capacity, 256L * 1024 * 1024,
+    "(Experimental) Part of --s3_native_file_cache_capacity that is subtracted from the "
+    "memory admitted for queries, like the codegen cache, and always kept. The rest of "
+    "the capacity is elastic: it uses memory that queries leave free, and the cache "
+    "gives it back when the process comes close to its memory limit, so queries keep "
+    "their memory. Set it to the capacity to preserve the whole cache.");
+DEFINE_int64(s3_native_file_cache_min_headroom, 1024L * 1024 * 1024, "(Experimental) "
+    "The native S3 file cache gives its elastic part (above "
+    "--s3_native_file_cache_reserved_capacity) back when the process may allocate less "
+    "than this many more bytes before --mem_limit, so that queries get the memory before "
+    "they run into the limit.");
+DEFINE_int64(s3_native_file_cache_headroom_check_ms, 100, "(Experimental) Interval in "
+    "milliseconds of the background check of --s3_native_file_cache_min_headroom; the "
+    "check also runs when the cache fills. 0 turns the background check off.");
 DEFINE_int32(s3_native_file_cache_max_mem_percent, 25, "(Experimental) Maximum share, "
     "in percent of the memory admitted for queries, of the native S3 file cache.");
 DEFINE_int64(s3_native_block_size, 128 * 1024, "(Experimental) Reads of files larger "

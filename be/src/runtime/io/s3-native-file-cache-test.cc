@@ -172,6 +172,98 @@ TEST(S3NativeFileCacheTest, ReleaseMemoryEvictsOldestFirst) {
   EXPECT_TRUE(Read(&cache, "c", 100, OWNER_1));
 }
 
+// When the process headroom drops below the margin, a fill gives the elastic part of
+// the capacity back, least recently used first, but keeps the reserved part.
+TEST(S3NativeFileCacheTest, ElasticPartReleasedWhenHeadroomLow) {
+  S3NativeFileCache cache(1000, 80, 1, 300);
+  EXPECT_EQ(300, cache.reserved());
+  std::atomic<int64_t> headroom(S3NativeFileCache::kDefaultMinHeadroom);
+  std::atomic<int> checks(0);
+  cache.SetHeadroomFunction([&headroom, &checks] () {
+    ++checks;
+    return headroom.load();
+  });
+  for (char c = 'a'; c <= 'h'; ++c) Read(&cache, string(1, c), 100, OWNER_1);
+  EXPECT_EQ(800, cache.TotalBytes());
+  EXPECT_GT(checks, 0);
+
+  headroom = 0;
+  EXPECT_FALSE(Read(&cache, "i", 100, OWNER_1));
+  EXPECT_EQ(300, cache.TotalBytes());
+  EXPECT_EQ(3, cache.NumEntries());
+  EXPECT_TRUE(Read(&cache, "i", 100, OWNER_1));
+  EXPECT_FALSE(Read(&cache, "a", 100, OWNER_1));
+  // The reserved part stays while the headroom is low.
+  EXPECT_EQ(300, cache.TotalBytes());
+
+  // Block reads check the headroom too.
+  std::atomic<int> fetches(0);
+  int64_t bytes_read = 0;
+  S3NativeFileCache::BlockStats stats;
+  vector<uint8_t> buffer(400);
+  ASSERT_OK(cache.ReadBlocks("j", 400, 100, 0, buffer.data(), 400, OWNER_1,
+      [&fetches] (int64_t offset, const S3NativeFileCache::Segments& segments,
+          int64_t* received) {
+        ++fetches;
+        *received = 0;
+        for (const auto& segment : segments) {
+          memset(segment.first, 'j', segment.second);
+          *received += segment.second;
+        }
+        return Status::OK();
+      }, &bytes_read, &stats));
+  EXPECT_EQ(400, bytes_read);
+  EXPECT_EQ(1, fetches);
+  EXPECT_EQ(300, cache.TotalBytes());
+
+  // With enough headroom the cache grows to its capacity again.
+  headroom = S3NativeFileCache::kDefaultMinHeadroom;
+  for (char c = 'k'; c <= 'r'; ++c) Read(&cache, string(1, c), 100, OWNER_1);
+  EXPECT_EQ(1000, cache.TotalBytes());
+}
+
+// The background check gives the elastic part back while nothing is filled (queries
+// grow after their scans), down to the reserved part; the destructor stops the thread.
+TEST(S3NativeFileCacheTest, BackgroundHeadroomCheck) {
+  std::atomic<int64_t> headroom(1000);
+  {
+    S3NativeFileCache cache(1000, 80, 1, 300);
+    cache.SetHeadroomFunction([&headroom] () { return headroom.load(); }, 500, 5);
+    for (char c = 'a'; c <= 'h'; ++c) Read(&cache, string(1, c), 100, OWNER_1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_EQ(800, cache.TotalBytes());
+
+    headroom = 0;
+    for (int i = 0; i < 200 && cache.TotalBytes() > 300; ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_EQ(300, cache.TotalBytes());
+    // The most recently used entries stay.
+    EXPECT_TRUE(Read(&cache, "h", 100, OWNER_1));
+  }
+  // A fully reserved cache starts no thread and keeps its entries.
+  S3NativeFileCache reserved(1000, 80);
+  reserved.SetHeadroomFunction([] () { return 0; }, 500, 5);
+  for (char c = 'a'; c <= 'e'; ++c) Read(&reserved, string(1, c), 100, OWNER_1);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(500, reserved.TotalBytes());
+}
+
+// A fully reserved cache (the default of the constructor) ignores the headroom; the
+// process memory limit still frees it, also its reserved part.
+TEST(S3NativeFileCacheTest, ReservedCacheIgnoresHeadroom) {
+  S3NativeFileCache cache(1000, 80);
+  EXPECT_EQ(1000, cache.reserved());
+  cache.SetHeadroomFunction([] () { return 0; });
+  for (char c = 'a'; c <= 'h'; ++c) Read(&cache, string(1, c), 100, OWNER_1);
+  EXPECT_EQ(800, cache.TotalBytes());
+
+  S3NativeFileCache elastic(1000, 80, 1, 300);
+  for (char c = 'a'; c <= 'e'; ++c) Read(&elastic, string(1, c), 100, OWNER_1);
+  elastic.ReleaseMemory(1000);
+  EXPECT_EQ(0, elastic.TotalBytes());
+}
+
 // Waiters on a reserved entry get the result of Fill(), also an error.
 TEST(S3NativeFileCacheTest, AcquireAndFill) {
   S3NativeFileCache cache(1000, 80);

@@ -87,6 +87,8 @@ const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_MISS_COUNT =
     "impala-server.io-mgr.s3-native-file-cache-miss-count";
 const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_EVICTIONS =
     "impala-server.io-mgr.s3-native-file-cache-evictions";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_BYTES =
+    "impala-server.io-mgr.s3-native-file-cache-released-bytes";
 const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_PROMOTIONS =
     "impala-server.io-mgr.s3-native-file-cache-promotions";
 const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_TOTAL_BYTES =
@@ -284,6 +286,7 @@ IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_HIT_COUNT = nullptr;
 IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_HIT_BYTES = nullptr;
 IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_MISS_COUNT = nullptr;
 IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_EVICTIONS = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_BYTES = nullptr;
 IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_PROMOTIONS = nullptr;
 IntGauge* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_TOTAL_BYTES = nullptr;
 IntGauge* ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_NUM_ENTRIES = nullptr;
@@ -483,6 +486,8 @@ void ImpaladMetrics::CreateMetrics(MetricGroup* m) {
       ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_MISS_COUNT, 0);
   IO_MGR_S3_NATIVE_FILE_CACHE_EVICTIONS = IO_MGR_METRICS->AddCounter(
       ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_EVICTIONS, 0);
+  IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_BYTES = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_BYTES, 0);
   IO_MGR_S3_NATIVE_FILE_CACHE_PROMOTIONS = IO_MGR_METRICS->AddCounter(
       ImpaladMetricKeys::IO_MGR_S3_NATIVE_FILE_CACHE_PROMOTIONS, 0);
   IO_MGR_S3_NATIVE_FILE_CACHE_TOTAL_BYTES = IO_MGR_METRICS->AddGauge(
