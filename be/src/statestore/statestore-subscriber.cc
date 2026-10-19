@@ -17,6 +17,7 @@
 
 #include "statestore/statestore-subscriber.h"
 
+#include <algorithm>
 #include <mutex>
 #include <sstream>
 #include <utility>
@@ -70,8 +71,8 @@ DEFINE_int64_hidden(statestore_subscriber_recovery_grace_period_ms, 30000L, "Per
 DEFINE_bool_hidden(statestore_subscriber_ha_role_checks, true, "With statestored HA, "
     "match RPCs to the stub registered with the sending statestored before the "
     "registration wildcard, and choose the active statestored from the current state of "
-    "both stubs at startup and after every re-registration. Off restores the previous "
-    "behaviour.");
+    "both stubs at startup and after every re-registration, and ignore out-of-date "
+    "active statuses of a statestored. Off restores the previous behaviour.");
 DEFINE_int32(statestore_client_rpc_timeout_ms, 300000, "(Advanced) The underlying "
     "TSocket send/recv timeout in milliseconds for a catalog client RPC.");
 
@@ -346,7 +347,6 @@ Status StatestoreSubscriber::Start() {
     RETURN_IF_ERROR(statestore_->Start(&statestore_is_active));
     RETURN_IF_ERROR(statestore2_->Start(&statestore2_is_active));
     lock_guard<mutex> r(statestore_ha_lock_);
-    DCHECK(!statestore_is_active || !statestore2_is_active);
     if (active_statestore_ != nullptr) {
       // The active and standby statestoreds are nullptr until they are set below,
       // unless UpdateStatestoredRole() has set them while registering with the two
@@ -383,6 +383,9 @@ Status StatestoreSubscriber::Start() {
       standby_statestore_ = nullptr;
     }
   }
+  // The registration answers above can both be "active" and stale, e.g. when the second
+  // registration took long and the statestore service failed over meanwhile.
+  if (HaRoleChecks()) ReconcileRoles("startup");
   return Status::OK();
 }
 
@@ -475,14 +478,34 @@ void StatestoreSubscriber::UpdateStatestoredRole(bool is_active,
     DCHECK(is_active);
     {
       lock_guard<mutex> r(statestore_ha_lock_);
-      StatestoreStub* tmp = active_statestore_;
-      active_statestore_ = standby_statestore_;
-      standby_statestore_ = tmp;
-      active_statestore_->SetStatestoreActive(
-          is_active, active_statestored_version, /* has_failover */ true);
-      standby_statestore_->SetStatestoreActive(
-          !is_active, active_statestored_version, /* has_failover */ true);
-      LOG(INFO) << "Updated active statestored as " << active_statestore_->GetAddress();
+      if (HaRoleChecks() && standby_statestore_ != standby_statestore) {
+        // The recovery thread and the role RPC raced, and the other one has swapped.
+        LOG(INFO) << "Active statestored is already " << active_statestore_->GetAddress();
+      } else {
+        if (HaRoleChecks()) {
+          // The statestored may announce the version of an election it lost.
+          bool stub_is_active = false;
+          int64_t known_version =
+              std::max(active_statestore_->GetActiveVersion(&stub_is_active),
+                  standby_statestore_->GetActiveVersion(&stub_is_active));
+          if (active_statestored_version < known_version) {
+            LOG(INFO) << "Ignored out-of-date active status of statestored "
+                      << standby_statestore->GetAddress() << ": active version "
+                      << active_statestored_version << ", already known version "
+                      << known_version;
+            return;
+          }
+        }
+        StatestoreStub* tmp = active_statestore_;
+        active_statestore_ = standby_statestore_;
+        standby_statestore_ = tmp;
+        active_statestore_->SetStatestoreActive(
+            is_active, active_statestored_version, /* has_failover */ true);
+        standby_statestore_->SetStatestoreActive(
+            !is_active, active_statestored_version, /* has_failover */ true);
+        LOG(INFO) << "Updated active statestored as "
+                  << active_statestore_->GetAddress();
+      }
     }
 
     if (update_active_catalogd) {
@@ -532,6 +555,16 @@ void StatestoreSubscriber::UpdateStatestoredRole(bool is_active,
       DCHECK(!(*update_skipped));
     }
   } else if (active_statestore->IsMatchingStatestoreId(statestore_id)) {
+    if (HaRoleChecks()) {
+      // The followed statestored was elected again: clear the standby flag of its last
+      // registration.
+      lock_guard<mutex> r(statestore_ha_lock_);
+      bool was_active = false;
+      int64_t version = active_statestore->GetActiveVersion(&was_active);
+      if (!was_active && version <= active_statestored_version) {
+        active_statestore->SetStatestoreActive(is_active, active_statestored_version);
+      }
+    }
     LOG(INFO) << "statestored " << active_statestore->GetAddress()
               << " is in active state.";
   } else {
@@ -552,6 +585,60 @@ StatestoreSubscriber::StatestoreStub* StatestoreSubscriber::GetActiveStatestore(
 StatestoreSubscriber::StatestoreStub* StatestoreSubscriber::GetStandbyStatestore() {
   lock_guard<mutex> r(statestore_ha_lock_);
   return standby_statestore_;
+}
+
+void StatestoreSubscriber::ReconcileRoles(const char* reason) {
+  DCHECK(statestore2_ != nullptr);
+  // Hold the lock for the whole decision, so that a role update with a newer version
+  // which arrives meanwhile is not overwritten by a choice made before it.
+  lock_guard<mutex> r(statestore_ha_lock_);
+  StatestoreStub* best = nullptr;
+  int64_t best_version = -1;
+  for (StatestoreStub* stub : {statestore_, statestore2_}) {
+    TUniqueId statestore_id;
+    RegistrationId registration_id;
+    stub->GetRegistrationIdAndStatestoreId(&registration_id, &statestore_id);
+    // Not registered with the current statestore instance.
+    if (statestore_id.hi == 0 && statestore_id.lo == 0) continue;
+    bool is_active = false;
+    int64_t version = stub->GetActiveVersion(&is_active);
+    if (is_active && version > best_version) {
+      best = stub;
+      best_version = version;
+    }
+  }
+  if (best == nullptr) {
+    // No registered stub reports active. Keep the current choice: a role update from the
+    // other statestored swaps the roles as a failover, with its grace period.
+    if (active_statestore_ != nullptr) {
+      bool is_active = false;
+      active_statestore_->GetActiveVersion(&is_active);
+      if (!is_active) {
+        LOG(WARNING) << "Active statestored " << active_statestore_->GetAddress()
+                     << " reports standby (" << reason << ") and no other registered "
+                     << "statestored reports active";
+      }
+    }
+    return;
+  }
+  StatestoreStub* other = best == statestore_ ? statestore2_ : statestore_;
+  bool other_is_active = false;
+  int64_t other_version = other->GetActiveVersion(&other_is_active);
+  if (other_is_active) {
+    // A stale active flag, e.g. from a registration before a failover.
+    other->SetStatestoreActive(false, std::max(other_version, best_version));
+  }
+  if (active_statestore_ == best) return;
+  if (active_statestore_ == nullptr) {
+    LOG(INFO) << "Set active statestored as " << best->GetAddress() << " (" << reason
+              << ")";
+  } else {
+    // A stale choice, e.g. from a registration answer before a failover, is corrected.
+    LOG(WARNING) << "Set active statestored as " << best->GetAddress() << " (" << reason
+                 << ", was " << active_statestore_->GetAddress() << ")";
+  }
+  active_statestore_ = best;
+  standby_statestore_ = other;
 }
 
 Status StatestoreSubscriber::UpdateState(const TopicDeltaMap& incoming_topic_deltas,
@@ -768,12 +855,24 @@ Status StatestoreSubscriber::StatestoreStub::Register(bool* has_active_catalogd,
   {
     lock_guard<mutex> l(active_lock_);
     if (status.ok() && response.__isset.statestore_is_active) {
-      is_active_ = response.statestore_is_active;
-      if (is_active_) {
-        DCHECK(response.active_statestored_version > 0
-            && active_statestored_version_ <= response.active_statestored_version);
+      if (subscriber_->HaRoleChecks() && response.statestore_is_active
+          && active_statestored_version_ > response.active_statestored_version) {
+        // The statestored reports the version of an election it lost, e.g. after it
+        // resumes from a pause during a failover.
+        LOG(INFO) << "Ignored out-of-date active status of statestored "
+                  << GetAddress() << ": active version "
+                  << response.active_statestored_version << ", already known version "
+                  << active_statestored_version_;
+        is_active_ = false;
+      } else {
+        is_active_ = response.statestore_is_active;
+        if (is_active_) {
+          DCHECK(response.active_statestored_version > 0
+              && active_statestored_version_ <= response.active_statestored_version);
+        }
+        active_statestored_version_ = std::max(
+            active_statestored_version_, response.active_statestored_version);
       }
-      active_statestored_version_ = response.active_statestored_version;
       active_status_metric_->SetValue(is_active_);
     }
   }
@@ -855,6 +954,7 @@ void StatestoreSubscriber::StatestoreStub::RecoveryModeChecker() {
   // mode and try to reconnect, followed by reregistering all subscriptions.
   while (true) {
     bool updateStatestoredRole = false;
+    bool reregistered = false;
     FailureDetector::PeerState state = failure_detector_->GetPeerState(STATESTORE_ID);
     if (state == FailureDetector::FAILED
         || (state == FailureDetector::UNKNOWN && !is_registered)) {
@@ -886,6 +986,7 @@ void StatestoreSubscriber::StatestoreStub::RecoveryModeChecker() {
               callback();
             }
           }
+          reregistered = true;
           if (is_active_) {
             updateStatestoredRole = true;
             LOG(INFO) << "Statestored " << TNetworkAddressToString(statestore_address_)
@@ -939,6 +1040,9 @@ void StatestoreSubscriber::StatestoreStub::RecoveryModeChecker() {
           statestore_id, active_statestored_version, /* update_active_catalogd */false,
           nullptr, 0, &update_skipped);
       DCHECK(!update_skipped);
+    }
+    if (reregistered && subscriber_->HaRoleChecks()) {
+      subscriber_->ReconcileRoles("re-registration");
     }
     SleepForMs(SLEEP_INTERVAL_MS);
   }
