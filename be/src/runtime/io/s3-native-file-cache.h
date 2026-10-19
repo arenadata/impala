@@ -26,7 +26,6 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -34,6 +33,9 @@
 #include "common/status.h"
 
 namespace impala {
+
+class Thread;
+
 namespace io {
 
 /// Experimental in-memory cache of S3 data for the native S3 reader (--s3_native_reader):
@@ -74,7 +76,9 @@ namespace io {
 /// checked after new entries are filled and, every
 /// --s3_native_file_cache_headroom_check_ms, by a background thread, so that the cache
 /// also makes room while queries grow and the cache does not fill (joins, aggregations
-/// after their scans).
+/// after their scans). While the last check found the headroom below the margin, new
+/// entries above the reserved part are not cached (the data still goes to the reader),
+/// so that the cache does not fill only to give the memory back right after.
 ///
 /// Thread safe.
 class S3NativeFileCache {
@@ -89,6 +93,10 @@ class S3NativeFileCache {
 
   /// Returns how many more bytes the process may allocate before its memory limit.
   typedef std::function<int64_t()> HeadroomFn;
+
+  /// Called after the headroom check gave memory back (e.g. to refresh the process
+  /// MemTracker from its metric, like MemTracker::GcMemory() does after GC).
+  typedef std::function<void()> AfterReleaseFn;
 
   /// One cached file or block. 'len' is the number of valid bytes in 'data'.
   struct File {
@@ -141,10 +149,12 @@ class S3NativeFileCache {
   /// 'min_headroom': below it the elastic part is given back. The headroom is checked
   /// after filling new entries (at most every headroom check interval of filled bytes)
   /// and, if 'check_interval_ms' is positive, every 'check_interval_ms' by a background
-  /// thread. Has no effect if the whole capacity is reserved. Must be called once,
-  /// before the cache is used.
+  /// thread (logs a warning and keeps only the check on fill if the thread cannot be
+  /// started). 'after_release', if set, is called after the check gave memory back.
+  /// Has no effect if the whole capacity is reserved. Must be called once, before the
+  /// cache is used.
   void SetHeadroomFunction(HeadroomFn fn, int64_t min_headroom = kDefaultMinHeadroom,
-      int64_t check_interval_ms = 0);
+      int64_t check_interval_ms = 0, AfterReleaseFn after_release = nullptr);
 
   /// Returns in '*file' the whole file stored under 'file_key'. On a miss allocates a
   /// buffer of 'length' bytes and calls 'loader' to fill it; concurrent calls for the
@@ -272,10 +282,19 @@ class S3NativeFileCache {
   /// Updates the size and entry count gauges.
   void UpdateGauges();
 
+  /// Why Release() gives memory back: the process headroom is below the margin, or the
+  /// process is over its memory limit (MemTracker GC). Counted and logged separately.
+  enum class ReleaseReason { kHeadroom = 0, kProcessLimit = 1 };
+
   /// Evicts entries, least recently used first, until 'bytes_to_free' bytes are released
   /// or at most 'keep_bytes' are left; returns the number of bytes released. Returns the
-  /// freed memory to the system and logs 'reason' (at most every few seconds).
-  int64_t Release(int64_t bytes_to_free, int64_t keep_bytes, const char* reason);
+  /// freed memory to the system, updates the metrics of 'reason' and logs it (at most
+  /// every few seconds per reason).
+  int64_t Release(int64_t bytes_to_free, int64_t keep_bytes, ReleaseReason reason);
+
+  /// Whether an entry of 'len' bytes is not cached because the headroom is low (see the
+  /// class comment). Updates the skipped bytes metric.
+  bool SkipFill(int64_t len);
 
   /// Called after 'filled' bytes of new entries were cached: every headroom check
   /// interval of filled bytes calls ReleaseForHeadroom().
@@ -295,11 +314,16 @@ class S3NativeFileCache {
   /// Filled bytes between two headroom checks.
   const int64_t headroom_check_interval_;
   HeadroomFn headroom_fn_;
+  AfterReleaseFn after_release_fn_;
   int64_t min_headroom_ = kDefaultMinHeadroom;
   /// Bytes filled since the last headroom check.
   std::atomic<int64_t> filled_since_check_{0};
+  /// Set by every headroom check: whether the headroom was below 'min_headroom_' (also
+  /// set when the process was over its limit). While set, SkipFill() is true above the
+  /// reserved part.
+  std::atomic<bool> low_headroom_{false};
   /// Background headroom check: the thread waits on 'stop_cv_' between checks.
-  std::thread headroom_thread_;
+  std::unique_ptr<Thread> headroom_thread_;
   std::mutex stop_lock_;
   std::condition_variable stop_cv_;
   bool stop_ = false;
