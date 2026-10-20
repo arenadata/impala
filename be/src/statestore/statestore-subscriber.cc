@@ -1153,13 +1153,14 @@ void StatestoreSubscriber::StatestoreStub::GetRegistrationIdAndStatestoreId(
 }
 
 void StatestoreSubscriber::StatestoreStub::IncCountForUpdateStatestoredRoleRPC() {
-  lock_guard<shared_mutex> exclusive_lock(lock_);
+  // The counter is atomic. Don't take 'lock_': it is held for the whole recovery loop.
   update_statestored_role_rpc_metric_->Increment(1);
 }
 
 TStatestoreConnState::type
 StatestoreSubscriber::StatestoreStub::GetStatestoreConnState() {
-  lock_guard<shared_mutex> exclusive_lock(lock_);
+  // 'failure_detector_' has its own lock. Don't take 'lock_': it is held for the whole
+  // recovery loop, and the standby statestored's heartbeats wait for this answer.
   FailureDetector::PeerState state = failure_detector_->GetPeerState(STATESTORE_ID);
   switch (state) {
     case FailureDetector::FAILED:
