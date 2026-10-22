@@ -81,39 +81,41 @@ DEFINE_int64(s3_native_whole_file_max_size, 0, "(Experimental) Files of at most 
     "queries) are served from memory. 0 (the default) turns this off: all files go "
     "through the block cache (--s3_native_block_size), which downloads only the parts "
     "that are read; whole-file reads download columns a query does not need.");
-DEFINE_int64(s3_native_file_cache_capacity, 4L * 1024 * 1024 * 1024, "(Experimental) "
+DEFINE_int64(s3_native_cache_capacity, 4L * 1024 * 1024 * 1024, "(Experimental) "
     "Capacity in bytes of the native S3 file cache (--s3_native_whole_file_max_size, "
     "--s3_native_block_size). "
-    "Limited to --s3_native_file_cache_max_mem_percent of the memory admitted for "
-    "queries; only --s3_native_file_cache_reserved_capacity of it is subtracted from "
+    "Limited to --s3_native_cache_max_mem_percent of the memory admitted for "
+    "queries; only --s3_native_cache_reserved_capacity of it is subtracted from "
     "that memory. 0 turns the cache off.");
-DEFINE_int64(s3_native_file_cache_reserved_capacity, 256L * 1024 * 1024,
-    "(Experimental) Part of --s3_native_file_cache_capacity that is subtracted from the "
+DEFINE_int64(s3_native_cache_reserved_capacity, 256L * 1024 * 1024,
+    "(Experimental) Part of --s3_native_cache_capacity that is subtracted from the "
     "memory admitted for queries, like the codegen cache, and always kept. The rest of "
     "the capacity is elastic: it uses memory that queries leave free, and the cache "
     "gives it back when the process comes close to its memory limit, so queries keep "
     "their memory. Set it to the capacity to preserve the whole cache.");
-DEFINE_int64(s3_native_file_cache_min_headroom, 1024L * 1024 * 1024, "(Experimental) "
+DEFINE_int64(s3_native_cache_min_headroom, 1024L * 1024 * 1024, "(Experimental) "
     "The native S3 file cache gives its elastic part (above "
-    "--s3_native_file_cache_reserved_capacity) back when the process may allocate less "
+    "--s3_native_cache_reserved_capacity) back when the process may allocate less "
     "than this many more bytes before --mem_limit, so that queries get the memory before "
     "they run into the limit.");
 DEFINE_bool(s3_native_data_cache, true, "(Experimental) If the remote data cache on "
     "local disk is enabled (--data_cache), the native S3 reader uses it as a second tier "
     "of its file cache: blocks missing from the file cache are looked up on disk before "
     "they are fetched from S3, and blocks are stored on disk (see "
-    "--s3_native_data_cache_write_on_fill).");
-DEFINE_bool(s3_native_data_cache_write_on_fill, true, "(Experimental) With "
+    "--s3_native_data_cache_write_on_fetch). Reads that do not go through the file "
+    "cache (--s3_native_cache_capacity=0) use the data cache like the S3A reader: "
+    "looked up on disk, the rest fetched from S3 and stored on disk.");
+DEFINE_bool(s3_native_data_cache_write_on_fetch, true, "(Experimental) With "
     "--s3_native_data_cache: store each block in the data cache on local disk right "
     "after it is fetched from S3, like the S3A reader does (the data cache writes "
     "asynchronously with --data_cache_num_async_write_threads and drops writes when "
     "busy). false: store only blocks evicted from the file cache to make room that were "
     "read again after they were loaded (fewer disk writes, fewer disk hits when the data "
     "fits on disk).");
-DEFINE_int64(s3_native_file_cache_headroom_check_ms, 100, "(Experimental) Interval in "
-    "milliseconds of the background check of --s3_native_file_cache_min_headroom; the "
+DEFINE_int64(s3_native_cache_headroom_check_ms, 100, "(Experimental) Interval in "
+    "milliseconds of the background check of --s3_native_cache_min_headroom; the "
     "check also runs when the cache fills. 0 turns the background check off.");
-DEFINE_int32(s3_native_file_cache_max_mem_percent, 25, "(Experimental) Maximum share, "
+DEFINE_int32(s3_native_cache_max_mem_percent, 25, "(Experimental) Maximum share, "
     "in percent of the memory admitted for queries, of the native S3 file cache.");
 DEFINE_int64(s3_native_block_size, 128 * 1024, "(Experimental) Reads of files larger "
     "than --s3_native_whole_file_max_size go through the native S3 file cache in blocks "
@@ -121,7 +123,7 @@ DEFINE_int64(s3_native_block_size, 128 * 1024, "(Experimental) Reads of files la
     "blocks is fetched with one GET and cached, so data read again soon (another scan "
     "of the same table, the next query, the footer) is not downloaded again. 0 turns "
     "this off.");
-DEFINE_int32(s3_native_file_cache_protected_percent, 80, "(Experimental) Share, in "
+DEFINE_int32(s3_native_cache_protected_percent, 80, "(Experimental) Share, in "
     "percent of the capacity, of the protected segment of the native S3 file cache: "
     "files read by more than one scan. One large scan evicts only the rest.");
 
