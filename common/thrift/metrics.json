@@ -802,6 +802,186 @@
     "key": "impala-server.io-mgr.remote-data-cache-total-bytes"
   },
   {
+    "description": "Total number of GET requests sent by the native S3 reader.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 GET Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-get-count"
+  },
+  {
+    "description": "Total number of bytes received by the native S3 reader.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 GET Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-get-bytes"
+  },
+  {
+    "description": "Total number of native S3 reads split into parallel parts (--s3_native_parallel_read_min_size).",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Parallel Read Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-parallel-read-count"
+  },
+  {
+    "description": "Total number of reads of small files served whole by the native S3 cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Whole File Cache Hit Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-whole-file-cache-hit-count"
+  },
+  {
+    "description": "Total number of bytes of small files served whole by the native S3 cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Whole File Cache Hit Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-whole-file-cache-hit-bytes"
+  },
+  {
+    "description": "Total number of small files read whole into the native S3 cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Whole File Cache Miss Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-whole-file-cache-miss-count"
+  },
+  {
+    "description": "Total number of files evicted from the native S3 file cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Evictions",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-evictions"
+  },
+  {
+    "description": "Total number of bytes of the native S3 file cache given back because the process was over or close to its memory limit.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Released Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-released-bytes"
+  },
+  {
+    "description": "Bytes of the native S3 file cache given back because the process headroom was below --s3_native_cache_min_headroom.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Released Headroom Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-released-headroom-bytes"
+  },
+  {
+    "description": "Bytes of the native S3 file cache given back because the process was over its memory limit.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Released Limit Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-released-limit-bytes"
+  },
+  {
+    "description": "Bytes read through the native S3 file cache but not cached because the process headroom was low.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Skipped Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-skipped-bytes"
+  },
+  {
+    "description": "Bytes of blocks the native S3 reader handed to the remote data cache on local disk for writing (accepted by it; with asynchronous writes some can still be dropped later). Written and dropped bytes: impala-server.io-mgr.remote-data-cache-total-bytes, -num-writes, -dropped-bytes.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Data Cache Offered Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-data-cache-offered-bytes"
+  },
+  {
+    "description": "Total number of files of the native S3 file cache moved to its protected segment.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Promotions",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-promotions"
+  },
+  {
+    "description": "Current byte size of the native S3 file cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Total Bytes",
+    "units": "BYTES",
+    "kind": "GAUGE",
+    "key": "impala-server.io-mgr.s3-native-cache-total-bytes"
+  },
+  {
+    "description": "Current number of files in the native S3 file cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Num Entries",
+    "units": "UNIT",
+    "kind": "GAUGE",
+    "key": "impala-server.io-mgr.s3-native-cache-num-entries"
+  },
+  {
+    "description": "Total number of blocks of large files served by the native S3 file cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Block Cache Hit Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-block-cache-hit-count"
+  },
+  {
+    "description": "Total number of bytes of large files served by the native S3 file cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Block Cache Hit Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-block-cache-hit-bytes"
+  },
+  {
+    "description": "Total number of blocks of large files fetched into the native S3 file cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Block Cache Miss Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-block-cache-miss-count"
+  },
+  {
     "description": "Current number of entries in the remote data cache.",
     "contexts": [
       "IMPALAD"

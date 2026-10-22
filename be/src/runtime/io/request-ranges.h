@@ -278,6 +278,9 @@ class ScanRange : public RequestRange {
     int64_t mtime = ScanRange::INVALID_MTIME;
     bool is_encrypted = false;
     bool is_erasure_coded = false;
+    /// Length of the whole file, -1 if unknown. Used by the native S3 reader to read
+    /// small files whole (--s3_native_whole_file_max_size).
+    int64_t file_length = -1;
   };
 
   /// Allocate a scan range object stored in the given 'obj_pool' and calls Reset() on it
@@ -288,7 +291,8 @@ class ScanRange : public RequestRange {
 
   /// Get file info for the current scan range.
   FileInfo GetFileInfo() const {
-    return FileInfo{file_.c_str(), fs_, mtime_, is_encrypted_, is_erasure_coded_};
+    return FileInfo{
+        file_.c_str(), fs_, mtime_, is_encrypted_, is_erasure_coded_, file_length_};
   }
 
   /// Resets this scan range object with the scan range description. The scan range
@@ -370,6 +374,9 @@ class ScanRange : public RequestRange {
 
   int64_t mtime() const { return mtime_; }
 
+  /// Length of the whole file, -1 if unknown.
+  int64_t file_length() const { return file_length_; }
+
   bool HasSubRanges() const { return !sub_ranges_.empty(); }
 
   // Checks if 'lock_' is held via 'scan_range_lock'
@@ -389,6 +396,7 @@ class ScanRange : public RequestRange {
   friend class RequestContext;
   friend class HdfsFileReader;
   friend class LocalFileReader;
+  friend class S3NativeFileReader;
   friend class RemoteOperRange;
 
   /// Initialize internal fields
@@ -539,6 +547,9 @@ class ScanRange : public RequestRange {
 
   /// Last modified time of the file associated with the scan range. Set in Reset().
   int64_t mtime_;
+
+  /// Length of the whole file, -1 if unknown. Set in Reset().
+  int64_t file_length_ = -1;
 
   DiskIoMgr* io_mgr_ = nullptr;
 
