@@ -297,6 +297,73 @@ TEST(S3NativeFileCacheTest, BackgroundHeadroomCheck) {
   EXPECT_EQ(500, reserved.TotalBytes());
 }
 
+// The eviction handler gets entries evicted to make room that were read again after
+// they were loaded; entries read only once and entries given back under memory
+// pressure do not reach it.
+TEST(S3NativeFileCacheTest, EvictionHandlerGetsReusedEntries) {
+  S3NativeFileCache cache(300, 80);
+  vector<string> handled;
+  cache.SetEvictionHandler([&handled] (const string& key, int64_t block,
+      const S3NativeFileCache::File& file) {
+    EXPECT_EQ(WHOLE, block);
+    EXPECT_EQ(100, file.len);
+    EXPECT_EQ(key[0], file.data[0]);
+    handled.push_back(key);
+  });
+  EXPECT_FALSE(Read(&cache, "a", 100, OWNER_1));
+  EXPECT_TRUE(Read(&cache, "a", 100, OWNER_1));
+  EXPECT_FALSE(Read(&cache, "b", 100, OWNER_1));
+  EXPECT_FALSE(Read(&cache, "c", 100, OWNER_1));
+  // a is the least recently used entry and was read again: handled.
+  EXPECT_FALSE(Read(&cache, "d", 100, OWNER_1));
+  ASSERT_EQ(1, handled.size());
+  EXPECT_EQ("a", handled[0]);
+  // b was read only once: not handled.
+  EXPECT_FALSE(Read(&cache, "e", 100, OWNER_1));
+  EXPECT_EQ(1, handled.size());
+  // Given back under memory pressure: not handled, also when reused.
+  EXPECT_TRUE(Read(&cache, "e", 100, OWNER_1));
+  cache.ReleaseMemory(cache.TotalBytes());
+  EXPECT_EQ(0, cache.TotalBytes());
+  EXPECT_EQ(1, handled.size());
+}
+
+// Blocks evicted from ReadBlocks() reach the handler with their block index.
+TEST(S3NativeFileCacheTest, EvictionHandlerGetsBlocks) {
+  S3NativeFileCache cache(300, 80);
+  vector<int64_t> handled;
+  cache.SetEvictionHandler([&handled] (const string& key, int64_t block,
+      const S3NativeFileCache::File& file) {
+    EXPECT_EQ("x", key);
+    handled.push_back(block);
+  });
+  auto fill = [] (int64_t offset, const S3NativeFileCache::Segments& segments,
+      int64_t* received) {
+    *received = 0;
+    for (const auto& segment : segments) {
+      memset(segment.first, 'x', segment.second);
+      *received += segment.second;
+    }
+    return Status::OK();
+  };
+  vector<uint8_t> buffer(1000);
+  int64_t bytes_read = 0;
+  S3NativeFileCache::BlockStats stats;
+  // Blocks 0-2, then block 0 again, then blocks 3-4 evict blocks 1 and 2 (read once)
+  // after block 0 is refreshed: none handled; then blocks 5-7 evict 0 (reused).
+  ASSERT_OK(cache.ReadBlocks("x", 1000, 100, 0, buffer.data(), 300, OWNER_1, fill,
+      &bytes_read, &stats));
+  ASSERT_OK(cache.ReadBlocks("x", 1000, 100, 0, buffer.data(), 100, OWNER_1, fill,
+      &bytes_read, &stats));
+  ASSERT_OK(cache.ReadBlocks("x", 1000, 100, 300, buffer.data(), 200, OWNER_1, fill,
+      &bytes_read, &stats));
+  EXPECT_TRUE(handled.empty());
+  ASSERT_OK(cache.ReadBlocks("x", 1000, 100, 500, buffer.data(), 300, OWNER_1, fill,
+      &bytes_read, &stats));
+  ASSERT_EQ(1, handled.size());
+  EXPECT_EQ(0, handled[0]);
+}
+
 // A fully reserved cache (the default of the constructor) ignores the headroom; the
 // process memory limit still frees it, also its reserved part.
 TEST(S3NativeFileCacheTest, ReservedCacheIgnoresHeadroom) {

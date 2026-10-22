@@ -111,14 +111,21 @@ void S3NativeFileCache::Fill(const std::string& file_key, int64_t block,
     const void* owner, const Status& status, std::shared_ptr<const File> file) {
   Shard& shard = ShardFor(file_key);
   std::shared_ptr<std::promise<LoadResult>> load_promise;
+  std::vector<Evicted> evicted;
   {
     std::lock_guard<std::mutex> l(shard.lock);
-    load_promise = FillLocked(&shard, file_key, block, owner, status, file);
+    load_promise = FillLocked(&shard, file_key, block, owner, status, file, &evicted);
   }
   UpdateGauges();
   int64_t filled = status.ok() && file != nullptr ? file->len : 0;
   load_promise->set_value(LoadResult(status, std::move(file)));
+  HandleEvicted(&evicted);
   CheckHeadroom(filled);
+}
+
+void S3NativeFileCache::HandleEvicted(std::vector<Evicted>* evicted) {
+  for (const Evicted& e : *evicted) eviction_handler_(e.file_key, e.block, *e.file);
+  evicted->clear();
 }
 
 S3NativeFileCache::FileEntries* S3NativeFileCache::FindFileLocked(
@@ -150,7 +157,8 @@ void S3NativeFileCache::AcquireLocked(Shard* shard, FileEntries* file, int64_t b
 
 std::shared_ptr<std::promise<S3NativeFileCache::LoadResult>>
 S3NativeFileCache::FillLocked(Shard* shard, const std::string& file_key, int64_t block,
-    const void* owner, const Status& status, const std::shared_ptr<const File>& file) {
+    const void* owner, const Status& status, const std::shared_ptr<const File>& file,
+    std::vector<Evicted>* evicted) {
   FileEntries* entries = FindFileLocked(shard, file_key, false);
   DCHECK(entries != nullptr);
   auto it = entries->blocks.find(block);
@@ -170,7 +178,7 @@ S3NativeFileCache::FillLocked(Shard* shard, const std::string& file_key, int64_t
     shard->probation_bytes += file->len;
     total_bytes_ += file->len;
     ++num_entries_;
-    EvictLocked(shard, LruItem{entries, block});
+    EvictLocked(shard, LruItem{entries, block}, evicted);
   } else {
     // Nothing to cache: the load failed (the next caller retries it), the entry is
     // larger than the shard or the process headroom is low (SkipFill()).
@@ -236,13 +244,14 @@ Status S3NativeFileCache::ReadBlocks(const std::string& file_key, int64_t file_l
     if (status.ok()) status = fetch(run_offset, segments, &received);
     results.clear();
     int64_t filled = 0;
+    std::vector<Evicted> evicted;
     {
       std::lock_guard<std::mutex> l(shard.lock);
       for (int k = i; k < j; ++k) {
         int64_t block = first_block + k;
         if (!status.ok()) {
           results.emplace_back(
-              FillLocked(&shard, file_key, block, owner, status, nullptr),
+              FillLocked(&shard, file_key, block, owner, status, nullptr, &evicted),
               LoadResult(status, nullptr));
           continue;
         }
@@ -254,12 +263,14 @@ Status S3NativeFileCache::ReadBlocks(const std::string& file_key, int64_t file_l
         refs[k].file = run_block;
         filled += run_block->len;
         results.emplace_back(
-            FillLocked(&shard, file_key, block, owner, Status::OK(), run_block),
+            FillLocked(&shard, file_key, block, owner, Status::OK(), run_block,
+                &evicted),
             LoadResult(Status::OK(), run_block));
       }
     }
     UpdateGauges();
     for (auto& result : results) result.first->set_value(std::move(result.second));
+    HandleEvicted(&evicted);
     CheckHeadroom(filled);
     stats->missed_blocks += j - i;
     i = j;
@@ -293,6 +304,7 @@ Status S3NativeFileCache::ReadBlocks(const std::string& file_key, int64_t file_l
 }
 
 void S3NativeFileCache::TouchLocked(Shard* shard, Entry* entry, const void* owner) {
+  entry->reused = true;
   if (entry->is_protected) {
     shard->protected_lru.splice(
         shard->protected_lru.begin(), shard->protected_lru, entry->lru_pos);
@@ -332,13 +344,17 @@ void S3NativeFileCache::DemoteLocked(Shard* shard) {
   }
 }
 
-int64_t S3NativeFileCache::RemoveLastLocked(Shard* shard, bool from_probation) {
+int64_t S3NativeFileCache::RemoveLastLocked(
+    Shard* shard, bool from_probation, std::vector<Evicted>* evicted) {
   std::list<LruItem>& segment = from_probation ? shard->probation : shard->protected_lru;
   DCHECK(!segment.empty());
   LruItem item = segment.back();
   auto it = item.file->blocks.find(item.block);
   DCHECK(it != item.file->blocks.end());
   int64_t len = it->second.file->len;
+  if (evicted != nullptr && it->second.reused && eviction_handler_) {
+    evicted->push_back(Evicted{*item.file->key, item.block, it->second.file});
+  }
   (from_probation ? shard->probation_bytes : shard->protected_bytes) -= len;
   segment.pop_back();
   EraseLocked(shard, item.file, item.block);
@@ -350,14 +366,15 @@ int64_t S3NativeFileCache::RemoveLastLocked(Shard* shard, bool from_probation) {
   return len;
 }
 
-void S3NativeFileCache::EvictLocked(Shard* shard, const LruItem& keep) {
+void S3NativeFileCache::EvictLocked(
+    Shard* shard, const LruItem& keep, std::vector<Evicted>* evicted) {
   while (shard->probation_bytes + shard->protected_bytes > shard->capacity) {
     bool from_probation = shard->probation.size() > 1
         || (!shard->probation.empty()
             && (shard->probation.back().file != keep.file
                 || shard->probation.back().block != keep.block));
     if ((from_probation ? shard->probation : shard->protected_lru).empty()) break;
-    RemoveLastLocked(shard, from_probation);
+    RemoveLastLocked(shard, from_probation, evicted);
   }
 }
 

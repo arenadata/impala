@@ -98,6 +98,18 @@ DEFINE_int64(s3_native_file_cache_min_headroom, 1024L * 1024 * 1024, "(Experimen
     "--s3_native_file_cache_reserved_capacity) back when the process may allocate less "
     "than this many more bytes before --mem_limit, so that queries get the memory before "
     "they run into the limit.");
+DEFINE_bool(s3_native_data_cache, true, "(Experimental) If the remote data cache on "
+    "local disk is enabled (--data_cache), the native S3 reader uses it as a second tier "
+    "of its file cache: blocks missing from the file cache are looked up on disk before "
+    "they are fetched from S3, and blocks are stored on disk (see "
+    "--s3_native_data_cache_write_on_fill).");
+DEFINE_bool(s3_native_data_cache_write_on_fill, true, "(Experimental) With "
+    "--s3_native_data_cache: store each block in the data cache on local disk right "
+    "after it is fetched from S3, like the S3A reader does (the data cache writes "
+    "asynchronously with --data_cache_num_async_write_threads and drops writes when "
+    "busy). false: store only blocks evicted from the file cache to make room that were "
+    "read again after they were loaded (fewer disk writes, fewer disk hits when the data "
+    "fits on disk).");
 DEFINE_int64(s3_native_file_cache_headroom_check_ms, 100, "(Experimental) Interval in "
     "milliseconds of the background check of --s3_native_file_cache_min_headroom; the "
     "check also runs when the cache fills. 0 turns the background check off.");
