@@ -31,11 +31,12 @@ class DataCache;
 /// (--data_cache) if 'data_cache' is not null, --s3_native_data_cache is set and the
 /// native S3 file cache reads blocks: a block missing from the file cache is looked up
 /// in the data cache before it is fetched from S3. Blocks are stored in the data cache
-/// right after they are fetched (--s3_native_data_cache_write_on_fill, the default), or
+/// right after they are fetched (--s3_native_data_cache_write_on_fetch, the default), or
 /// else when they are evicted from the file cache to make room if they were read again
 /// after they were loaded (blocks read only once never reach the disk; blocks given back
-/// under memory pressure are not stored). Called by ExecEnv::Init() after the DiskIoMgr
-/// is set up.
+/// under memory pressure are not stored). Reads that do not go through the file cache
+/// (no file cache, --s3_native_cache_capacity=0) use the data cache like the S3A
+/// reader (HdfsFileReader). Called by ExecEnv::Init() after the DiskIoMgr is set up.
 void EnableS3NativeDataCache(DataCache* data_cache);
 
 /// Experimental FileReader for s3a:// files that reads through the native aws-sdk-cpp
@@ -52,7 +53,8 @@ void EnableS3NativeDataCache(DataCache* data_cache);
 /// their first read. Open() makes no request: S3 has no file handles,
 /// and the file length is already known from the catalog. Blocks missing from the file
 /// cache are looked up in the remote data cache on local disk first, if it is enabled
-/// (EnableS3NativeDataCache()). Not supported: HDFS caching and file handle caching.
+/// (EnableS3NativeDataCache()); without the file cache, whole reads are looked up there.
+/// Not supported: HDFS caching and file handle caching.
 class S3NativeFileReader : public FileReader {
  public:
   S3NativeFileReader(ScanRange* scan_range) : FileReader(scan_range) {}
@@ -76,6 +78,13 @@ class S3NativeFileReader : public FileReader {
   /// before returning, since all of them write into 'buffer'. Sets 'bytes_read', less
   /// than 'len' only at the end of the object. Updates the native S3 metrics.
   Status GetRange(int64_t offset, uint8_t* buffer, int64_t len, int64_t* bytes_read);
+
+  /// Reads like the S3A reader with the remote data cache: looks the read up in the data
+  /// cache (key: file name, mtime, offset, as for S3A, so both readers share entries),
+  /// reads the rest with GetRange() and stores the whole read in the data cache. Used
+  /// for reads that do not go through S3NativeFileCache. Arguments as in GetRange().
+  Status ReadThroughDataCache(int64_t offset, uint8_t* buffer, int64_t len,
+      int64_t* bytes_read);
 
   /// Copies the requested bytes from the whole file in S3NativeFileCache, reading the
   /// file (of 'file_length' bytes, as known from the catalog) with GetRange() on a miss.
