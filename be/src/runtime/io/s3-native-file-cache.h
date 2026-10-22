@@ -59,22 +59,22 @@ namespace io {
 /// and an equal share of the capacity, so that concurrent reads of different files do
 /// not contend for one lock. Within a shard, eviction is a segmented LRU, so that one
 /// large scan does not flush the cache: a loaded entry enters the probation segment and
-/// moves to the protected segment (at most --s3_native_file_cache_protected_percent of
+/// moves to the protected segment (at most --s3_native_cache_protected_percent of
 /// the shard's capacity) only when a different reader (another scan of the same or of
 /// another query) reads it. Reads by the reader that loaded it only refresh it within
 /// probation. Entries are evicted from the end of probation first; when protected
 /// outgrows its share, its least recently used entries move back to probation.
 ///
 /// The memory is process memory within --mem_limit. ExecEnv preserves only the reserved
-/// part of the capacity (--s3_native_file_cache_reserved_capacity is subtracted from the
+/// part of the capacity (--s3_native_cache_reserved_capacity is subtracted from the
 /// memory admitted for queries, like for the codegen cache); the rest is elastic: it uses
 /// memory that queries leave free. ExecEnv shows the cache as "Native S3 File Cache"
 /// under the process MemTracker, calls ReleaseMemory() when the process is over its
 /// memory limit, and sets a headroom function: when the process may allocate less than
-/// --s3_native_file_cache_min_headroom more bytes, the cache gives the elastic part back
+/// --s3_native_cache_min_headroom more bytes, the cache gives the elastic part back
 /// (down to the reserved part) before queries run into the limit. The headroom is
 /// checked after new entries are filled and, every
-/// --s3_native_file_cache_headroom_check_ms, by a background thread, so that the cache
+/// --s3_native_cache_headroom_check_ms, by a background thread, so that the cache
 /// also makes room while queries grow and the cache does not fill (joins, aggregations
 /// after their scans). While the last check found the headroom below the margin, new
 /// entries above the reserved part are not cached (the data still goes to the reader),
@@ -363,10 +363,10 @@ class S3NativeFileCache {
   std::atomic<int64_t> num_entries_{0};
 };
 
-/// Creates the process-wide cache if --s3_native_file_cache_capacity and
+/// Creates the process-wide cache if --s3_native_cache_capacity and
 /// --s3_native_whole_file_max_size or --s3_native_block_size are positive, with the
 /// capacity limited to 'max_capacity' bytes. Returns the reserved part of the capacity
-/// (--s3_native_file_cache_reserved_capacity, at most the capacity), or 0 if the cache is
+/// (--s3_native_cache_reserved_capacity, at most the capacity), or 0 if the cache is
 /// disabled. Uses up to 16 shards, each at least 8 times the largest entry
 /// (max(--s3_native_whole_file_max_size, --s3_native_block_size)).
 /// Called by ExecEnv::Init(), which preserves the reserved part for the cache like for

@@ -36,9 +36,9 @@
 
 DECLARE_int64(s3_native_whole_file_max_size);
 DECLARE_int64(s3_native_block_size);
-DECLARE_int64(s3_native_file_cache_capacity);
-DECLARE_int64(s3_native_file_cache_reserved_capacity);
-DECLARE_int32(s3_native_file_cache_protected_percent);
+DECLARE_int64(s3_native_cache_capacity);
+DECLARE_int64(s3_native_cache_reserved_capacity);
+DECLARE_int32(s3_native_cache_protected_percent);
 
 namespace impala {
 namespace io {
@@ -321,8 +321,8 @@ void S3NativeFileCache::TouchLocked(Shard* shard, Entry* entry, const void* owne
   entry->is_protected = true;
   shard->probation_bytes -= entry->file->len;
   shard->protected_bytes += entry->file->len;
-  if (ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_PROMOTIONS != nullptr) {
-    ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_PROMOTIONS->Increment(1);
+  if (ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_PROMOTIONS != nullptr) {
+    ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_PROMOTIONS->Increment(1);
   }
   DemoteLocked(shard);
 }
@@ -360,8 +360,8 @@ int64_t S3NativeFileCache::RemoveLastLocked(
   EraseLocked(shard, item.file, item.block);
   total_bytes_ -= len;
   --num_entries_;
-  if (ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_EVICTIONS != nullptr) {
-    ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_EVICTIONS->Increment(1);
+  if (ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_EVICTIONS != nullptr) {
+    ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_EVICTIONS->Increment(1);
   }
   return len;
 }
@@ -386,8 +386,8 @@ void S3NativeFileCache::ReleaseMemory(int64_t bytes_to_free) {
 
 bool S3NativeFileCache::SkipFill(int64_t len) {
   if (!low_headroom_.load() || total_bytes_.load() + len <= reserved_) return false;
-  if (ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_SKIPPED_BYTES != nullptr) {
-    ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_SKIPPED_BYTES->Increment(len);
+  if (ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_SKIPPED_BYTES != nullptr) {
+    ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_SKIPPED_BYTES->Increment(len);
   }
   return true;
 }
@@ -477,10 +477,10 @@ int64_t S3NativeFileCache::Release(
   MallocExtension::instance()->ReleaseToSystem(freed);
 #endif
   const bool headroom = reason == ReleaseReason::kHeadroom;
-  if (ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_BYTES != nullptr) {
-    ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_BYTES->Increment(freed);
-    (headroom ? ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_HEADROOM_BYTES
-              : ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_LIMIT_BYTES)
+  if (ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_RELEASED_BYTES != nullptr) {
+    ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_RELEASED_BYTES->Increment(freed);
+    (headroom ? ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_RELEASED_HEADROOM_BYTES
+              : ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_RELEASED_LIMIT_BYTES)
         ->Increment(freed);
   }
   // Logged per reason, at most once per interval, with the bytes since the last line.
@@ -503,12 +503,12 @@ int64_t S3NativeFileCache::Release(
 }
 
 void S3NativeFileCache::UpdateGauges() {
-  if (ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_TOTAL_BYTES != nullptr) {
-    ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_TOTAL_BYTES->SetValue(
+  if (ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_TOTAL_BYTES != nullptr) {
+    ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_TOTAL_BYTES->SetValue(
         total_bytes_.load());
   }
-  if (ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_NUM_ENTRIES != nullptr) {
-    ImpaladMetrics::IO_MGR_S3_NATIVE_FILE_CACHE_NUM_ENTRIES->SetValue(
+  if (ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_NUM_ENTRIES != nullptr) {
+    ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_NUM_ENTRIES->SetValue(
         num_entries_.load());
   }
 }
@@ -516,16 +516,16 @@ void S3NativeFileCache::UpdateGauges() {
 int64_t InitS3NativeFileCache(int64_t max_capacity) {
   DCHECK(file_cache == nullptr);
   if ((FLAGS_s3_native_whole_file_max_size <= 0 && FLAGS_s3_native_block_size <= 0)
-      || FLAGS_s3_native_file_cache_capacity <= 0) {
+      || FLAGS_s3_native_cache_capacity <= 0) {
     LOG(INFO) << "Native S3 reader: file cache is disabled";
     return 0;
   }
-  int64_t capacity = FLAGS_s3_native_file_cache_capacity;
+  int64_t capacity = FLAGS_s3_native_cache_capacity;
   if (max_capacity >= 0 && capacity > max_capacity) {
     LOG(INFO) << "Native S3 reader: file cache capacity reduced from "
               << PrettyPrinter::PrintBytes(capacity) << " to "
               << PrettyPrinter::PrintBytes(max_capacity) << " (at most "
-              << "--s3_native_file_cache_max_mem_percent of the admit memory limit)";
+              << "--s3_native_cache_max_mem_percent of the admit memory limit)";
     capacity = max_capacity;
   }
   if (capacity < std::max(FLAGS_s3_native_whole_file_max_size,
@@ -537,9 +537,9 @@ int64_t InitS3NativeFileCache(int64_t max_capacity) {
     return 0;
   }
   int64_t reserved = std::min(
-      std::max<int64_t>(FLAGS_s3_native_file_cache_reserved_capacity, 0), capacity);
+      std::max<int64_t>(FLAGS_s3_native_cache_reserved_capacity, 0), capacity);
   int protected_percent =
-      std::min(std::max(FLAGS_s3_native_file_cache_protected_percent, 0), 100);
+      std::min(std::max(FLAGS_s3_native_cache_protected_percent, 0), 100);
   // Each shard holds at least 8 of the largest entries.
   int64_t largest_entry =
       std::max(FLAGS_s3_native_whole_file_max_size, FLAGS_s3_native_block_size);

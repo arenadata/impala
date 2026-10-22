@@ -832,84 +832,84 @@
     "key": "impala-server.io-mgr.s3-native-parallel-read-count"
   },
   {
-    "description": "Total number of reads served by the native S3 file cache.",
+    "description": "Total number of reads of small files served whole by the native S3 cache.",
     "contexts": [
       "IMPALAD"
     ],
-    "label": "Impala Server Io Mgr Native S3 File Cache Hit Count",
+    "label": "Impala Server Io Mgr Native S3 Whole File Cache Hit Count",
     "units": "UNIT",
     "kind": "COUNTER",
-    "key": "impala-server.io-mgr.s3-native-file-cache-hit-count"
+    "key": "impala-server.io-mgr.s3-native-whole-file-cache-hit-count"
   },
   {
-    "description": "Total number of bytes served by the native S3 file cache.",
+    "description": "Total number of bytes of small files served whole by the native S3 cache.",
     "contexts": [
       "IMPALAD"
     ],
-    "label": "Impala Server Io Mgr Native S3 File Cache Hit Bytes",
+    "label": "Impala Server Io Mgr Native S3 Whole File Cache Hit Bytes",
     "units": "BYTES",
     "kind": "COUNTER",
-    "key": "impala-server.io-mgr.s3-native-file-cache-hit-bytes"
+    "key": "impala-server.io-mgr.s3-native-whole-file-cache-hit-bytes"
   },
   {
-    "description": "Total number of small files read whole into the native S3 file cache.",
+    "description": "Total number of small files read whole into the native S3 cache.",
     "contexts": [
       "IMPALAD"
     ],
-    "label": "Impala Server Io Mgr Native S3 File Cache Miss Count",
+    "label": "Impala Server Io Mgr Native S3 Whole File Cache Miss Count",
     "units": "UNIT",
     "kind": "COUNTER",
-    "key": "impala-server.io-mgr.s3-native-file-cache-miss-count"
+    "key": "impala-server.io-mgr.s3-native-whole-file-cache-miss-count"
   },
   {
     "description": "Total number of files evicted from the native S3 file cache.",
     "contexts": [
       "IMPALAD"
     ],
-    "label": "Impala Server Io Mgr Native S3 File Cache Evictions",
+    "label": "Impala Server Io Mgr Native S3 Cache Evictions",
     "units": "UNIT",
     "kind": "COUNTER",
-    "key": "impala-server.io-mgr.s3-native-file-cache-evictions"
+    "key": "impala-server.io-mgr.s3-native-cache-evictions"
   },
   {
     "description": "Total number of bytes of the native S3 file cache given back because the process was over or close to its memory limit.",
     "contexts": [
       "IMPALAD"
     ],
-    "label": "Impala Server Io Mgr Native S3 File Cache Released Bytes",
+    "label": "Impala Server Io Mgr Native S3 Cache Released Bytes",
     "units": "BYTES",
     "kind": "COUNTER",
-    "key": "impala-server.io-mgr.s3-native-file-cache-released-bytes"
+    "key": "impala-server.io-mgr.s3-native-cache-released-bytes"
   },
   {
-    "description": "Bytes of the native S3 file cache given back because the process headroom was below --s3_native_file_cache_min_headroom.",
+    "description": "Bytes of the native S3 file cache given back because the process headroom was below --s3_native_cache_min_headroom.",
     "contexts": [
       "IMPALAD"
     ],
-    "label": "Impala Server Io Mgr Native S3 File Cache Released Headroom Bytes",
+    "label": "Impala Server Io Mgr Native S3 Cache Released Headroom Bytes",
     "units": "BYTES",
     "kind": "COUNTER",
-    "key": "impala-server.io-mgr.s3-native-file-cache-released-headroom-bytes"
+    "key": "impala-server.io-mgr.s3-native-cache-released-headroom-bytes"
   },
   {
     "description": "Bytes of the native S3 file cache given back because the process was over its memory limit.",
     "contexts": [
       "IMPALAD"
     ],
-    "label": "Impala Server Io Mgr Native S3 File Cache Released Limit Bytes",
+    "label": "Impala Server Io Mgr Native S3 Cache Released Limit Bytes",
     "units": "BYTES",
     "kind": "COUNTER",
-    "key": "impala-server.io-mgr.s3-native-file-cache-released-limit-bytes"
+    "key": "impala-server.io-mgr.s3-native-cache-released-limit-bytes"
   },
   {
     "description": "Bytes read through the native S3 file cache but not cached because the process headroom was low.",
     "contexts": [
       "IMPALAD"
     ],
-    "label": "Impala Server Io Mgr Native S3 File Cache Skipped Bytes",
+    "label": "Impala Server Io Mgr Native S3 Cache Skipped Bytes",
     "units": "BYTES",
     "kind": "COUNTER",
-    "key": "impala-server.io-mgr.s3-native-file-cache-skipped-bytes"
+    "key": "impala-server.io-mgr.s3-native-cache-skipped-bytes"
   },
   {
     "description": "Bytes of blocks the native S3 reader handed to the remote data cache on local disk for writing (accepted by it; with asynchronous writes some can still be dropped later). Written and dropped bytes: impala-server.io-mgr.remote-data-cache-total-bytes, -num-writes, -dropped-bytes.",
@@ -926,30 +926,30 @@
     "contexts": [
       "IMPALAD"
     ],
-    "label": "Impala Server Io Mgr Native S3 File Cache Promotions",
+    "label": "Impala Server Io Mgr Native S3 Cache Promotions",
     "units": "UNIT",
     "kind": "COUNTER",
-    "key": "impala-server.io-mgr.s3-native-file-cache-promotions"
+    "key": "impala-server.io-mgr.s3-native-cache-promotions"
   },
   {
     "description": "Current byte size of the native S3 file cache.",
     "contexts": [
       "IMPALAD"
     ],
-    "label": "Impala Server Io Mgr Native S3 File Cache Total Bytes",
+    "label": "Impala Server Io Mgr Native S3 Cache Total Bytes",
     "units": "BYTES",
     "kind": "GAUGE",
-    "key": "impala-server.io-mgr.s3-native-file-cache-total-bytes"
+    "key": "impala-server.io-mgr.s3-native-cache-total-bytes"
   },
   {
     "description": "Current number of files in the native S3 file cache.",
     "contexts": [
       "IMPALAD"
     ],
-    "label": "Impala Server Io Mgr Native S3 File Cache Num Entries",
+    "label": "Impala Server Io Mgr Native S3 Cache Num Entries",
     "units": "UNIT",
     "kind": "GAUGE",
-    "key": "impala-server.io-mgr.s3-native-file-cache-num-entries"
+    "key": "impala-server.io-mgr.s3-native-cache-num-entries"
   },
   {
     "description": "Total number of blocks of large files served by the native S3 file cache.",
