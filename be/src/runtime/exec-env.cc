@@ -41,6 +41,7 @@
 #include "runtime/io/disk-io-mgr.h"
 #include "runtime/io/s3-native-client.h"
 #include "runtime/io/s3-native-file-cache.h"
+#include "runtime/io/s3-native-file-reader.h"
 #include "runtime/krpc-data-stream-mgr.h"
 #include "runtime/lib-cache.h"
 #include "runtime/mem-tracker.h"
@@ -520,6 +521,10 @@ Status ExecEnv::Init() {
   mem_tracker_->RegisterMetrics(metrics_.get(), "mem-tracker.process");
 
   RETURN_IF_ERROR(disk_io_mgr_->Init());
+  // The remote data cache (--data_cache) as a second tier of the native S3 file cache.
+  if (S3NativeClientEnabled()) {
+    io::EnableS3NativeDataCache(disk_io_mgr_->remote_data_cache());
+  }
 
   // Start services in order to ensure that dependencies between them are met
   if (enable_webserver_) {

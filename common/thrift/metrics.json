@@ -912,6 +912,16 @@
     "key": "impala-server.io-mgr.s3-native-file-cache-skipped-bytes"
   },
   {
+    "description": "Bytes of blocks the native S3 reader handed to the remote data cache on local disk for writing (accepted by it; with asynchronous writes some can still be dropped later). Written and dropped bytes: impala-server.io-mgr.remote-data-cache-total-bytes, -num-writes, -dropped-bytes.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Data Cache Offered Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-data-cache-offered-bytes"
+  },
+  {
     "description": "Total number of files of the native S3 file cache moved to its protected segment.",
     "contexts": [
       "IMPALAD"

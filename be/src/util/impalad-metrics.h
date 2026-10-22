@@ -121,6 +121,7 @@ class ImpaladMetricKeys {
   static const char* IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_HEADROOM_BYTES;
   static const char* IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_LIMIT_BYTES;
   static const char* IO_MGR_S3_NATIVE_FILE_CACHE_SKIPPED_BYTES;
+  static const char* IO_MGR_S3_NATIVE_DATA_CACHE_OFFERED_BYTES;
 
   /// Total number of files of the native S3 file cache moved to its protected segment.
   static const char* IO_MGR_S3_NATIVE_FILE_CACHE_PROMOTIONS;
@@ -425,6 +426,7 @@ class ImpaladMetrics {
   static IntCounter* IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_HEADROOM_BYTES;
   static IntCounter* IO_MGR_S3_NATIVE_FILE_CACHE_RELEASED_LIMIT_BYTES;
   static IntCounter* IO_MGR_S3_NATIVE_FILE_CACHE_SKIPPED_BYTES;
+  static IntCounter* IO_MGR_S3_NATIVE_DATA_CACHE_OFFERED_BYTES;
   static IntCounter* IO_MGR_S3_NATIVE_FILE_CACHE_PROMOTIONS;
   static IntGauge* IO_MGR_S3_NATIVE_FILE_CACHE_TOTAL_BYTES;
   static IntGauge* IO_MGR_S3_NATIVE_FILE_CACHE_NUM_ENTRIES;

@@ -129,6 +129,13 @@ class S3NativeFileCache {
     bool reserved = false;
   };
 
+  /// Called for an entry evicted to make room in its shard (not for entries given back
+  /// under memory pressure) that was read again after it was loaded, outside the shard
+  /// locks: e.g. to keep the entry in a slower cache tier (the remote data cache on
+  /// local disk). Entries read only once never reach it.
+  typedef std::function<void(const std::string& file_key, int64_t block,
+      const File& file)> EvictionHandler;
+
   /// Block reads of ReadBlocks(), for metrics.
   struct BlockStats {
     int64_t hit_blocks = 0;
@@ -155,6 +162,12 @@ class S3NativeFileCache {
   /// cache is used.
   void SetHeadroomFunction(HeadroomFn fn, int64_t min_headroom = kDefaultMinHeadroom,
       int64_t check_interval_ms = 0, AfterReleaseFn after_release = nullptr);
+
+  /// Sets the handler of evicted entries that were read again (see EvictionHandler).
+  /// Must be called before the cache is used.
+  void SetEvictionHandler(EvictionHandler handler) {
+    eviction_handler_ = std::move(handler);
+  }
 
   /// Returns in '*file' the whole file stored under 'file_key'. On a miss allocates a
   /// buffer of 'length' bytes and calls 'loader' to fill it; concurrent calls for the
@@ -219,6 +232,8 @@ class S3NativeFileCache {
     const void* owner = nullptr;
     /// Whether the entry is in 'protected_lru' (otherwise in 'probation').
     bool is_protected = false;
+    /// Whether the entry was read again after it was loaded (by any reader).
+    bool reused = false;
     /// Position in 'probation' or 'protected_lru'. Valid only if 'file' is set.
     std::list<LruItem>::iterator lru_pos;
   };
@@ -253,11 +268,22 @@ class S3NativeFileCache {
   void AcquireLocked(Shard* shard, FileEntries* file, int64_t block, const void* owner,
       Ref* ref);
 
+  /// An entry evicted to make room, kept until the eviction handler ran.
+  struct Evicted {
+    std::string file_key;
+    int64_t block;
+    std::shared_ptr<const File> file;
+  };
+
   /// Fill() with the shard lock held. Returns the promise to set after the lock is
-  /// released.
+  /// released. Evicted entries for the eviction handler are added to 'evicted'.
   std::shared_ptr<std::promise<LoadResult>> FillLocked(Shard* shard,
       const std::string& file_key, int64_t block, const void* owner,
-      const Status& status, const std::shared_ptr<const File>& file);
+      const Status& status, const std::shared_ptr<const File>& file,
+      std::vector<Evicted>* evicted);
+
+  /// Calls the eviction handler for 'evicted' (without locks held) and clears it.
+  void HandleEvicted(std::vector<Evicted>* evicted);
 
   /// Removes block 'block' of 'file' (and 'file' if it has no blocks left).
   void EraseLocked(Shard* shard, FileEntries* file, int64_t block);
@@ -272,12 +298,15 @@ class S3NativeFileCache {
 
   /// Removes entries until the shard fits into its capacity: from the end of probation
   /// first, from the end of protected if probation holds only 'keep'. Entries being
-  /// loaded are not in the lists and are never evicted.
-  void EvictLocked(Shard* shard, const LruItem& keep);
+  /// loaded are not in the lists and are never evicted. Reused entries are added to
+  /// 'evicted' if there is an eviction handler.
+  void EvictLocked(Shard* shard, const LruItem& keep, std::vector<Evicted>* evicted);
 
   /// Removes the least recently used entry of the shard's probation (or protected if
-  /// 'from_probation' is false) segment and returns its size.
-  int64_t RemoveLastLocked(Shard* shard, bool from_probation);
+  /// 'from_probation' is false) segment and returns its size. Adds it to 'evicted' if
+  /// that is not null, it was reused and there is an eviction handler.
+  int64_t RemoveLastLocked(Shard* shard, bool from_probation,
+      std::vector<Evicted>* evicted = nullptr);
 
   /// Updates the size and entry count gauges.
   void UpdateGauges();
@@ -315,6 +344,7 @@ class S3NativeFileCache {
   const int64_t headroom_check_interval_;
   HeadroomFn headroom_fn_;
   AfterReleaseFn after_release_fn_;
+  EvictionHandler eviction_handler_;
   int64_t min_headroom_ = kDefaultMinHeadroom;
   /// Bytes filled since the last headroom check.
   std::atomic<int64_t> filled_since_check_{0};
