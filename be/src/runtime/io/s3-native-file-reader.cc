@@ -35,6 +35,7 @@
 #endif
 
 #include "gutil/strings/substitute.h"
+#include "runtime/io/data-cache.h"
 #include "runtime/io/disk-io-mgr-internal.h"
 #include "runtime/io/request-context.h"
 #include "runtime/io/request-ranges.h"
@@ -51,11 +52,51 @@ DECLARE_int64(s3_native_parallel_read_min_size);
 DECLARE_int64(s3_native_parallel_read_part_size);
 DECLARE_int64(s3_native_whole_file_max_size);
 DECLARE_int64(s3_native_block_size);
+DECLARE_bool(s3_native_data_cache);
+DECLARE_bool(s3_native_data_cache_write_on_fill);
 
 using strings::Substitute;
 
 namespace impala {
 namespace io {
+
+namespace {
+
+// The remote data cache used for blocks of the native S3 file cache, or null. Set once
+// by EnableS3NativeDataCache() before any read.
+DataCache* native_data_cache = nullptr;
+
+} // anonymous namespace
+
+void EnableS3NativeDataCache(DataCache* data_cache) {
+  S3NativeFileCache* file_cache = GetS3NativeFileCache();
+  if (data_cache == nullptr || file_cache == nullptr || !FLAGS_s3_native_data_cache
+      || FLAGS_s3_native_block_size <= 0) {
+    return;
+  }
+  native_data_cache = data_cache;
+  if (FLAGS_s3_native_data_cache_write_on_fill) {
+    // FetchSegments() stores each block fetched from S3.
+    LOG(INFO) << "Native S3 reader: blocks fetched from S3 are also stored in the remote "
+              << "data cache on local disk";
+    return;
+  }
+  const int64_t block_size = FLAGS_s3_native_block_size;
+  // Keys: the file cache key (bucket/key@mtime, so a rewritten file is never served) and
+  // the block offset; mtime 0. Insertion is opportunistic: the data cache drops it when
+  // its writers are busy (--data_cache_write_concurrency, asynchronous writes with
+  // --data_cache_num_async_write_threads).
+  file_cache->SetEvictionHandler([data_cache, block_size] (const std::string& file_key,
+      int64_t block, const S3NativeFileCache::File& file) {
+    if (block == S3NativeFileCache::kWholeFile || file.len <= 0) return;
+    if (data_cache->Store(file_key, 0, block * block_size, file.data.get(), file.len)
+        && ImpaladMetrics::IO_MGR_S3_NATIVE_DATA_CACHE_OFFERED_BYTES != nullptr) {
+      ImpaladMetrics::IO_MGR_S3_NATIVE_DATA_CACHE_OFFERED_BYTES->Increment(file.len);
+    }
+  });
+  LOG(INFO) << "Native S3 reader: blocks of the file cache that were read again are "
+            << "kept in the remote data cache on local disk after their eviction";
+}
 
 #ifdef IMPALA_HAVE_AWS_SDK_CPP
 namespace {
@@ -262,6 +303,94 @@ Status S3NativeFileReader::GetSegments(int64_t offset,
 #endif
 }
 
+Status S3NativeFileReader::FetchSegments(const string& file_key, int64_t offset,
+    const S3NativeFileCache::Segments& segments, int64_t* bytes_read) {
+  DataCache* data_cache = native_data_cache;
+  if (data_cache == nullptr || !scan_range_->UseDataCache()) {
+    return GetSegments(offset, segments, bytes_read);
+  }
+  *bytes_read = 0;
+  const size_t n = segments.size();
+  vector<bool> hit(n, false);
+  int64_t hit_blocks = 0, hit_bytes = 0, missed_blocks = 0, missed_bytes = 0;
+  int64_t segment_offset = offset;
+  for (size_t i = 0; i < n; ++i) {
+    // A shorter entry (end of the object) counts as a miss: the block is fetched again.
+    int64_t len = segments[i].second;
+    hit[i] = data_cache->Lookup(file_key, 0, segment_offset, len, segments[i].first)
+        == len;
+    if (hit[i]) {
+      ++hit_blocks;
+      hit_bytes += len;
+    }
+    segment_offset += len;
+  }
+  // Each run of the other blocks with one GET; a short GET is the end of the object.
+  int64_t pos = offset;
+  for (size_t i = 0; i < n;) {
+    if (hit[i]) {
+      *bytes_read += segments[i].second;
+      pos += segments[i].second;
+      ++i;
+      continue;
+    }
+    S3NativeFileCache::Segments run;
+    int64_t run_len = 0;
+    size_t j = i;
+    for (; j < n && !hit[j]; ++j) {
+      run.push_back(segments[j]);
+      run_len += segments[j].second;
+    }
+    int64_t received = 0;
+    RETURN_IF_ERROR(GetSegments(pos, run, &received));
+    *bytes_read += received;
+    missed_blocks += j - i;
+    missed_bytes += run_len;
+    if (FLAGS_s3_native_data_cache_write_on_fill) {
+      // Opportunistic, like the S3A reader: the data cache copies the data and drops the
+      // write when its writers are busy. A short last block (end of the object) is stored
+      // with the bytes received; FetchSegments() treats a shorter entry as a miss.
+      int64_t block_pos = pos;
+      int64_t left = received;
+      for (const auto& segment : run) {
+        int64_t len = std::min(segment.second, left);
+        if (len <= 0) break;
+        if (data_cache->Store(file_key, 0, block_pos, segment.first, len)
+            && ImpaladMetrics::IO_MGR_S3_NATIVE_DATA_CACHE_OFFERED_BYTES != nullptr) {
+          ImpaladMetrics::IO_MGR_S3_NATIVE_DATA_CACHE_OFFERED_BYTES->Increment(len);
+        }
+        block_pos += segment.second;
+        left -= len;
+      }
+    }
+    if (received < run_len) break;
+    pos += run_len;
+    i = j;
+  }
+  RequestContext* reader = scan_range_->reader_;
+  if (hit_bytes > 0) {
+    if (reader->data_cache_hit_bytes_counter_ != nullptr) {
+      reader->data_cache_hit_bytes_counter_->Add(hit_bytes);
+      reader->data_cache_hit_counter_->Add(hit_blocks);
+    }
+    if (ImpaladMetrics::IO_MGR_REMOTE_DATA_CACHE_HIT_BYTES != nullptr) {
+      ImpaladMetrics::IO_MGR_REMOTE_DATA_CACHE_HIT_BYTES->Increment(hit_bytes);
+      ImpaladMetrics::IO_MGR_REMOTE_DATA_CACHE_HIT_COUNT->Increment(hit_blocks);
+    }
+  }
+  if (missed_bytes > 0) {
+    if (reader->data_cache_miss_bytes_counter_ != nullptr) {
+      reader->data_cache_miss_bytes_counter_->Add(missed_bytes);
+      reader->data_cache_miss_counter_->Add(missed_blocks);
+    }
+    if (ImpaladMetrics::IO_MGR_REMOTE_DATA_CACHE_MISS_BYTES != nullptr) {
+      ImpaladMetrics::IO_MGR_REMOTE_DATA_CACHE_MISS_BYTES->Increment(missed_bytes);
+      ImpaladMetrics::IO_MGR_REMOTE_DATA_CACHE_MISS_COUNT->Increment(missed_blocks);
+    }
+  }
+  return Status::OK();
+}
+
 Status S3NativeFileReader::ReadFromCachedFile(int64_t file_offset, uint8_t* buffer,
     int64_t bytes_to_read, int64_t file_length, int64_t* bytes_read) {
   *bytes_read = 0;
@@ -299,9 +428,9 @@ Status S3NativeFileReader::ReadFromCachedBlocks(int64_t file_offset, uint8_t* bu
   RETURN_IF_ERROR(GetS3NativeFileCache()->ReadBlocks(file_key, file_length,
       FLAGS_s3_native_block_size, file_offset, buffer, bytes_to_read,
       scan_range_->reader_,
-      [this](int64_t offset, const S3NativeFileCache::Segments& segments,
+      [this, &file_key](int64_t offset, const S3NativeFileCache::Segments& segments,
           int64_t* received) {
-        return GetSegments(offset, segments, received);
+        return FetchSegments(file_key, offset, segments, received);
       }, bytes_read, &stats));
   if (ImpaladMetrics::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_COUNT != nullptr) {
     ImpaladMetrics::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_COUNT->Increment(stats.hit_blocks);
