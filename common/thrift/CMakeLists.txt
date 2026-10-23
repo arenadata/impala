@@ -160,8 +160,11 @@ file(MAKE_DIRECTORY ${PYTHON_OUTPUT_DIR})
 file(MAKE_DIRECTORY ${HIVE_THRIFT_SOURCE_DIR})
 
 # Args passed to thrift for Java gen
-set(JAVA_FE_ARGS ${THRIFT_JAVA_INCLUDE_DIR_OPTION} --gen java -o ${FE_OUTPUT_DIR})
-set(JAVA_EXT_DS_ARGS ${THRIFT_JAVA_INCLUDE_DIR_OPTION} --gen java -o ${EXT_DS_OUTPUT_DIR})
+# libthrift 0.24+ no longer brings javax.annotation-api for @javax.annotation.Generated.
+set(JAVA_GEN_OPTION --gen java:generated_annotations=suppress)
+set(JAVA_FE_ARGS ${THRIFT_JAVA_INCLUDE_DIR_OPTION} ${JAVA_GEN_OPTION} -o ${FE_OUTPUT_DIR})
+set(JAVA_EXT_DS_ARGS ${THRIFT_JAVA_INCLUDE_DIR_OPTION} ${JAVA_GEN_OPTION}
+    -o ${EXT_DS_OUTPUT_DIR})
 set(PYTHON_ARGS ${THRIFT_PY_INCLUDE_DIR_OPTION} -r --gen py:no_utf8strings -o
                 ${PYTHON_OUTPUT_DIR})
 
