@@ -141,6 +141,18 @@ class ImpaladMetricKeys {
   /// Total number of blocks of large files fetched into the native S3 file cache.
   static const char* IO_MGR_S3_NATIVE_BLOCK_CACHE_MISS_COUNT;
 
+  /// Total wall time in microseconds of the native S3 reader's GET requests.
+  static const char* IO_MGR_S3_NATIVE_GET_TIME_US;
+
+  /// Total number of native S3 reads of the end of a file (the footer).
+  static const char* IO_MGR_S3_NATIVE_FOOTER_READ_COUNT;
+
+  /// Total number of native S3 footer reads that sent a GET request.
+  static const char* IO_MGR_S3_NATIVE_FOOTER_READ_MISS_COUNT;
+
+  /// Total time in microseconds of native S3 footer reads.
+  static const char* IO_MGR_S3_NATIVE_FOOTER_READ_TIME_US;
+
 
   /// Current number of entries in the remote data cache.
   static const char* IO_MGR_REMOTE_DATA_CACHE_NUM_ENTRIES;
@@ -433,6 +445,10 @@ class ImpaladMetrics {
   static IntCounter* IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_COUNT;
   static IntCounter* IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_BYTES;
   static IntCounter* IO_MGR_S3_NATIVE_BLOCK_CACHE_MISS_COUNT;
+  static IntCounter* IO_MGR_S3_NATIVE_GET_TIME_US;
+  static IntCounter* IO_MGR_S3_NATIVE_FOOTER_READ_COUNT;
+  static IntCounter* IO_MGR_S3_NATIVE_FOOTER_READ_MISS_COUNT;
+  static IntCounter* IO_MGR_S3_NATIVE_FOOTER_READ_TIME_US;
   static IntGauge* NUM_FILES_OPEN_FOR_INSERT;
   static IntGauge* NUM_QUERIES_REGISTERED;
   static IntGauge* RESULTSET_CACHE_TOTAL_NUM_ROWS;

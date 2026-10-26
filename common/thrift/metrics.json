@@ -982,6 +982,46 @@
     "key": "impala-server.io-mgr.s3-native-block-cache-miss-count"
   },
   {
+    "description": "Total wall time of the GET requests of the native S3 reader. A read split into parallel parts counts once.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 GET Time",
+    "units": "TIME_US",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-get-time-us"
+  },
+  {
+    "description": "Total number of native S3 reads of the end of a file, which scanners read for the file footer.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Footer Read Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-footer-read-count"
+  },
+  {
+    "description": "Total number of native S3 footer reads that sent a GET request (not served from the native S3 file cache).",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Footer Read Miss Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-footer-read-miss-count"
+  },
+  {
+    "description": "Total time of native S3 footer reads, including reads served from the cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Footer Read Time",
+    "units": "TIME_US",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-footer-read-time-us"
+  },
+  {
     "description": "Current number of entries in the remote data cache.",
     "contexts": [
       "IMPALAD"
