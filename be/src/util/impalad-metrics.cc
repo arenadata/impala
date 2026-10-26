@@ -109,6 +109,14 @@ const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_BYTES =
     "impala-server.io-mgr.s3-native-block-cache-hit-bytes";
 const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_BLOCK_CACHE_MISS_COUNT =
     "impala-server.io-mgr.s3-native-block-cache-miss-count";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_GET_TIME_US =
+    "impala-server.io-mgr.s3-native-get-time-us";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FOOTER_READ_COUNT =
+    "impala-server.io-mgr.s3-native-footer-read-count";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FOOTER_READ_MISS_COUNT =
+    "impala-server.io-mgr.s3-native-footer-read-miss-count";
+const char* ImpaladMetricKeys::IO_MGR_S3_NATIVE_FOOTER_READ_TIME_US =
+    "impala-server.io-mgr.s3-native-footer-read-time-us";
 const char* ImpaladMetricKeys::IO_MGR_REMOTE_DATA_CACHE_NUM_ENTRIES =
     "impala-server.io-mgr.remote-data-cache-num-entries";
 const char* ImpaladMetricKeys::IO_MGR_REMOTE_DATA_CACHE_NUM_WRITES =
@@ -305,6 +313,10 @@ IntGauge* ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_NUM_ENTRIES = nullptr;
 IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_COUNT = nullptr;
 IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_BYTES = nullptr;
 IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_BLOCK_CACHE_MISS_COUNT = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_GET_TIME_US = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FOOTER_READ_COUNT = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FOOTER_READ_MISS_COUNT = nullptr;
+IntCounter* ImpaladMetrics::IO_MGR_S3_NATIVE_FOOTER_READ_TIME_US = nullptr;
 IntGauge* ImpaladMetrics::NUM_FILES_OPEN_FOR_INSERT = nullptr;
 IntGauge* ImpaladMetrics::NUM_QUERIES_REGISTERED = nullptr;
 IntGauge* ImpaladMetrics::RESULTSET_CACHE_TOTAL_NUM_ROWS = nullptr;
@@ -520,6 +532,14 @@ void ImpaladMetrics::CreateMetrics(MetricGroup* m) {
       ImpaladMetricKeys::IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_BYTES, 0);
   IO_MGR_S3_NATIVE_BLOCK_CACHE_MISS_COUNT = IO_MGR_METRICS->AddCounter(
       ImpaladMetricKeys::IO_MGR_S3_NATIVE_BLOCK_CACHE_MISS_COUNT, 0);
+  IO_MGR_S3_NATIVE_GET_TIME_US = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_GET_TIME_US, 0);
+  IO_MGR_S3_NATIVE_FOOTER_READ_COUNT = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_FOOTER_READ_COUNT, 0);
+  IO_MGR_S3_NATIVE_FOOTER_READ_MISS_COUNT = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_FOOTER_READ_MISS_COUNT, 0);
+  IO_MGR_S3_NATIVE_FOOTER_READ_TIME_US = IO_MGR_METRICS->AddCounter(
+      ImpaladMetricKeys::IO_MGR_S3_NATIVE_FOOTER_READ_TIME_US, 0);
   IO_MGR_REMOTE_DATA_CACHE_NUM_WRITES = IO_MGR_METRICS->AddCounter(
       ImpaladMetricKeys::IO_MGR_REMOTE_DATA_CACHE_NUM_WRITES, 0);
   IO_MGR_REMOTE_DATA_CACHE_DROPPED_BYTES = IO_MGR_METRICS->AddCounter(

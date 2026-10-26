@@ -49,8 +49,8 @@ void EnableS3NativeDataCache(DataCache* data_cache);
 /// parallel (the first part by the I/O thread, the others on the client's executor), each
 /// into its own section of the buffer. With S3NativeFileCache (s3-native-file-cache.h),
 /// reads go through the cache in blocks of --s3_native_block_size bytes; files of at
-/// most --s3_native_whole_file_max_size bytes (off by default) are instead read whole on
-/// their first read. Open() makes no request: S3 has no file handles,
+/// most --s3_native_whole_file_max_size bytes (2 MiB by default) are instead read whole
+/// on their first read. Open() makes no request: S3 has no file handles,
 /// and the file length is already known from the catalog. Blocks missing from the file
 /// cache are looked up in the remote data cache on local disk first, if it is enabled
 /// (EnableS3NativeDataCache()); without the file cache, whole reads are looked up there.
@@ -87,7 +87,8 @@ class S3NativeFileReader : public FileReader {
       int64_t* bytes_read);
 
   /// Copies the requested bytes from the whole file in S3NativeFileCache, reading the
-  /// file (of 'file_length' bytes, as known from the catalog) with GetRange() on a miss.
+  /// file (of 'file_length' bytes, as known from the catalog) on a miss: through the
+  /// remote data cache (ReadThroughDataCache()) if it is enabled, otherwise GetRange().
   /// Sets 'bytes_read', less than 'bytes_to_read' only at the end of the file.
   Status ReadFromCachedFile(int64_t file_offset, uint8_t* buffer, int64_t bytes_to_read,
       int64_t file_length, int64_t* bytes_read);
@@ -114,6 +115,10 @@ class S3NativeFileReader : public FileReader {
 
   std::string bucket_;
   std::string key_;
+
+  /// Number of GET requests this reader has sent (GetRange(), GetSegments()). Tells
+  /// ReadFromPos() whether a read was served from the cache. Protected by 'lock_'.
+  int64_t gets_sent_ = 0;
 };
 
 } // namespace io

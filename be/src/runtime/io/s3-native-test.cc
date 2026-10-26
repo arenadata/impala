@@ -134,6 +134,31 @@ TEST(S3NativeTest, ReadPartSize) {
   EXPECT_EQ(8 * MiB, S3ReadPartSize(8 * MiB, 2 * MiB, 0));
 }
 
+TEST(S3NativeTest, ReadsWholeFile) {
+  const int64_t MiB = 1024 * 1024;
+  EXPECT_TRUE(S3ReadsWholeFile(1, 2 * MiB));
+  EXPECT_TRUE(S3ReadsWholeFile(2 * MiB, 2 * MiB));
+  EXPECT_FALSE(S3ReadsWholeFile(2 * MiB + 1, 2 * MiB));
+  // Unknown length, off.
+  EXPECT_FALSE(S3ReadsWholeFile(0, 2 * MiB));
+  EXPECT_FALSE(S3ReadsWholeFile(100, 0));
+}
+
+TEST(S3NativeTest, TailRead) {
+  // The footer range of a Parquet file: the last 100 KB.
+  EXPECT_TRUE(IsS3TailRead(900 * 1024, 100 * 1024, 1000 * 1024));
+  // A file shorter than the footer range: read from the start.
+  EXPECT_TRUE(IsS3TailRead(0, 500, 500));
+  // Past the end (the read is cut at the end of the object).
+  EXPECT_TRUE(IsS3TailRead(990, 100, 1000));
+  // Column chunks end before the footer.
+  EXPECT_FALSE(IsS3TailRead(0, 999, 1000));
+  EXPECT_FALSE(IsS3TailRead(100, 100, 1000));
+  // Empty read, unknown length.
+  EXPECT_FALSE(IsS3TailRead(1000, 0, 1000));
+  EXPECT_FALSE(IsS3TailRead(0, 100, 0));
+}
+
 TEST(S3NativeTest, PartsBytesRead) {
   // 2.5 parts of 100 bytes: all received.
   EXPECT_EQ(250, S3PartsBytesRead(250, 100, {100, 100, 50}));

@@ -62,8 +62,8 @@ namespace io {
 
 namespace {
 
-// The remote data cache used for blocks of the native S3 file cache, or null. Set once
-// by EnableS3NativeDataCache() before any read.
+// The remote data cache used for blocks and whole files of the native S3 file cache, or
+// null. Set once by EnableS3NativeDataCache() before any read.
 DataCache* native_data_cache = nullptr;
 
 } // anonymous namespace
@@ -88,6 +88,7 @@ void EnableS3NativeDataCache(DataCache* data_cache) {
   // the block offset; mtime 0. Insertion is opportunistic: the data cache drops it when
   // its writers are busy (--data_cache_write_concurrency, asynchronous writes with
   // --data_cache_num_async_write_threads).
+  // Whole files are stored when they are read (ReadFromCachedFile()), so only blocks.
   file_cache->SetEvictionHandler([data_cache, block_size] (const std::string& file_key,
       int64_t block, const S3NativeFileCache::File& file) {
     if (block == S3NativeFileCache::kWholeFile || file.len <= 0) return;
@@ -201,8 +202,14 @@ Status S3NativeFileReader::ReadFromPos(DiskQueue* queue, int64_t file_offset,
       scan_range_->reader_->read_timer_);
   ScopedHistogramTimer read_timer(queue->read_latency());
   int64_t file_length = scan_range_->file_length();
+  // Footer reads are counted separately: whether they were served from the cache and how
+  // long they took (a footer GET is one more round trip before the column chunks).
+  bool footer = IsS3TailRead(file_offset, bytes_to_read, file_length);
+  int64_t gets_before = gets_sent_;
+  MonotonicStopWatch footer_timer;
+  if (footer) footer_timer.Start();
   bool cache = GetS3NativeFileCache() != nullptr && file_length > 0;
-  if (cache && file_length <= FLAGS_s3_native_whole_file_max_size) {
+  if (cache && S3ReadsWholeFile(file_length, FLAGS_s3_native_whole_file_max_size)) {
     RETURN_IF_ERROR(
         ReadFromCachedFile(file_offset, buffer, bytes_to_read, file_length, bytes_read));
   } else if (cache && FLAGS_s3_native_block_size > 0) {
@@ -212,6 +219,14 @@ Status S3NativeFileReader::ReadFromPos(DiskQueue* queue, int64_t file_offset,
     RETURN_IF_ERROR(ReadThroughDataCache(file_offset, buffer, bytes_to_read, bytes_read));
   } else {
     RETURN_IF_ERROR(GetRange(file_offset, buffer, bytes_to_read, bytes_read));
+  }
+  if (footer && ImpaladMetrics::IO_MGR_S3_NATIVE_FOOTER_READ_COUNT != nullptr) {
+    ImpaladMetrics::IO_MGR_S3_NATIVE_FOOTER_READ_COUNT->Increment(1);
+    ImpaladMetrics::IO_MGR_S3_NATIVE_FOOTER_READ_TIME_US->Increment(
+        footer_timer.ElapsedTime() / 1000);
+    if (gets_sent_ > gets_before) {
+      ImpaladMetrics::IO_MGR_S3_NATIVE_FOOTER_READ_MISS_COUNT->Increment(1);
+    }
   }
   // A shorter read means the range went past the end of the object.
   *eof = *bytes_read < bytes_to_read;
@@ -232,6 +247,8 @@ Status S3NativeFileReader::GetRange(int64_t offset, uint8_t* buffer, int64_t len
       FLAGS_s3_native_parallel_read_part_size);
   int num_parts = static_cast<int>((len + part_size - 1) / part_size);
   Aws::S3::S3Client* client = GetS3NativeClient();
+  MonotonicStopWatch get_timer;
+  get_timer.Start();
 
   // Parts 1.. run on the client's executor, part 0 in this thread.
   vector<Aws::S3::Model::GetObjectOutcomeCallable> other_parts;
@@ -259,8 +276,11 @@ Status S3NativeFileReader::GetRange(int64_t offset, uint8_t* buffer, int64_t len
       MakeGetRequest(bucket_, key_, offset, buffer, min(part_size, len))));
   // Wait for every part before returning, even after an error: they write into 'buffer'.
   for (int i = 1; i < num_parts; ++i) check_part(i, other_parts[i - 1].get());
+  gets_sent_ += num_parts;
   if (ImpaladMetrics::IO_MGR_S3_NATIVE_GET_COUNT != nullptr) {
     ImpaladMetrics::IO_MGR_S3_NATIVE_GET_COUNT->Increment(num_parts);
+    ImpaladMetrics::IO_MGR_S3_NATIVE_GET_TIME_US->Increment(
+        get_timer.ElapsedTime() / 1000);
     if (num_parts > 1) ImpaladMetrics::IO_MGR_S3_NATIVE_PARALLEL_READ_COUNT->Increment(1);
   }
   RETURN_IF_ERROR(status);
@@ -284,13 +304,18 @@ Status S3NativeFileReader::GetSegments(int64_t offset,
   DCHECK_GT(len, 0);
   // The SDK creates a new stream for every attempt, so a retry writes from the start of
   // the first segment again.
+  MonotonicStopWatch get_timer;
+  get_timer.Start();
   Aws::S3::Model::GetObjectOutcome outcome = GetS3NativeClient()->GetObject(
       MakeGetRequest(bucket_, key_, offset, len, [segments]() {
         return Aws::New<SegmentIOStream>(kAllocationTag, segments);
       }));
   Status status = CheckGetOutcome(outcome, len, bytes_read);
+  ++gets_sent_;
   if (ImpaladMetrics::IO_MGR_S3_NATIVE_GET_COUNT != nullptr) {
     ImpaladMetrics::IO_MGR_S3_NATIVE_GET_COUNT->Increment(1);
+    ImpaladMetrics::IO_MGR_S3_NATIVE_GET_TIME_US->Increment(
+        get_timer.ElapsedTime() / 1000);
   }
   if (!status.ok()) {
     return Status(TErrorCode::DISK_IO_ERROR, GetBackendString(),
@@ -449,8 +474,14 @@ Status S3NativeFileReader::ReadFromCachedFile(int64_t file_offset, uint8_t* buff
   bool hit;
   RETURN_IF_ERROR(GetS3NativeFileCache()->Lookup(cache_key, file_length,
       scan_range_->reader_, [this](S3NativeFileCache::File* f) {
+        // With the remote data cache the whole file is looked up on local disk first and
+        // stored there after it is fetched, like any read outside the file cache.
         int64_t loaded;
-        RETURN_IF_ERROR(GetRange(0, f->data.get(), f->len, &loaded));
+        if (native_data_cache != nullptr && scan_range_->UseDataCache()) {
+          RETURN_IF_ERROR(ReadThroughDataCache(0, f->data.get(), f->len, &loaded));
+        } else {
+          RETURN_IF_ERROR(GetRange(0, f->data.get(), f->len, &loaded));
+        }
         f->len = loaded;
         return Status::OK();
       }, &file, &hit));
