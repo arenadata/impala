@@ -75,12 +75,14 @@ DEFINE_int32(s3_native_executor_threads, 64, "(Experimental) Number of threads o
     "fetched by the I/O thread itself). Only used if --s3_native_parallel_read_min_size "
     "is set; otherwise the client has one such thread.");
 
-DEFINE_int64(s3_native_whole_file_max_size, 0, "(Experimental) Files of at most this "
-    "many bytes are read whole with one GET on their first read and kept in the native "
-    "S3 file cache, so that later reads of the file (footer, column chunks, later "
-    "queries) are served from memory. 0 (the default) turns this off: all files go "
-    "through the block cache (--s3_native_block_size), which downloads only the parts "
-    "that are read; whole-file reads download columns a query does not need.");
+DEFINE_int64(s3_native_whole_file_max_size, 2 * 1024 * 1024, "(Experimental) Files of "
+    "at most this many bytes are read whole with one GET on their first read and kept in "
+    "the native S3 file cache, so that later reads of the file (footer, column chunks, "
+    "later queries) are served from memory: one request instead of the footer and then "
+    "the column chunks, which matters when S3 is far away. Whole-file reads also "
+    "download columns a query does not need, so keep this small. 0 turns this off: all "
+    "files go through the block cache (--s3_native_block_size), which downloads only the "
+    "parts that are read.");
 DEFINE_int64(s3_native_cache_capacity, 4L * 1024 * 1024 * 1024, "(Experimental) "
     "Capacity in bytes of the native S3 file cache (--s3_native_whole_file_max_size, "
     "--s3_native_block_size). "
@@ -257,6 +259,14 @@ int S3NativeConnectionPoolSize(int max_connections, int num_request_threads) {
 int64_t S3ReadPartSize(int64_t len, int64_t min_size, int64_t part_size) {
   if (min_size <= 0 || part_size <= 0 || len < min_size || len <= part_size) return len;
   return part_size;
+}
+
+bool S3ReadsWholeFile(int64_t file_length, int64_t whole_file_max_size) {
+  return file_length > 0 && file_length <= whole_file_max_size;
+}
+
+bool IsS3TailRead(int64_t offset, int64_t len, int64_t file_length) {
+  return file_length > 0 && len > 0 && offset + len >= file_length;
 }
 
 int64_t S3PartsBytesRead(int64_t len, int64_t part_size,

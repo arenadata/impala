@@ -39,7 +39,7 @@ class Thread;
 namespace io {
 
 /// Experimental in-memory cache of S3 data for the native S3 reader (--s3_native_reader):
-/// - whole small files (--s3_native_whole_file_max_size, off by default): read whole
+/// - whole small files (--s3_native_whole_file_max_size, 2 MiB by default): read whole
 ///   with one GET request, so all later reads of the file (Parquet footer, every column
 ///   chunk, repeated scans by later queries) are served from memory;
 /// - fixed-size blocks of larger files (--s3_native_block_size, ReadBlocks()): a read is

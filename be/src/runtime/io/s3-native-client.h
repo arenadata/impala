@@ -68,6 +68,15 @@ int S3NativeConnectionPoolSize(int max_connections, int num_request_threads);
 /// 'min_size' and larger than 'part_size'), otherwise 'len' (one request).
 int64_t S3ReadPartSize(int64_t len, int64_t min_size, int64_t part_size);
 
+/// Returns whether a file of 'file_length' bytes is read whole into the native S3 file
+/// cache (--s3_native_whole_file_max_size = 'whole_file_max_size'; 0 turns this off).
+bool S3ReadsWholeFile(int64_t file_length, int64_t whole_file_max_size);
+
+/// Returns whether a read of 'len' bytes at 'offset' reaches the end of a file of
+/// 'file_length' bytes. Scanners read the end of a file for its footer (Parquet: the
+/// last 100 KB), so these reads are counted separately.
+bool IsS3TailRead(int64_t offset, int64_t len, int64_t file_length);
+
 /// Returns the number of bytes read by a split read of 'len' bytes in parts of
 /// 'part_size' bytes, given the bytes received per part. The parts up to and including
 /// the first short part count: bytes after a short part are past the end of the object.
