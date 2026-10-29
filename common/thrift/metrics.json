@@ -922,6 +922,16 @@
     "key": "impala-server.io-mgr.s3-native-data-cache-offered-bytes"
   },
   {
+    "description": "Total number of bytes that the admission filter of the native S3 file cache did not cache, because the entries they would have evicted were read at least as often.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Rejected Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-rejected-bytes"
+  },
+  {
     "description": "Total number of files of the native S3 file cache moved to its protected segment.",
     "contexts": [
       "IMPALAD"

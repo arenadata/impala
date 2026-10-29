@@ -39,6 +39,8 @@ DECLARE_int64(s3_native_block_size);
 DECLARE_int64(s3_native_cache_capacity);
 DECLARE_int64(s3_native_cache_reserved_capacity);
 DECLARE_int32(s3_native_cache_protected_percent);
+DECLARE_bool(s3_native_cache_admission_filter);
+DECLARE_int32(s3_native_cache_admission_window_percent);
 
 namespace impala {
 namespace io {
@@ -51,11 +53,27 @@ std::unique_ptr<S3NativeFileCache> file_cache;
 // Release() logs at most once in this many milliseconds, with the bytes since then.
 constexpr int64_t RELEASE_LOG_INTERVAL_MS = 10000;
 
+// Mixes the bits of 'x' (splitmix64 finalizer).
+uint64_t Mix(uint64_t x) {
+  x ^= x >> 30;
+  x *= 0xbf58476d1ce4e5b9ULL;
+  x ^= x >> 27;
+  x *= 0x94d049bb133111ebULL;
+  x ^= x >> 31;
+  return x;
+}
+
+// Key of block 'block' of the file with key hash 'key_hash' in the frequency sketch.
+uint64_t SketchHash(uint64_t key_hash, int64_t block) {
+  return Mix(key_hash ^ Mix(static_cast<uint64_t>(block) + 0x9e3779b97f4a7c15ULL));
+}
+
 } // anonymous namespace
 
 S3NativeFileCache::S3NativeFileCache(
     int64_t capacity, int protected_percent, int num_shards, int64_t reserved)
   : capacity_(capacity),
+    protected_percent_(protected_percent),
     reserved_(reserved < 0 ? capacity : std::min(reserved, capacity)),
     // Often enough that the process does not grow far past the headroom margin.
     headroom_check_interval_(
@@ -64,8 +82,65 @@ S3NativeFileCache::S3NativeFileCache(
   for (int i = 0; i < num_shards; ++i) {
     std::unique_ptr<Shard> shard = std::make_unique<Shard>();
     shard->capacity = capacity / num_shards;
+    shard->main_capacity = shard->capacity;
     shard->protected_capacity = shard->capacity * protected_percent / 100;
     shards_.push_back(std::move(shard));
+  }
+}
+
+void S3NativeFileCache::FrequencySketch::Resize(int64_t max_entries) {
+  uint64_t width = 16;
+  while (width < static_cast<uint64_t>(std::max<int64_t>(max_entries, 1))) width <<= 1;
+  table_.assign(kRows * width, 0);
+  mask_ = width - 1;
+  additions_ = 0;
+  // Like TinyLFU: the counts are halved after about ten reads per entry.
+  sample_size_ = 10 * static_cast<int64_t>(width);
+}
+
+size_t S3NativeFileCache::FrequencySketch::IndexOf(uint64_t hash, int row) const {
+  return row * (mask_ + 1) + (Mix(hash + row * 0x9e3779b97f4a7c15ULL) & mask_);
+}
+
+void S3NativeFileCache::FrequencySketch::Increment(uint64_t hash) {
+  // Conservative update: only the smallest counters grow, which keeps the estimate of
+  // the other keys sharing a counter closer to the truth.
+  int min_count = kMaxCount;
+  for (int row = 0; row < kRows; ++row) {
+    min_count = std::min<int>(min_count, table_[IndexOf(hash, row)]);
+  }
+  if (min_count >= kMaxCount) return;
+  for (int row = 0; row < kRows; ++row) {
+    uint8_t& counter = table_[IndexOf(hash, row)];
+    if (counter == min_count) ++counter;
+  }
+  if (++additions_ >= sample_size_) Age();
+}
+
+int S3NativeFileCache::FrequencySketch::Frequency(uint64_t hash) const {
+  int count = kMaxCount;
+  for (int row = 0; row < kRows; ++row) {
+    count = std::min<int>(count, table_[IndexOf(hash, row)]);
+  }
+  return count;
+}
+
+void S3NativeFileCache::FrequencySketch::Age() {
+  for (uint8_t& counter : table_) counter >>= 1;
+  additions_ /= 2;
+}
+
+void S3NativeFileCache::EnableAdmissionFilter(int64_t entry_size, int window_percent) {
+  DCHECK_GT(entry_size, 0);
+  entry_size = std::max<int64_t>(entry_size, 1);
+  window_percent = std::min(std::max(window_percent, 1), 50);
+  for (std::unique_ptr<Shard>& shard : shards_) {
+    std::lock_guard<std::mutex> l(shard->lock);
+    shard->sketch.Resize(shard->capacity / entry_size);
+    shard->window_capacity = std::max(shard->capacity * window_percent / 100,
+        std::min(16 * entry_size, shard->capacity / 2));
+    shard->main_capacity = shard->capacity - shard->window_capacity;
+    shard->protected_capacity = shard->main_capacity * protected_percent_ / 100;
   }
 }
 
@@ -135,17 +210,27 @@ S3NativeFileCache::FileEntries* S3NativeFileCache::FindFileLocked(
   if (!create) return nullptr;
   auto inserted = shard->files.emplace(file_key, FileEntries());
   inserted.first->second.key = &inserted.first->first;
+  // Not the shard hash (std::hash, modulo the shard count): independent bits.
+  inserted.first->second.key_hash = Mix(std::hash<std::string>()(file_key) + 1);
   return &inserted.first->second;
 }
 
 void S3NativeFileCache::AcquireLocked(Shard* shard, FileEntries* file, int64_t block,
     const void* owner, Ref* ref) {
   auto it = file->blocks.find(block);
+  // Every read counts for the admission filter, also misses and waits.
+  uint64_t hash = 0;
+  if (shard->sketch.enabled()) {
+    hash = it != file->blocks.end() ? it->second.sketch_hash
+                                    : SketchHash(file->key_hash, block);
+    shard->sketch.Increment(hash);
+  }
   if (it == file->blocks.end()) {
     // Miss: the caller loads the entry. Later callers wait for 'load_promise'.
     Entry& entry = file->blocks[block];
     entry.load_promise = std::make_shared<std::promise<LoadResult>>();
     entry.loading = entry.load_promise->get_future().share();
+    entry.sketch_hash = hash;
     ref->reserved = true;
   } else if (it->second.file != nullptr) {
     TouchLocked(shard, &it->second, owner);
@@ -169,22 +254,73 @@ S3NativeFileCache::FillLocked(Shard* shard, const std::string& file_key, int64_t
   DCHECK(load_promise != nullptr);
   if (status.ok() && file != nullptr && file->len <= shard->capacity
       && !SkipFill(file->len)) {
-    shard->probation.push_front(LruItem{entries, block});
+    const bool window = shard->window_capacity > 0;
+    std::list<LruItem>& segment = window ? shard->window : shard->probation;
+    segment.push_front(LruItem{entries, block});
     entry.file = file;
     entry.loading = std::shared_future<LoadResult>();
     entry.owner = owner;
     entry.is_protected = false;
-    entry.lru_pos = shard->probation.begin();
-    shard->probation_bytes += file->len;
+    entry.in_window = window;
+    entry.lru_pos = segment.begin();
+    (window ? shard->window_bytes : shard->probation_bytes) += file->len;
     total_bytes_ += file->len;
     ++num_entries_;
-    EvictLocked(shard, LruItem{entries, block}, evicted);
+    if (window) {
+      // The entry is in the window; the admission filter decides at its exit.
+      DrainWindowLocked(shard, evicted);
+    } else {
+      EvictLocked(shard, LruItem{entries, block}, evicted);
+    }
   } else {
     // Nothing to cache: the load failed (the next caller retries it), the entry is
     // larger than the shard or the process headroom is low (SkipFill()).
     EraseLocked(shard, entries, block);
   }
   return load_promise;
+}
+
+void S3NativeFileCache::DrainWindowLocked(Shard* shard, std::vector<Evicted>* evicted) {
+  while (shard->window_bytes > shard->window_capacity && !shard->window.empty()) {
+    const LruItem candidate = shard->window.back();
+    auto it = candidate.file->blocks.find(candidate.block);
+    DCHECK(it != candidate.file->blocks.end());
+    Entry& entry = it->second;
+    const int64_t len = entry.file->len;
+    const int frequency = shard->sketch.Frequency(entry.sketch_hash);
+    bool admit = true;
+    while (shard->probation_bytes + shard->protected_bytes + len > shard->main_capacity) {
+      Segment victim_segment =
+          shard->probation.empty() ? Segment::kProtected : Segment::kProbation;
+      const std::list<LruItem>& victims = victim_segment == Segment::kProbation
+          ? shard->probation : shard->protected_lru;
+      if (victims.empty()) {
+        admit = false;
+        break;
+      }
+      const LruItem& victim = victims.back();
+      auto victim_it = victim.file->blocks.find(victim.block);
+      DCHECK(victim_it != victim.file->blocks.end());
+      // Ties keep the cached entry: in a repeated scan of data larger than the cache all
+      // blocks are read equally often, and keeping the cached ones is what gives hits.
+      if (frequency <= shard->sketch.Frequency(victim_it->second.sketch_hash)) {
+        admit = false;
+        break;
+      }
+      RemoveLastLocked(shard, victim_segment, evicted);
+    }
+    if (!admit) {
+      if (ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_REJECTED_BYTES != nullptr) {
+        ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_REJECTED_BYTES->Increment(len);
+      }
+      RemoveLastLocked(shard, Segment::kWindow, evicted);
+      continue;
+    }
+    shard->probation.splice(shard->probation.begin(), shard->window, entry.lru_pos);
+    entry.in_window = false;
+    shard->window_bytes -= len;
+    shard->probation_bytes += len;
+  }
 }
 
 void S3NativeFileCache::EraseLocked(Shard* shard, FileEntries* file, int64_t block) {
@@ -305,6 +441,10 @@ Status S3NativeFileCache::ReadBlocks(const std::string& file_key, int64_t file_l
 
 void S3NativeFileCache::TouchLocked(Shard* shard, Entry* entry, const void* owner) {
   entry->reused = true;
+  if (entry->in_window) {
+    shard->window.splice(shard->window.begin(), shard->window, entry->lru_pos);
+    return;
+  }
   if (entry->is_protected) {
     shard->protected_lru.splice(
         shard->protected_lru.begin(), shard->protected_lru, entry->lru_pos);
@@ -345,8 +485,13 @@ void S3NativeFileCache::DemoteLocked(Shard* shard) {
 }
 
 int64_t S3NativeFileCache::RemoveLastLocked(
-    Shard* shard, bool from_probation, std::vector<Evicted>* evicted) {
-  std::list<LruItem>& segment = from_probation ? shard->probation : shard->protected_lru;
+    Shard* shard, Segment segment_id, std::vector<Evicted>* evicted) {
+  std::list<LruItem>& segment = segment_id == Segment::kWindow ? shard->window
+      : segment_id == Segment::kProbation ? shard->probation
+      : shard->protected_lru;
+  int64_t& segment_bytes = segment_id == Segment::kWindow ? shard->window_bytes
+      : segment_id == Segment::kProbation ? shard->probation_bytes
+      : shard->protected_bytes;
   DCHECK(!segment.empty());
   LruItem item = segment.back();
   auto it = item.file->blocks.find(item.block);
@@ -355,7 +500,7 @@ int64_t S3NativeFileCache::RemoveLastLocked(
   if (evicted != nullptr && it->second.reused && eviction_handler_) {
     evicted->push_back(Evicted{*item.file->key, item.block, it->second.file});
   }
-  (from_probation ? shard->probation_bytes : shard->protected_bytes) -= len;
+  segment_bytes -= len;
   segment.pop_back();
   EraseLocked(shard, item.file, item.block);
   total_bytes_ -= len;
@@ -368,13 +513,14 @@ int64_t S3NativeFileCache::RemoveLastLocked(
 
 void S3NativeFileCache::EvictLocked(
     Shard* shard, const LruItem& keep, std::vector<Evicted>* evicted) {
-  while (shard->probation_bytes + shard->protected_bytes > shard->capacity) {
+  while (shard->probation_bytes + shard->protected_bytes > shard->main_capacity) {
     bool from_probation = shard->probation.size() > 1
         || (!shard->probation.empty()
             && (shard->probation.back().file != keep.file
                 || shard->probation.back().block != keep.block));
     if ((from_probation ? shard->probation : shard->protected_lru).empty()) break;
-    RemoveLastLocked(shard, from_probation, evicted);
+    RemoveLastLocked(
+        shard, from_probation ? Segment::kProbation : Segment::kProtected, evicted);
   }
 }
 
@@ -462,9 +608,12 @@ int64_t S3NativeFileCache::Release(
                                  : bytes_to_free - freed;
       int64_t shard_freed = 0;
       std::lock_guard<std::mutex> l(shard->lock);
-      while (shard_freed < target
-          && !(shard->probation.empty() && shard->protected_lru.empty())) {
-        shard_freed += RemoveLastLocked(shard.get(), !shard->probation.empty());
+      while (shard_freed < target && !(shard->window.empty() && shard->probation.empty()
+          && shard->protected_lru.empty())) {
+        // Probation first, then the window, protected last.
+        Segment segment = !shard->probation.empty() ? Segment::kProbation
+            : !shard->window.empty() ? Segment::kWindow : Segment::kProtected;
+        shard_freed += RemoveLastLocked(shard.get(), segment);
       }
       freed += shard_freed;
     }
@@ -547,11 +696,23 @@ int64_t InitS3NativeFileCache(int64_t max_capacity) {
       std::min<int64_t>(std::max<int64_t>(capacity / (8 * largest_entry), 1), 16));
   file_cache = std::make_unique<S3NativeFileCache>(
       capacity, protected_percent, num_shards, reserved);
+  if (FLAGS_s3_native_cache_admission_filter) {
+    // Sized for the blocks, the most numerous entries.
+    file_cache->EnableAdmissionFilter(
+        FLAGS_s3_native_block_size > 0 ? FLAGS_s3_native_block_size : largest_entry,
+        FLAGS_s3_native_cache_admission_window_percent);
+  }
   LOG(INFO) << "Native S3 reader: file cache capacity "
             << PrettyPrinter::PrintBytes(capacity) << " ("
             << PrettyPrinter::PrintBytes(reserved) << " reserved, the rest uses memory "
             << "queries leave free) in " << num_shards
-            << " shards, protected segment " << protected_percent << "%; "
+            << " shards, protected segment " << protected_percent
+            << "%, admission filter "
+            << (FLAGS_s3_native_cache_admission_filter
+                   ? "on (window " + std::to_string(
+                       FLAGS_s3_native_cache_admission_window_percent) + "%)"
+                   : std::string("off"))
+            << "; "
             << (FLAGS_s3_native_whole_file_max_size > 0
                    ? "files up to "
                        + PrettyPrinter::PrintBytes(FLAGS_s3_native_whole_file_max_size)
