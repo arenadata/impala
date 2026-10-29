@@ -125,6 +125,18 @@ DEFINE_int64(s3_native_block_size, 128 * 1024, "(Experimental) Reads of files la
     "blocks is fetched with one GET and cached, so data read again soon (another scan "
     "of the same table, the next query, the footer) is not downloaded again. 0 turns "
     "this off.");
+DEFINE_bool(s3_native_cache_admission_filter, true, "(Experimental) Admission filter "
+    "of the native S3 file cache (W-TinyLFU): it counts how often entries are read; new "
+    "entries enter a window (--s3_native_cache_admission_window_percent) and move on "
+    "into the rest of the cache only if there is room or they were read more often than "
+    "the entry they would evict. Repeated scans of data larger than the cache then keep "
+    "a stable part of it cached instead of evicting each block before it is read again. "
+    "On by default; false turns it off (plain segmented LRU).");
+DEFINE_int32(s3_native_cache_admission_window_percent, 50, "(Experimental) With "
+    "--s3_native_cache_admission_filter: share, in percent of the capacity (1-50), of "
+    "the window segment of the native S3 file cache that new entries enter before the "
+    "admission filter decides whether they stay, so that data read again soon is served "
+    "from memory.");
 DEFINE_int32(s3_native_cache_protected_percent, 80, "(Experimental) Share, in "
     "percent of the capacity, of the protected segment of the native S3 file cache: "
     "files read by more than one scan. One large scan evicts only the rest.");

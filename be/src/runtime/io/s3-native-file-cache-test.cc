@@ -637,5 +637,86 @@ TEST(S3NativeFileCacheTest, ShardedConcurrentReads) {
   EXPECT_EQ(cache.TotalBytes(), cache.NumEntries() * 100);
 }
 
+// Reads the files "a".."h" (100 bytes each) 'passes' times in a loop by one reader and
+// returns the number of hits.
+static int RepeatedScanHits(S3NativeFileCache* cache, int passes) {
+  int hits = 0;
+  for (int pass = 0; pass < passes; ++pass) {
+    for (char c = 'a'; c <= 'h'; ++c) hits += Read(cache, string(1, c), 100, OWNER_1);
+  }
+  return hits;
+}
+
+// A repeated scan of twice the capacity: plain segmented LRU evicts every file before
+// the scan reads it again. With the admission filter (window of one file, main part of
+// three) the first three files stay in the main part and hit in every later pass.
+TEST(S3NativeFileCacheTest, AdmissionFilterKeepsPartOfARepeatedScan) {
+  S3NativeFileCache lru(400, 80);
+  EXPECT_EQ(0, RepeatedScanHits(&lru, 5));
+
+  S3NativeFileCache filtered(400, 80);
+  // A wide sketch (sized for 1-byte entries), so that no two of the files share counters.
+  filtered.EnableAdmissionFilter(1, 25);
+  EXPECT_EQ(3 * 4, RepeatedScanHits(&filtered, 5));
+  EXPECT_EQ(400, filtered.TotalBytes());
+  for (char c = 'a'; c <= 'c'; ++c) {
+    EXPECT_TRUE(Read(&filtered, string(1, c), 100, OWNER_1));
+  }
+}
+
+// An entry leaving the window enters the main part only if it was read more often than
+// the entry it would evict there.
+TEST(S3NativeFileCacheTest, AdmissionFilterAdmitsFrequentEntries) {
+  // Window of one file, main part of one file.
+  S3NativeFileCache cache(200, 80);
+  cache.EnableAdmissionFilter(1, 50);
+  EXPECT_FALSE(Read(&cache, "a", 100, OWNER_1));
+  // "a" moves from the window into the empty main part.
+  EXPECT_FALSE(Read(&cache, "b", 100, OWNER_1));
+  // "b" leaves the window, read as often as "a" in the main part: dropped.
+  EXPECT_FALSE(Read(&cache, "c", 100, OWNER_1));
+  EXPECT_FALSE(Read(&cache, "b", 100, OWNER_1));
+  // "b" leaves the window, read more often than "a": "a" is evicted, "b" enters.
+  EXPECT_FALSE(Read(&cache, "d", 100, OWNER_1));
+  EXPECT_EQ(200, cache.TotalBytes());
+  EXPECT_TRUE(Read(&cache, "b", 100, OWNER_1));
+  EXPECT_FALSE(Read(&cache, "a", 100, OWNER_1));
+}
+
+// A new entry read again soon is served from the window, before the filter decides.
+TEST(S3NativeFileCacheTest, AdmissionFilterWindowHits) {
+  S3NativeFileCache cache(400, 80);
+  cache.EnableAdmissionFilter(1, 25);
+  for (char c = 'a'; c <= 'd'; ++c) {
+    EXPECT_FALSE(Read(&cache, string(1, c), 100, OWNER_1));
+  }
+  // Main part full (a, b, c), "e" enters the window and is read again right away.
+  EXPECT_FALSE(Read(&cache, "e", 100, OWNER_1));
+  EXPECT_TRUE(Read(&cache, "e", 100, OWNER_1));
+  EXPECT_EQ(400, cache.TotalBytes());
+}
+
+// Blocks go through the admission filter like whole files.
+TEST(S3NativeFileCacheTest, AdmissionFilterBlocks) {
+  S3NativeFileCache cache(400, 80);
+  cache.EnableAdmissionFilter(1, 25);
+  FakeObject object(800);
+  vector<uint8_t> buffer(800);
+  int64_t bytes_read;
+  for (int pass = 0; pass < 3; ++pass) {
+    S3NativeFileCache::BlockStats stats;
+    ASSERT_OK(cache.ReadBlocks("f", 800, 100, 0, buffer.data(), 800, OWNER_1,
+        object.Fetcher(), &bytes_read, &stats));
+    EXPECT_EQ(800, bytes_read);
+    for (int64_t j = 0; j < bytes_read; ++j) {
+      ASSERT_EQ(static_cast<uint8_t>(j % 251), buffer[j]);
+    }
+    // The first pass keeps blocks 0-2 in the main part and the last block in the
+    // window; later passes hit those four.
+    EXPECT_EQ(pass == 0 ? 0 : 4, stats.hit_blocks);
+  }
+  EXPECT_EQ(400, cache.TotalBytes());
+}
+
 } // namespace io
 } // namespace impala
