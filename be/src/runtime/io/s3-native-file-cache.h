@@ -65,6 +65,18 @@ namespace io {
 /// probation. Entries are evicted from the end of probation first; when protected
 /// outgrows its share, its least recently used entries move back to probation.
 ///
+/// With the admission filter (EnableAdmissionFilter(),
+/// --s3_native_cache_admission_filter, on by default) the shards work like W-TinyLFU:
+/// each shard counts how often its entries are read (a frequency sketch: every lookup
+/// counts, the counts are halved periodically so that they follow changes), and new
+/// entries enter a window segment (LRU, --s3_native_cache_admission_window_percent of
+/// the capacity) instead of probation, so that data read again soon (the next read of a
+/// scan range, the footer and page index) is served from memory. An entry leaving the
+/// window enters the main part (probation and protected, as above) only if there is room
+/// or it was read more often than the entry it would evict there; otherwise it is
+/// dropped. Repeated scans of data larger than the cache then keep a stable part of it
+/// cached instead of evicting each block before the next scan reads it again.
+///
 /// The memory is process memory within --mem_limit. ExecEnv preserves only the reserved
 /// part of the capacity (--s3_native_cache_reserved_capacity is subtracted from the
 /// memory admitted for queries, like for the codegen cache); the rest is elastic: it uses
@@ -163,6 +175,12 @@ class S3NativeFileCache {
   void SetHeadroomFunction(HeadroomFn fn, int64_t min_headroom = kDefaultMinHeadroom,
       int64_t check_interval_ms = 0, AfterReleaseFn after_release = nullptr);
 
+  /// Turns on the admission filter (see the class comment) with a window of
+  /// 'window_percent' of the capacity (1-50, at least 16 entries of 'entry_size' bytes),
+  /// with the frequency sketch sized for entries of about 'entry_size' bytes. Must be
+  /// called once, before the cache is used.
+  void EnableAdmissionFilter(int64_t entry_size, int window_percent);
+
   /// Sets the handler of evicted entries that were read again (see EvictionHandler).
   /// Must be called before the cache is used.
   void SetEvictionHandler(EvictionHandler handler) {
@@ -215,6 +233,32 @@ class S3NativeFileCache {
  private:
   struct FileEntries;
 
+  /// Count-min sketch of how often entries were read (4 rows of saturating 8-bit counters
+  /// up to 15, conservative update). All counters are halved after 'sample_size_'
+  /// increments, so that old reads count less. Not thread safe (used under a shard lock).
+  class FrequencySketch {
+   public:
+    /// Sizes the sketch for at most 'max_entries' entries; clears it.
+    void Resize(int64_t max_entries);
+    bool enabled() const { return !table_.empty(); }
+    void Increment(uint64_t hash);
+    int Frequency(uint64_t hash) const;
+
+   private:
+    static constexpr int kRows = 4;
+    static constexpr uint8_t kMaxCount = 15;
+    /// Index of 'hash' in row 'row'.
+    size_t IndexOf(uint64_t hash, int row) const;
+    /// Halves every counter.
+    void Age();
+
+    /// kRows rows of 'mask_' + 1 counters.
+    std::vector<uint8_t> table_;
+    uint64_t mask_ = 0;
+    int64_t additions_ = 0;
+    int64_t sample_size_ = 0;
+  };
+
   /// An entry in an eviction list.
   struct LruItem {
     FileEntries* file;
@@ -230,33 +274,47 @@ class S3NativeFileCache {
     std::shared_future<LoadResult> loading;
     /// The reader that loaded the entry. A hit by another reader promotes the entry.
     const void* owner = nullptr;
-    /// Whether the entry is in 'protected_lru' (otherwise in 'probation').
+    /// Whether the entry is in 'protected_lru' (otherwise in 'probation' or 'window').
     bool is_protected = false;
+    /// Whether the entry is in 'window' (admission filter only).
+    bool in_window = false;
     /// Whether the entry was read again after it was loaded (by any reader).
     bool reused = false;
-    /// Position in 'probation' or 'protected_lru'. Valid only if 'file' is set.
+    /// Position in its segment's list. Valid only if 'file' is set.
     std::list<LruItem>::iterator lru_pos;
+    /// Key of the entry in the shard's frequency sketch.
+    uint64_t sketch_hash = 0;
   };
 
   /// The entries of one file key, by block index.
   struct FileEntries {
     /// The file key (the key of this element in Shard::files, which never moves).
     const std::string* key = nullptr;
+    /// Hash of the file key, for the frequency sketch.
+    uint64_t key_hash = 0;
     std::unordered_map<int64_t, Entry> blocks;
   };
 
   struct Shard {
     int64_t capacity = 0;
+    /// Capacity of probation and protected together: 'capacity' without the window.
+    int64_t main_capacity = 0;
     int64_t protected_capacity = 0;
+    /// Capacity of the window; 0 without the admission filter.
+    int64_t window_capacity = 0;
     /// Protects all members below.
     std::mutex lock;
     std::unordered_map<std::string, FileEntries> files;
     /// Loaded entries in each segment, most recently used first.
+    std::list<LruItem> window;
     std::list<LruItem> probation;
     std::list<LruItem> protected_lru;
     /// Sum of File::len of the entries in each segment.
+    int64_t window_bytes = 0;
     int64_t probation_bytes = 0;
     int64_t protected_bytes = 0;
+    /// Read frequencies for the admission filter; empty if the filter is off.
+    FrequencySketch sketch;
   };
 
   Shard& ShardFor(const std::string& file_key);
@@ -285,6 +343,14 @@ class S3NativeFileCache {
   /// Calls the eviction handler for 'evicted' (without locks held) and clears it.
   void HandleEvicted(std::vector<Evicted>* evicted);
 
+  /// Admission filter: moves the least recently used entries out of the window until it
+  /// fits into its capacity. Each enters probation if the main part has room or after
+  /// evicting entries of the main part read less often than it (the next victims: the
+  /// end of probation, then of protected); it is dropped as soon as a victim was read at
+  /// least as often. Evicted and dropped entries for the eviction handler are added to
+  /// 'evicted'.
+  void DrainWindowLocked(Shard* shard, std::vector<Evicted>* evicted);
+
   /// Removes block 'block' of 'file' (and 'file' if it has no blocks left).
   void EraseLocked(Shard* shard, FileEntries* file, int64_t block);
 
@@ -302,10 +368,12 @@ class S3NativeFileCache {
   /// 'evicted' if there is an eviction handler.
   void EvictLocked(Shard* shard, const LruItem& keep, std::vector<Evicted>* evicted);
 
-  /// Removes the least recently used entry of the shard's probation (or protected if
-  /// 'from_probation' is false) segment and returns its size. Adds it to 'evicted' if
-  /// that is not null, it was reused and there is an eviction handler.
-  int64_t RemoveLastLocked(Shard* shard, bool from_probation,
+  enum class Segment { kWindow, kProbation, kProtected };
+
+  /// Removes the least recently used entry of 'segment' of the shard and returns its
+  /// size. Adds it to 'evicted' if that is not null, it was reused and there is an
+  /// eviction handler.
+  int64_t RemoveLastLocked(Shard* shard, Segment segment,
       std::vector<Evicted>* evicted = nullptr);
 
   /// Updates the size and entry count gauges.
@@ -338,6 +406,7 @@ class S3NativeFileCache {
   void HeadroomCheckLoop(int64_t interval_ms);
 
   const int64_t capacity_;
+  const int protected_percent_;
   /// Part of the capacity that the headroom check keeps.
   const int64_t reserved_;
   /// Filled bytes between two headroom checks.
