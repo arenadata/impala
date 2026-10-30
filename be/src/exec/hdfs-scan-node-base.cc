@@ -892,14 +892,7 @@ ScanRange* HdfsScanNodeBase::AllocateScanRange(const ScanRange::FileInfo &fi,
   // beyond the end of the file).
   DCHECK_LE(offset + len, GetFileDesc(metadata->partition_id, fi.filename)->file_length)
       << "Scan range beyond end of file (offset=" << offset << ", len=" << len << ")";
-  // The native S3 reader reads small files whole, so it needs the length of the file.
-  ScanRange::FileInfo file_info = fi;
-  if (file_info.file_length < 0) {
-    const HdfsFileDesc* file_desc =
-        shared_state_->FindFileDesc(metadata->partition_id, fi.filename);
-    if (file_desc != nullptr) file_info.file_length = file_desc->file_length;
-  }
-  return ScanRange::AllocateScanRange(shared_state_->obj_pool(), file_info, len, offset,
+  return ScanRange::AllocateScanRange(shared_state_->obj_pool(), fi, len, offset,
       move(sub_ranges), metadata, disk_id, expected_local, buffer_opts);
 }
 
@@ -1340,12 +1333,6 @@ void HdfsScanNodeBase::UpdateBytesRead(
     bytes_read_per_col_[slot_id].uncompressed_bytes_read.Add(uncompressed_bytes_read);
     bytes_read_per_col_[slot_id].compressed_bytes_read.Add(compressed_bytes_read);
   }
-}
-
-const HdfsFileDesc* ScanRangeSharedState::FindFileDesc(
-    int64_t partition_id, const std::string& filename) const {
-  auto it = file_descs_.find(make_pair(partition_id, filename));
-  return it == file_descs_.end() ? nullptr : it->second;
 }
 
 const HdfsFileDesc* ScanRangeSharedState::GetFileDesc(
