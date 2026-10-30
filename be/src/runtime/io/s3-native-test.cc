@@ -119,6 +119,21 @@ TEST(S3NativeTest, CheckS3RangeRead) {
   ExpectReadError(1024, 1024, 100);
 }
 
+TEST(S3NativeTest, CheckS3ContentRange) {
+  // A read at offset 0 is fine with or without the header.
+  EXPECT_OK(CheckS3ContentRange("", 0));
+  EXPECT_OK(CheckS3ContentRange("bytes 0-99/1000", 0));
+  // A read at another offset needs the header, starting at that offset.
+  EXPECT_OK(CheckS3ContentRange("bytes 100-199/1000", 100));
+  EXPECT_OK(CheckS3ContentRange("bytes 100-199/*", 100));
+  // The server ignored the Range header: 200 with the object from its start.
+  EXPECT_FALSE(CheckS3ContentRange("", 100).ok());
+  // Another range, or a header that cannot be parsed.
+  EXPECT_FALSE(CheckS3ContentRange("bytes 0-99/1000", 100).ok());
+  EXPECT_FALSE(CheckS3ContentRange("bytes */1000", 100).ok());
+  EXPECT_FALSE(CheckS3ContentRange("items 100-199/1000", 100).ok());
+}
+
 TEST(S3NativeTest, ReadPartSize) {
   const int64_t MiB = 1024 * 1024;
   // Large reads are split into parts.
