@@ -97,6 +97,67 @@ class ImpaladMetricKeys {
   /// Current byte size of the remote data cache.
   static const char* IO_MGR_REMOTE_DATA_CACHE_TOTAL_BYTES;
 
+  /// Total number of GET requests sent by the native S3 reader.
+  static const char* IO_MGR_S3_NATIVE_GET_COUNT;
+
+  /// Total number of bytes received by the native S3 reader.
+  static const char* IO_MGR_S3_NATIVE_GET_BYTES;
+
+  /// Total number of native S3 reads split into parallel parts.
+  static const char* IO_MGR_S3_NATIVE_PARALLEL_READ_COUNT;
+
+  /// Total number of reads served by the native S3 file cache.
+  static const char* IO_MGR_S3_NATIVE_WHOLE_FILE_CACHE_HIT_COUNT;
+
+  /// Total number of bytes served by the native S3 file cache.
+  static const char* IO_MGR_S3_NATIVE_WHOLE_FILE_CACHE_HIT_BYTES;
+
+  /// Total number of small files read whole into the native S3 file cache.
+  static const char* IO_MGR_S3_NATIVE_WHOLE_FILE_CACHE_MISS_COUNT;
+
+  /// Total number of files evicted from the native S3 file cache.
+  static const char* IO_MGR_S3_NATIVE_CACHE_EVICTIONS;
+  static const char* IO_MGR_S3_NATIVE_CACHE_RELEASED_BYTES;
+  static const char* IO_MGR_S3_NATIVE_CACHE_RELEASED_HEADROOM_BYTES;
+  static const char* IO_MGR_S3_NATIVE_CACHE_RELEASED_LIMIT_BYTES;
+  static const char* IO_MGR_S3_NATIVE_CACHE_SKIPPED_BYTES;
+  static const char* IO_MGR_S3_NATIVE_DATA_CACHE_OFFERED_BYTES;
+
+  /// Total number of bytes not cached by the admission filter of the native S3 file
+  /// cache.
+  static const char* IO_MGR_S3_NATIVE_CACHE_REJECTED_BYTES;
+
+  /// Total number of files of the native S3 file cache moved to its protected segment.
+  static const char* IO_MGR_S3_NATIVE_CACHE_PROMOTIONS;
+
+  /// Current byte size of the native S3 file cache.
+  static const char* IO_MGR_S3_NATIVE_CACHE_TOTAL_BYTES;
+
+  /// Current number of files in the native S3 file cache.
+  static const char* IO_MGR_S3_NATIVE_CACHE_NUM_ENTRIES;
+
+  /// Total number of blocks of large files served by the native S3 file cache.
+  static const char* IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_COUNT;
+
+  /// Total number of bytes of large files served by the native S3 file cache.
+  static const char* IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_BYTES;
+
+  /// Total number of blocks of large files fetched into the native S3 file cache.
+  static const char* IO_MGR_S3_NATIVE_BLOCK_CACHE_MISS_COUNT;
+
+  /// Total wall time in microseconds of the native S3 reader's GET requests.
+  static const char* IO_MGR_S3_NATIVE_GET_TIME_US;
+
+  /// Total number of native S3 reads of the end of a file (the footer).
+  static const char* IO_MGR_S3_NATIVE_FOOTER_READ_COUNT;
+
+  /// Total number of native S3 footer reads that sent a GET request.
+  static const char* IO_MGR_S3_NATIVE_FOOTER_READ_MISS_COUNT;
+
+  /// Total time in microseconds of native S3 footer reads.
+  static const char* IO_MGR_S3_NATIVE_FOOTER_READ_TIME_US;
+
+
   /// Current number of entries in the remote data cache.
   static const char* IO_MGR_REMOTE_DATA_CACHE_NUM_ENTRIES;
 
@@ -370,6 +431,29 @@ class ImpaladMetrics {
   static IntGauge* IO_MGR_CACHED_FILE_HANDLES_MISS_COUNT;
   static IntGauge* IO_MGR_REMOTE_DATA_CACHE_TOTAL_BYTES;
   static IntGauge* IO_MGR_REMOTE_DATA_CACHE_NUM_ENTRIES;
+  static IntCounter* IO_MGR_S3_NATIVE_GET_COUNT;
+  static IntCounter* IO_MGR_S3_NATIVE_GET_BYTES;
+  static IntCounter* IO_MGR_S3_NATIVE_PARALLEL_READ_COUNT;
+  static IntCounter* IO_MGR_S3_NATIVE_WHOLE_FILE_CACHE_HIT_COUNT;
+  static IntCounter* IO_MGR_S3_NATIVE_WHOLE_FILE_CACHE_HIT_BYTES;
+  static IntCounter* IO_MGR_S3_NATIVE_WHOLE_FILE_CACHE_MISS_COUNT;
+  static IntCounter* IO_MGR_S3_NATIVE_CACHE_EVICTIONS;
+  static IntCounter* IO_MGR_S3_NATIVE_CACHE_RELEASED_BYTES;
+  static IntCounter* IO_MGR_S3_NATIVE_CACHE_RELEASED_HEADROOM_BYTES;
+  static IntCounter* IO_MGR_S3_NATIVE_CACHE_RELEASED_LIMIT_BYTES;
+  static IntCounter* IO_MGR_S3_NATIVE_CACHE_SKIPPED_BYTES;
+  static IntCounter* IO_MGR_S3_NATIVE_DATA_CACHE_OFFERED_BYTES;
+  static IntCounter* IO_MGR_S3_NATIVE_CACHE_REJECTED_BYTES;
+  static IntCounter* IO_MGR_S3_NATIVE_CACHE_PROMOTIONS;
+  static IntGauge* IO_MGR_S3_NATIVE_CACHE_TOTAL_BYTES;
+  static IntGauge* IO_MGR_S3_NATIVE_CACHE_NUM_ENTRIES;
+  static IntCounter* IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_COUNT;
+  static IntCounter* IO_MGR_S3_NATIVE_BLOCK_CACHE_HIT_BYTES;
+  static IntCounter* IO_MGR_S3_NATIVE_BLOCK_CACHE_MISS_COUNT;
+  static IntCounter* IO_MGR_S3_NATIVE_GET_TIME_US;
+  static IntCounter* IO_MGR_S3_NATIVE_FOOTER_READ_COUNT;
+  static IntCounter* IO_MGR_S3_NATIVE_FOOTER_READ_MISS_COUNT;
+  static IntCounter* IO_MGR_S3_NATIVE_FOOTER_READ_TIME_US;
   static IntGauge* NUM_FILES_OPEN_FOR_INSERT;
   static IntGauge* NUM_QUERIES_REGISTERED;
   static IntGauge* RESULTSET_CACHE_TOTAL_NUM_ROWS;

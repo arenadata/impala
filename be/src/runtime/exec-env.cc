@@ -17,6 +17,7 @@
 
 #include "runtime/exec-env.h"
 
+#include <limits>
 #include <vector>
 
 #include <boost/algorithm/string.hpp>
@@ -38,6 +39,9 @@
 #include "runtime/hbase-table-factory.h"
 #include "runtime/hdfs-fs-cache.h"
 #include "runtime/io/disk-io-mgr.h"
+#include "runtime/io/s3-native-client.h"
+#include "runtime/io/s3-native-file-cache.h"
+#include "runtime/io/s3-native-file-reader.h"
 #include "runtime/krpc-data-stream-mgr.h"
 #include "runtime/lib-cache.h"
 #include "runtime/mem-tracker.h"
@@ -135,6 +139,9 @@ DECLARE_int32(num_cores);
 DECLARE_int32(krpc_port);
 DECLARE_string(mem_limit);
 DECLARE_bool(mem_limit_includes_jvm);
+DECLARE_int32(s3_native_cache_max_mem_percent);
+DECLARE_int64(s3_native_cache_min_headroom);
+DECLARE_int64(s3_native_cache_headroom_check_ms);
 DECLARE_string(buffer_pool_limit);
 DECLARE_string(buffer_pool_clean_pages_limit);
 DECLARE_int64(min_buffer_size);
@@ -401,6 +408,15 @@ Status ExecEnv::Init() {
     LOG(INFO) << "CodeGen Cache is disabled.";
   }
 
+  if (S3NativeClientEnabled()) {
+    // Preserve the reserved part of the native S3 file cache, like for the codegen
+    // cache. The rest of its capacity uses memory that queries leave free.
+    int64_t max_percent =
+        min(max(FLAGS_s3_native_cache_max_mem_percent, 0), 100);
+    admit_mem_limit_ -= io::InitS3NativeFileCache(admit_mem_limit_ * max_percent / 100);
+    DCHECK_GT(admit_mem_limit_, 0);
+  }
+
   // Initialize the tuple cache
   RETURN_IF_ERROR(tuple_cache_mgr_->Init());
 
@@ -505,6 +521,10 @@ Status ExecEnv::Init() {
   mem_tracker_->RegisterMetrics(metrics_.get(), "mem-tracker.process");
 
   RETURN_IF_ERROR(disk_io_mgr_->Init());
+  // The remote data cache (--data_cache) as a second tier of the native S3 file cache.
+  if (S3NativeClientEnabled()) {
+    io::EnableS3NativeDataCache(disk_io_mgr_->remote_data_cache());
+  }
 
   // Start services in order to ensure that dependencies between them are met
   if (enable_webserver_) {
@@ -642,6 +662,42 @@ void ExecEnv::InitMemTracker(int64_t bytes_limit) {
     obj_pool_->Add(new MemTracker(JvmMemoryMetric::NON_HEAP_COMMITTED, -1,
         "JVM: non-heap committed", mem_tracker_.get()));
   }
+  io::S3NativeFileCache* s3_file_cache = io::GetS3NativeFileCache();
+  // Released by the GC function below; null if the cache is off.
+  io::S3NativeFileCache* gc_s3_file_cache = nullptr;
+  if (s3_file_cache != nullptr
+      && ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_TOTAL_BYTES != nullptr) {
+    gc_s3_file_cache = s3_file_cache;
+    // The cached files are process memory not tracked against queries. Queries take
+    // priority: the cache gives memory back when the process is over its limit, in the
+    // GC function added below together with the buffer pool's.
+    obj_pool_->Add(new MemTracker(ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_TOTAL_BYTES,
+        -1, "Native S3 File Cache", mem_tracker_.get()));
+    // The elastic part is given back before queries run into the limit: the cached
+    // blocks are not tracked against the process MemTracker between its refreshes, so
+    // the cache checks the process memory itself, also while it does not fill
+    // (background check). Used memory is the larger of what the process limit compares
+    // (the process MemTracker: its metric at the last refresh plus what queries consumed
+    // since, reservations included) and memory.total-used plus buffer pool reservations
+    // not backed by buffers yet (a join reserves memory before it allocates it). After
+    // a release the tracker is refreshed from its metric, like MemTracker::GcMemory()
+    // does, so that it no longer counts the freed cache memory.
+    MemTracker* process = mem_tracker_.get();
+    s3_file_cache->SetHeadroomFunction([process] () {
+      int64_t limit = process->limit();
+      if (limit < 0) return std::numeric_limits<int64_t>::max();
+      int64_t used = AggregateMemoryMetrics::TOTAL_USED->GetValue();
+      if (BufferPoolMetric::UNUSED_RESERVATION_BYTES != nullptr) {
+        used += std::max<int64_t>(BufferPoolMetric::UNUSED_RESERVATION_BYTES->GetValue(),
+            0);
+      }
+      return limit - std::max(used, process->consumption());
+    }, FLAGS_s3_native_cache_min_headroom,
+        FLAGS_s3_native_cache_headroom_check_ms,
+        [process] () { process->RefreshConsumptionFromMetric(); });
+  }
+  // One GC function for the native S3 file cache and the buffer pool, see
+  // io::ReleaseCacheThenBufferPool().
   if (buffer_pool_ != nullptr) {
     // Tests can create multiple buffer pools, meaning that the metrics are not usable.
     if (!TestInfo::is_test()) {
@@ -660,14 +716,21 @@ void ExecEnv::InitMemTracker(int64_t bytes_limit) {
       obj_pool_->Add(new MemTracker(negated_unused_reservation, -1,
           "Buffer Pool: Unused Reservation", mem_tracker_.get()));
     }
-    mem_tracker_->AddGcFunction([buffer_pool=buffer_pool_.get()] (int64_t bytes_to_free)
-    {
+    mem_tracker_->AddGcFunction([buffer_pool=buffer_pool_.get(), gc_s3_file_cache]
+        (int64_t bytes_to_free) {
+      io::ReleaseCacheThenBufferPool(gc_s3_file_cache, bytes_to_free,
+          [buffer_pool] (int64_t bytes) {
         // Only free memory in excess of the current reservation - the buffer pool
         // does not need to give up cached memory that is offset by an unused reservation.
         int64_t reserved = BufferPoolMetric::RESERVED->GetValue();
         int64_t allocated_from_sys = BufferPoolMetric::SYSTEM_ALLOCATED->GetValue();
         if (reserved >= allocated_from_sys) return;
-        buffer_pool->ReleaseMemory(min(bytes_to_free, allocated_from_sys - reserved));
+        buffer_pool->ReleaseMemory(min(bytes, allocated_from_sys - reserved));
+      });
+    });
+  } else if (gc_s3_file_cache != nullptr) {
+    mem_tracker_->AddGcFunction([gc_s3_file_cache] (int64_t bytes_to_free) {
+      gc_s3_file_cache->ReleaseMemory(bytes_to_free);
     });
   }
 }
