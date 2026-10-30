@@ -1,23 +1,24 @@
+%%{init: {"flowchart": {"htmlLabels": true, "wrappingWidth": 600, "nodeSpacing": 40, "rankSpacing": 50}}}%%
 flowchart TD
-    scan["HdfsScanNode<br/>DiskIoMgr I/O thread<br/>ScanRange::DoRead"]
-    sel{"s3a:// path and<br/>--s3_native_reader?"}
+    scan["HdfsScanNode -> DiskIoMgr I/O thread -> ScanRange::DoRead"]
+    sel{"s3a:// path and --s3_native_reader?"}
     hdfs["HdfsFileReader<br/>libhdfs, JVM, Hadoop S3A"]
     reader["S3NativeFileReader::ReadFromPos"]
-    size{"file length known and<br/>&lt;= --s3_native_whole_file_max_size<br/>(2 MiB)?"}
-    whole["Whole file<br/>one GET on the first read,<br/>one cache entry"]
-    blocks["Blocks of --s3_native_block_size (128 KB)<br/>hits copied from memory,<br/>each run of missing blocks = one ranged GET<br/>written straight into new cache blocks"]
+    size{"file length known and<br/>&lt;= --s3_native_whole_file_max_size (2 MiB)?"}
+    whole["Whole file<br/>one GET on the first read, one cache entry"]
+    blocks["Blocks of --s3_native_block_size (128 KB)<br/>hits copied from memory<br/>each run of missing blocks = one ranged GET"]
 
-    subgraph ram["S3NativeFileCache (RAM, under --mem_limit)"]
+    subgraph ram["S3NativeFileCache - RAM, under --mem_limit"]
         direction TB
         shards["Up to 16 shards by hash of bucket/key@mtime<br/>each: own lock, entries, LRU segments, frequency sketch"]
-        segs["Window (50%) -&gt; W-TinyLFU admission -&gt;<br/>probation / protected (80%) SLRU"]
-        mem["Elastic memory: 256 MB always kept,<br/>up to 4 GiB borrowed from free query memory,<br/>given back when headroom before --mem_limit &lt; 1 GiB"]
+        segs["Window (50%) -> W-TinyLFU admission -> probation / protected (80%) SLRU"]
+        mem["Elastic memory: 256 MB always kept, up to 4 GiB borrowed from free query memory<br/>given back when headroom before --mem_limit &lt; 1 GiB"]
         shards --- segs --- mem
     end
 
-    disk[("Remote data cache on local disk<br/>--data_cache (optional second tier)")]
+    disk[("Remote data cache on local disk<br/>--data_cache, optional second tier")]
     s3["aws-sdk-cpp S3Client<br/>ranged GET, connection pool, TLS (OpenSSL)"]
-    ozone[("S3 endpoint<br/>HAProxy -&gt; Ozone S3 gateways")]
+    ozone[("S3 endpoint: HAProxy -> Ozone S3 gateways")]
 
     scan --> sel
     sel -- no --> hdfs
