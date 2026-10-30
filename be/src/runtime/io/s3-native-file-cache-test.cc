@@ -20,6 +20,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <future>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -166,10 +167,13 @@ TEST(S3NativeFileCacheTest, ReleaseMemoryEvictsOldestFirst) {
   EXPECT_FALSE(Read(&cache, "a", 100, OWNER_1));
   EXPECT_FALSE(Read(&cache, "b", 100, OWNER_1));
   EXPECT_FALSE(Read(&cache, "c", 100, OWNER_1));
-  cache.ReleaseMemory(150);
+  // Whole entries are evicted, so the result can exceed the request.
+  EXPECT_EQ(200, cache.ReleaseMemory(150));
   EXPECT_EQ(1, cache.NumEntries());
   EXPECT_EQ(100, cache.TotalBytes());
   EXPECT_TRUE(Read(&cache, "c", 100, OWNER_1));
+  EXPECT_EQ(100, cache.ReleaseMemory(1000));
+  EXPECT_EQ(0, cache.ReleaseMemory(1000));
 }
 
 // When the process headroom drops below the margin, a fill gives the elastic part of
@@ -716,6 +720,117 @@ TEST(S3NativeFileCacheTest, AdmissionFilterBlocks) {
     EXPECT_EQ(pass == 0 ? 0 : 4, stats.hit_blocks);
   }
   EXPECT_EQ(400, cache.TotalBytes());
+}
+
+// A loader or fetcher that signals 'started' and then waits for 'release' before failing:
+// another reader can start waiting for its load in the meantime.
+struct BlockingFailure {
+  std::promise<void> started;
+  std::promise<void> release;
+
+  Status Wait() {
+    started.set_value();
+    release.get_future().wait();
+    return Status("injected error");
+  }
+};
+
+// A caller that waited for a whole-file load that failed loads the file itself instead
+// of failing with the other reader's error.
+TEST(S3NativeFileCacheTest, WaiterRetriesFailedLoad) {
+  S3NativeFileCache cache(1000, 80);
+  BlockingFailure failure;
+  Status first_status;
+  std::thread first([&]() {
+    shared_ptr<const S3NativeFileCache::File> file;
+    bool hit;
+    first_status = cache.Lookup("a", 100, OWNER_1,
+        [&failure](S3NativeFileCache::File* f) { return failure.Wait(); }, &file, &hit);
+  });
+  failure.started.get_future().wait();
+  std::atomic<int> calls(0);
+  shared_ptr<const S3NativeFileCache::File> file;
+  bool hit = true;
+  Status second_status;
+  std::thread second([&]() {
+    second_status =
+        cache.Lookup("a", 100, OWNER_2, FillLoader('y', &calls), &file, &hit);
+  });
+  // Let the second caller start waiting for the first load, then fail that load.
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  failure.release.set_value();
+  first.join();
+  second.join();
+  EXPECT_FALSE(first_status.ok());
+  ASSERT_OK(second_status);
+  EXPECT_FALSE(hit);
+  EXPECT_EQ(1, calls);
+  EXPECT_EQ('y', file->data[0]);
+  EXPECT_EQ(1, cache.NumEntries());
+}
+
+// Blocks: a reader waiting for blocks that another reader failed to fetch fetches them
+// itself and reads the right data; the failing reader gets its error.
+TEST(S3NativeFileCacheTest, ReadBlocksWaiterRetriesFailedFetch) {
+  S3NativeFileCache cache(10000, 80);
+  BlockingFailure failure;
+  Status first_status;
+  std::thread first([&]() {
+    vector<uint8_t> buffer(300);
+    int64_t bytes_read;
+    S3NativeFileCache::BlockStats stats;
+    first_status = cache.ReadBlocks("f@1", 1000, 100, 0, buffer.data(), 300, OWNER_1,
+        [&failure](int64_t, const S3NativeFileCache::Segments&, int64_t*) {
+          return failure.Wait();
+        }, &bytes_read, &stats);
+  });
+  failure.started.get_future().wait();
+  FakeObject object(1000);
+  int64_t bytes_read = -1;
+  std::thread second([&]() {
+    bytes_read = ReadAndCheck(&cache, &object, 1000, 50, 200, OWNER_2);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  failure.release.set_value();
+  first.join();
+  second.join();
+  EXPECT_FALSE(first_status.ok());
+  EXPECT_EQ(200, bytes_read);
+  // The second reader fetched blocks 0-2 itself after the failed load.
+  EXPECT_EQ((Fetches{{0, 300}}), object.TakeFetches());
+  EXPECT_EQ(300, cache.TotalBytes());
+}
+
+// The GC function shared with the buffer pool: the buffer pool gets what the cache did
+// not free, also all of it when the cache is empty or off.
+TEST(S3NativeFileCacheTest, ReleaseCacheThenBufferPool) {
+  vector<int64_t> pool_requests;
+  auto release_pool = [&pool_requests](int64_t bytes) { pool_requests.push_back(bytes); };
+
+  // No cache, and an empty cache: everything is asked from the buffer pool. Before, a
+  // separate cache GC function that freed nothing kept the buffer pool's from running.
+  ReleaseCacheThenBufferPool(nullptr, 500, release_pool);
+  S3NativeFileCache cache(1000, 80);
+  ReleaseCacheThenBufferPool(&cache, 500, release_pool);
+  EXPECT_EQ((vector<int64_t>{500, 500}), pool_requests);
+
+  // The cache frees part of it: the buffer pool is asked for the rest.
+  pool_requests.clear();
+  EXPECT_FALSE(Read(&cache, "a", 100, OWNER_1));
+  EXPECT_FALSE(Read(&cache, "b", 100, OWNER_1));
+  ReleaseCacheThenBufferPool(&cache, 500, release_pool);
+  EXPECT_EQ(0, cache.TotalBytes());
+  EXPECT_EQ((vector<int64_t>{300}), pool_requests);
+
+  // The cache frees enough (whole entries, so possibly more): the buffer pool is not
+  // asked.
+  pool_requests.clear();
+  for (char c = 'a'; c <= 'e'; ++c) {
+    EXPECT_FALSE(Read(&cache, string(1, c), 100, OWNER_1));
+  }
+  ReleaseCacheThenBufferPool(&cache, 250, release_pool);
+  EXPECT_EQ(200, cache.TotalBytes());
+  EXPECT_TRUE(pool_requests.empty());
 }
 
 } // namespace io

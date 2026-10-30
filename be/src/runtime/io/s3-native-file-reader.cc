@@ -149,10 +149,11 @@ Aws::S3::Model::GetObjectRequest MakeGetRequest(const string& bucket, const stri
   });
 }
 
-/// Checks the outcome of a ranged GET of 'len' bytes and sets 'bytes_read'. HTTP 416
-/// means the range starts at or past the end of the object: 0 bytes, not an error.
-Status CheckGetOutcome(const Aws::S3::Model::GetObjectOutcome& outcome, int64_t len,
-    int64_t* bytes_read) {
+/// Checks the outcome of a ranged GET of 'len' bytes at 'offset' and sets 'bytes_read'.
+/// HTTP 416 means the range starts at or past the end of the object: 0 bytes, not an
+/// error.
+Status CheckGetOutcome(const Aws::S3::Model::GetObjectOutcome& outcome, int64_t offset,
+    int64_t len, int64_t* bytes_read) {
   *bytes_read = 0;
   if (!outcome.IsSuccess()) {
     const auto& error = outcome.GetError();
@@ -166,6 +167,7 @@ Status CheckGetOutcome(const Aws::S3::Model::GetObjectOutcome& outcome, int64_t 
   // The body size is taken from the stream position, not only from Content-Length:
   // aws-sdk-cpp reports 0 when the header is absent (chunked transfer encoding).
   const Aws::S3::Model::GetObjectResult& result = outcome.GetResult();
+  RETURN_IF_ERROR(CheckS3ContentRange(result.GetContentRange().c_str(), offset));
   int64_t bytes_written = static_cast<int64_t>(result.GetBody().tellp());
   bool eof;
   return CheckS3RangeRead(
@@ -265,7 +267,8 @@ Status S3NativeFileReader::GetRange(int64_t offset, uint8_t* buffer, int64_t len
   auto check_part = [&](int i, const Aws::S3::Model::GetObjectOutcome& outcome) {
     int64_t part_offset = i * part_size;
     int64_t part_len = min(part_size, len - part_offset);
-    Status part_status = CheckGetOutcome(outcome, part_len, &received[i]);
+    Status part_status =
+        CheckGetOutcome(outcome, offset + part_offset, part_len, &received[i]);
     if (!part_status.ok() && status.ok()) {
       status = Status(TErrorCode::DISK_IO_ERROR, GetBackendString(),
           Substitute("Error reading S3 object s3a://$0/$1 at offset $2 ($3 bytes): $4",
@@ -310,7 +313,7 @@ Status S3NativeFileReader::GetSegments(int64_t offset,
       MakeGetRequest(bucket_, key_, offset, len, [segments]() {
         return Aws::New<SegmentIOStream>(kAllocationTag, segments);
       }));
-  Status status = CheckGetOutcome(outcome, len, bytes_read);
+  Status status = CheckGetOutcome(outcome, offset, len, bytes_read);
   ++gets_sent_;
   if (ImpaladMetrics::IO_MGR_S3_NATIVE_GET_COUNT != nullptr) {
     ImpaladMetrics::IO_MGR_S3_NATIVE_GET_COUNT->Increment(1);

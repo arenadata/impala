@@ -410,4 +410,26 @@ Status CheckS3RangeRead(int64_t bytes_requested, int64_t bytes_written,
   return Status::OK();
 }
 
+Status CheckS3ContentRange(const string& content_range, int64_t offset) {
+  if (offset == 0) return Status::OK();
+  if (content_range.empty()) {
+    return Status(Substitute("No Content-Range in the response to a GET at offset $0: "
+        "the server ignored the Range header", offset));
+  }
+  // "bytes <first>-<last>/<length or *>"
+  const string prefix = "bytes ";
+  int64_t first = -1;
+  if (content_range.compare(0, prefix.size(), prefix) == 0) {
+    const char* start = content_range.c_str() + prefix.size();
+    char* end = nullptr;
+    long long value = strtoll(start, &end, 10);
+    if (end != start && *end == '-') first = value;
+  }
+  if (first != offset) {
+    return Status(Substitute("Content-Range '$0' does not start at the requested "
+        "offset $1", content_range, offset));
+  }
+  return Status::OK();
+}
+
 } // namespace impala

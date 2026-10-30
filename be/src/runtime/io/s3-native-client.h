@@ -94,6 +94,14 @@ int64_t S3PartsBytesRead(int64_t len, int64_t part_size,
 Status CheckS3RangeRead(int64_t bytes_requested, int64_t bytes_written,
     int64_t content_length, int64_t* bytes_read, bool* eof);
 
+/// Checks the Content-Range header of a successful ranged GET at 'offset'
+/// ('content_range', e.g. "bytes 100-199/1000", empty if the header is absent). A server
+/// that ignores the Range header answers 200 with the object from its start and no
+/// Content-Range; that body must not be taken as data at 'offset'. A read at offset 0
+/// needs no header: its body starts at 0 either way. Returns an error if the header is
+/// missing or starts at another offset.
+Status CheckS3ContentRange(const std::string& content_range, int64_t offset);
+
 /// Stream buffer over several caller-owned buffers ('segments', each a pointer and a
 /// length), written one after another as if they were one buffer. Used as the response
 /// body of a GET that fills several cache blocks at once, so the body is written straight

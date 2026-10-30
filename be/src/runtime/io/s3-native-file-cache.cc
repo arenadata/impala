@@ -154,14 +154,24 @@ Status S3NativeFileCache::Lookup(const std::string& file_key, int64_t length,
   DCHECK_GT(length, 0);
   Ref ref;
   Acquire(file_key, kWholeFile, owner, &ref);
-  if (!ref.reserved) {
-    // Cached, or another thread is loading it: wait for that load instead of sending
-    // another request.
-    if (ref.file == nullptr) {
-      const LoadResult& result = ref.pending.get();
-      RETURN_IF_ERROR(result.first);
-      ref.file = result.second;
+  if (!ref.reserved && ref.file == nullptr) {
+    // Another thread is loading it: wait for that load instead of sending another
+    // request. If it failed (the entry is gone then), retry once with this caller's
+    // own request instead of failing with another reader's error.
+    LoadResult result = ref.pending.get();
+    if (result.first.ok()) {
+      ref.file = std::move(result.second);
+    } else {
+      ref = Ref();
+      Acquire(file_key, kWholeFile, owner, &ref);
+      if (!ref.reserved && ref.file == nullptr) {
+        result = ref.pending.get();
+        RETURN_IF_ERROR(result.first);
+        ref.file = std::move(result.second);
+      }
     }
+  }
+  if (!ref.reserved) {
     *file = std::move(ref.file);
     *hit = true;
     return Status::OK();
@@ -335,6 +345,29 @@ void S3NativeFileCache::EraseLocked(Shard* shard, FileEntries* file, int64_t blo
 Status S3NativeFileCache::ReadBlocks(const std::string& file_key, int64_t file_length,
     int64_t block_size, int64_t offset, uint8_t* buffer, int64_t len,
     const void* owner, const Fetcher& fetch, int64_t* bytes_read, BlockStats* stats) {
+  BlockStats first;
+  Status waited_error;
+  RETURN_IF_ERROR(ReadBlocksOnce(file_key, file_length, block_size, offset, buffer, len,
+      owner, fetch, bytes_read, &first, &waited_error));
+  if (waited_error.ok()) {
+    stats->hit_blocks += first.hit_blocks;
+    stats->hit_bytes += first.hit_bytes;
+    stats->missed_blocks += first.missed_blocks;
+    return Status::OK();
+  }
+  // A block loaded by another reader failed (and is gone from the cache): read again,
+  // this time fetching it. The blocks the first attempt fetched are hits now.
+  VLOG_FILE << "Native S3 file cache: retrying a read of " << file_key
+            << " after a failed load by another reader: " << waited_error.GetDetail();
+  stats->missed_blocks += first.missed_blocks;
+  return ReadBlocksOnce(file_key, file_length, block_size, offset, buffer, len, owner,
+      fetch, bytes_read, stats, nullptr);
+}
+
+Status S3NativeFileCache::ReadBlocksOnce(const std::string& file_key,
+    int64_t file_length, int64_t block_size, int64_t offset, uint8_t* buffer,
+    int64_t len, const void* owner, const Fetcher& fetch, int64_t* bytes_read,
+    BlockStats* stats, Status* waited_error) {
   DCHECK_GT(block_size, 0);
   DCHECK_GE(offset, 0);
   *bytes_read = 0;
@@ -418,7 +451,12 @@ Status S3NativeFileCache::ReadBlocks(const std::string& file_key, int64_t file_l
     bool hit = !refs[i].reserved;
     if (refs[i].file == nullptr) {
       const LoadResult& result = refs[i].pending.get();
-      RETURN_IF_ERROR(result.first);
+      if (!result.first.ok()) {
+        if (waited_error == nullptr) return result.first;
+        *waited_error = result.first;
+        *bytes_read = 0;
+        return Status::OK();
+      }
       refs[i].file = result.second;
     }
     const File& block = *refs[i].file;
@@ -524,10 +562,10 @@ void S3NativeFileCache::EvictLocked(
   }
 }
 
-void S3NativeFileCache::ReleaseMemory(int64_t bytes_to_free) {
+int64_t S3NativeFileCache::ReleaseMemory(int64_t bytes_to_free) {
   // The next headroom check clears it; without a headroom check it stays unset.
   if (headroom_fn_ && reserved_ < capacity_) low_headroom_ = true;
-  Release(bytes_to_free, 0, ReleaseReason::kProcessLimit);
+  return Release(bytes_to_free, 0, ReleaseReason::kProcessLimit);
 }
 
 bool S3NativeFileCache::SkipFill(int64_t len) {
@@ -725,6 +763,12 @@ int64_t InitS3NativeFileCache(int64_t max_capacity) {
 
 S3NativeFileCache* GetS3NativeFileCache() {
   return file_cache.get();
+}
+
+void ReleaseCacheThenBufferPool(S3NativeFileCache* cache, int64_t bytes_to_free,
+    const std::function<void(int64_t)>& release_buffer_pool) {
+  if (cache != nullptr) bytes_to_free -= cache->ReleaseMemory(bytes_to_free);
+  if (bytes_to_free > 0) release_buffer_pool(bytes_to_free);
 }
 
 } // namespace io
