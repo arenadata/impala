@@ -12,7 +12,7 @@ flowchart TD
         direction TB
         shards["Up to 16 shards by hash of bucket/key@mtime<br/>each: own lock, entries, LRU segments, frequency sketch"]
         segs["Window (50%) -> W-TinyLFU admission -> probation / protected (80%) SLRU"]
-        mem["Elastic memory: 256 MB always kept, up to 4 GiB borrowed from free query memory<br/>given back when headroom before --mem_limit &lt; 1 GiB"]
+        mem["Elastic memory: 256 MB always kept, up to 4 GiB borrowed from free query memory"]
         shards --- segs --- mem
     end
 
