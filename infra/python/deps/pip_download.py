@@ -52,7 +52,7 @@ if not PYPI_FILES_MIRROR:
 REQUIREMENTS_FILES = ['requirements.txt', 'setuptools-requirements.txt',
                       'kudu-requirements.txt', 'adls-requirements.txt',
                       'py2-requirements.txt', 'py3-requirements.txt',
-                      'gcovr-requirements.txt']
+                      'gcovr-requirements.txt', 'build-requirements.txt']
 
 
 def check_digest(filename, algorithm, expected_digest):

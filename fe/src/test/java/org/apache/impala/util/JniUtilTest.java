@@ -24,6 +24,8 @@ import static org.junit.Assert.assertTrue;
 import org.apache.impala.common.ImpalaException;
 import org.apache.impala.common.JniUtil;
 import org.apache.impala.thrift.TCacheJarParams;
+import org.apache.impala.thrift.TColumnValue;
+import org.apache.thrift.TConfiguration;
 import org.apache.thrift.protocol.TBinaryProtocol;
 import org.junit.Test;
 
@@ -46,6 +48,20 @@ public class JniUtilTest {
     TCacheJarParams deserializedTestObj = new TCacheJarParams();
     JniUtil.deserializeThrift(protocolFactory_, deserializedTestObj, testObjBytes);
     assertEquals(deserializedTestObj.hdfs_location, "test string");
+  }
+
+  @Test
+  public void testDeserializeAboveThriftDefaultMaxMessageSize() throws ImpalaException {
+    byte[] value = new byte[TConfiguration.DEFAULT_MAX_MESSAGE_SIZE + 1024];
+    value[value.length - 1] = 1;
+    TColumnValue testObject = new TColumnValue();
+    testObject.setBinary_val(value);
+    byte[] testObjBytes = JniUtil.serializeToThrift(testObject, protocolFactory_);
+
+    TColumnValue deserializedTestObj = new TColumnValue();
+    JniUtil.deserializeThrift(protocolFactory_, deserializedTestObj, testObjBytes);
+    assertEquals(value.length, deserializedTestObj.getBinary_val().length);
+    assertEquals(1, deserializedTestObj.getBinary_val()[value.length - 1]);
   }
 
   static private void assertSingleGroup(String group, List<String> list) {
