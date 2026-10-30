@@ -15,7 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# Downloaded but never installed into the virtualenvs: pip takes these from this
-# directory only for the isolated environments in which it builds sdists that have a
-# pyproject.toml, e.g. thrift 0.25.0 (setuptools>=69) and impyla 0.24.0 (setuptools>=61).
+# Downloaded but never installed into the virtualenvs: the Python 3 pip takes these from
+# this directory only for the isolated environments in which it builds sdists that have
+# a pyproject.toml, e.g. thrift 0.25.0 (setuptools>=69) and impyla 0.24.0
+# (setuptools>=61). bootstrap_virtualenv.py holds Python 2 to setuptools-requirements.txt.
 setuptools == 69.5.1

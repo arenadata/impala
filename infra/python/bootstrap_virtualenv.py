@@ -180,6 +180,11 @@ def exec_pip_install(venv_dir, is_py3, args, cc="no-cc-available", env=None):
   current process's command line arguments are inherited.'''
   if not env: env = dict(os.environ)
   env["CC"] = cc
+  if not is_py3:
+    # The deps directory also holds a setuptools that needs Python 3 (see
+    # build-requirements.txt). The constraint reaches the isolated build environments
+    # too, so they keep the Python 2 compatible setuptools.
+    env["PIP_CONSTRAINT"] = SETUPTOOLS_REQS_PATH
   # Since gcc is now built with toolchain binutils which may be newer than the
   # system binutils, we need to include the toolchain binutils on the PATH.
   toolchain_binutils_dir = toolchain_pkg_dir("binutils")
