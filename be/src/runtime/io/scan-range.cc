@@ -514,7 +514,13 @@ void ScanRange::Reset(const FileInfo &fi, int64_t len, int64_t offset, int disk_
          buffer_opts.client_buffer_len_ >= len_);
   fs_ = fi.fs;
   if (fs_ != nullptr) {
-    if (S3NativeClientEnabled() && IsS3APath(fi.filename)) {
+    // Only paths that name the s3a:// scheme: a path without a scheme on a cluster whose
+    // default filesystem is S3A is left to HdfsFileReader (ParseS3Path() needs a bucket).
+    // Spill files of TmpFileMgr (remote scratch dirs, 'disk_file' set) also keep
+    // HdfsFileReader: they are read once through a local buffer file, so the native
+    // reader's cache does not help, and their bucket may be set up only in core-site.
+    if (S3NativeClientEnabled() && disk_file == nullptr
+        && IsS3APath(fi.filename, /* check_default_fs */ false)) {
       // Experimental: read s3a:// files with aws-sdk-cpp (--s3_native_reader).
       file_reader_ = make_unique<S3NativeFileReader>(this);
     } else {

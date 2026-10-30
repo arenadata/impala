@@ -190,9 +190,11 @@ class S3NativeFileCache {
   /// Returns in '*file' the whole file stored under 'file_key'. On a miss allocates a
   /// buffer of 'length' bytes and calls 'loader' to fill it; concurrent calls for the
   /// same key wait for that load. '*hit' is false only for the caller that ran 'loader'.
-  /// An error of 'loader' is returned to every waiting caller and nothing is cached.
-  /// 'owner' identifies the reader (the scan's RequestContext); a hit by an owner other
-  /// than the one that loaded the file promotes the file to the protected segment.
+  /// An error of 'loader' is returned to its caller and nothing is cached; a caller that
+  /// waited for that load retries once with its own 'loader', so that one failed
+  /// request does not fail every reader of the file. 'owner' identifies the reader (the
+  /// scan's RequestContext); a hit by an owner other than the one that loaded the file
+  /// promotes the file to the protected segment.
   Status Lookup(const std::string& file_key, int64_t length, const void* owner,
       const Loader& loader, std::shared_ptr<const File>* file, bool* hit);
 
@@ -201,6 +203,9 @@ class S3NativeFileCache {
   /// 'file_key'. Each run of consecutive blocks that are neither cached nor being loaded
   /// is fetched with one call of 'fetch', straight into the new blocks. Sets
   /// 'bytes_read', less than 'len' only at the end of the file. 'owner' as in Lookup().
+  /// An error of 'fetch' is returned and nothing of that read is cached; if a block
+  /// loaded by another reader failed, the read is retried once, fetching that block
+  /// itself.
   Status ReadBlocks(const std::string& file_key, int64_t file_length,
       int64_t block_size, int64_t offset, uint8_t* buffer, int64_t len,
       const void* owner, const Fetcher& fetch, int64_t* bytes_read, BlockStats* stats);
@@ -223,8 +228,9 @@ class S3NativeFileCache {
   /// Evicts entries, least recently used first, until at least 'bytes_to_free' bytes are
   /// released or the cache is empty, also the reserved part. Called when the process is
   /// over its memory limit, so that queries take priority over cached files. Entries
-  /// still being read are freed when their last reader is done.
-  void ReleaseMemory(int64_t bytes_to_free);
+  /// still being read are freed when their last reader is done. Returns the number of
+  /// bytes evicted.
+  int64_t ReleaseMemory(int64_t bytes_to_free);
 
   /// Number of bytes and entries currently cached (not counting entries being loaded).
   int64_t TotalBytes() const { return total_bytes_.load(); }
@@ -321,6 +327,14 @@ class S3NativeFileCache {
 
   /// Returns the entries of 'file_key' in 'shard', inserting them if 'create'.
   FileEntries* FindFileLocked(Shard* shard, const std::string& file_key, bool create);
+
+  /// One attempt of ReadBlocks(). If a block loaded by another reader failed and
+  /// 'waited_error' is not null, sets it to that error and returns OK without reading;
+  /// otherwise returns the error.
+  Status ReadBlocksOnce(const std::string& file_key, int64_t file_length,
+      int64_t block_size, int64_t offset, uint8_t* buffer, int64_t len,
+      const void* owner, const Fetcher& fetch, int64_t* bytes_read, BlockStats* stats,
+      Status* waited_error);
 
   /// Acquire() of block 'block' of 'file' in 'shard' with its lock held.
   void AcquireLocked(Shard* shard, FileEntries* file, int64_t block, const void* owner,
@@ -444,6 +458,15 @@ int64_t InitS3NativeFileCache(int64_t max_capacity);
 
 /// Returns the process-wide cache, or nullptr if it is disabled.
 S3NativeFileCache* GetS3NativeFileCache();
+
+/// GC function of the process MemTracker for the cache and the buffer pool together (see
+/// ExecEnv::InitMemTracker()): releases up to 'bytes_to_free' bytes of 'cache' (if not
+/// null), then calls 'release_buffer_pool' with the bytes still to free, if any. One
+/// function for both, because MemTracker::GcMemory() skips the next GC function when the
+/// previous one leaves the process within 512MB of its limit: a separate cache function
+/// that frees little would keep the buffer pool from releasing its memory.
+void ReleaseCacheThenBufferPool(S3NativeFileCache* cache, int64_t bytes_to_free,
+    const std::function<void(int64_t)>& release_buffer_pool);
 
 } // namespace io
 } // namespace impala
