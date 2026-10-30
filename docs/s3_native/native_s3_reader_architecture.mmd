@@ -10,7 +10,7 @@ flowchart TD
 
     subgraph ram["S3NativeFileCache - RAM, under --mem_limit"]
         direction TB
-        shards["Up to 16 shards by hash of bucket/key@mtime<br/>each: own lock, entries, LRU segments, frequency sketch"]
+        shards["Up to 16 shards by hash of bucket/key@mtime<br/>each: own lock, entries, LRU segments, read-frequency counters"]
         segs["Window (50%) -> W-TinyLFU admission -> probation / protected (80%) SLRU"]
         mem["Elastic memory: 256 MB always kept, up to 4 GiB borrowed from free query memory"]
         shards --- segs --- mem
