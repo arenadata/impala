@@ -279,7 +279,9 @@ class ScanRange : public RequestRange {
     bool is_encrypted = false;
     bool is_erasure_coded = false;
     /// Length of the whole file, -1 if unknown. Used by the native S3 reader to read
-    /// small files whole (--s3_native_whole_file_max_size).
+    /// small files whole (--s3_native_whole_file_max_size) and to cache blocks; with -1
+    /// it reads without its cache. HdfsFileDesc::GetFileInfo() and
+    /// ScanRange::GetFileInfo() set it; code that builds a FileInfo by hand should too.
     int64_t file_length = -1;
   };
 
