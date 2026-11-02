@@ -39,6 +39,7 @@ DECLARE_int64(s3_native_block_size);
 DECLARE_int64(s3_native_cache_capacity);
 DECLARE_int64(s3_native_cache_reserved_capacity);
 DECLARE_int32(s3_native_cache_protected_percent);
+DECLARE_int32(s3_native_cache_shard_group_blocks);
 DECLARE_bool(s3_native_cache_admission_filter);
 DECLARE_int32(s3_native_cache_admission_window_percent);
 
@@ -144,8 +145,25 @@ void S3NativeFileCache::EnableAdmissionFilter(int64_t entry_size, int window_per
   }
 }
 
-S3NativeFileCache::Shard& S3NativeFileCache::ShardFor(const std::string& file_key) {
-  return *shards_[std::hash<std::string>()(file_key) % shards_.size()];
+void S3NativeFileCache::SetShardGroupBlocks(int64_t group_blocks) {
+  shard_group_blocks_ = std::max<int64_t>(group_blocks, 0);
+}
+
+S3NativeFileCache::Shard& S3NativeFileCache::ShardFor(
+    const std::string& file_key, int64_t block) {
+  uint64_t hash = std::hash<std::string>()(file_key);
+  if (shard_group_blocks_ > 0 && block != kWholeFile && shards_.size() > 1) {
+    hash = Mix(hash + static_cast<uint64_t>(block / shard_group_blocks_)
+        * 0x9e3779b97f4a7c15ULL);
+  }
+  return *shards_[hash % shards_.size()];
+}
+
+int S3NativeFileCache::GroupEnd(int64_t first_block, int i, int num_blocks) const {
+  if (shard_group_blocks_ <= 0) return num_blocks;
+  int64_t next_group =
+      ((first_block + i) / shard_group_blocks_ + 1) * shard_group_blocks_;
+  return static_cast<int>(std::min<int64_t>(num_blocks, next_group - first_block));
 }
 
 Status S3NativeFileCache::Lookup(const std::string& file_key, int64_t length,
@@ -187,14 +205,14 @@ Status S3NativeFileCache::Lookup(const std::string& file_key, int64_t length,
 
 void S3NativeFileCache::Acquire(
     const std::string& file_key, int64_t block, const void* owner, Ref* ref) {
-  Shard& shard = ShardFor(file_key);
+  Shard& shard = ShardFor(file_key, block);
   std::lock_guard<std::mutex> l(shard.lock);
   AcquireLocked(&shard, FindFileLocked(&shard, file_key, true), block, owner, ref);
 }
 
 void S3NativeFileCache::Fill(const std::string& file_key, int64_t block,
     const void* owner, const Status& status, std::shared_ptr<const File> file) {
-  Shard& shard = ShardFor(file_key);
+  Shard& shard = ShardFor(file_key, block);
   std::shared_ptr<std::promise<LoadResult>> load_promise;
   std::vector<Evicted> evicted;
   {
@@ -375,12 +393,14 @@ Status S3NativeFileCache::ReadBlocksOnce(const std::string& file_key,
   if (offset >= end) return Status::OK();
   const int64_t first_block = offset / block_size;
   const int num_blocks = static_cast<int>((end - 1) / block_size - first_block + 1);
-  Shard& shard = ShardFor(file_key);
   std::vector<Ref> refs(num_blocks);
-  {
+  // The blocks of one group are in one shard: one lock per group of the read.
+  for (int i = 0; i < num_blocks;) {
+    const int group_end = GroupEnd(first_block, i, num_blocks);
+    Shard& shard = ShardFor(file_key, first_block + i);
     std::lock_guard<std::mutex> l(shard.lock);
     FileEntries* entries = FindFileLocked(&shard, file_key, true);
-    for (int i = 0; i < num_blocks; ++i) {
+    for (; i < group_end; ++i) {
       AcquireLocked(&shard, entries, first_block + i, owner, &refs[i]);
     }
   }
@@ -414,9 +434,12 @@ Status S3NativeFileCache::ReadBlocksOnce(const std::string& file_key,
     results.clear();
     int64_t filled = 0;
     std::vector<Evicted> evicted;
-    {
+    // A run may cross group boundaries: each group is filled under its shard's lock.
+    for (int g = i; g < j;) {
+      const int group_end = std::min(j, GroupEnd(first_block, g, num_blocks));
+      Shard& shard = ShardFor(file_key, first_block + g);
       std::lock_guard<std::mutex> l(shard.lock);
-      for (int k = i; k < j; ++k) {
+      for (int k = g; k < group_end; ++k) {
         int64_t block = first_block + k;
         if (!status.ok()) {
           results.emplace_back(
@@ -436,6 +459,7 @@ Status S3NativeFileCache::ReadBlocksOnce(const std::string& file_key,
                 &evicted),
             LoadResult(Status::OK(), run_block));
       }
+      g = group_end;
     }
     UpdateGauges();
     for (auto& result : results) result.first->set_value(std::move(result.second));
@@ -734,6 +758,7 @@ int64_t InitS3NativeFileCache(int64_t max_capacity) {
       std::min<int64_t>(std::max<int64_t>(capacity / (8 * largest_entry), 1), 16));
   file_cache = std::make_unique<S3NativeFileCache>(
       capacity, protected_percent, num_shards, reserved);
+  file_cache->SetShardGroupBlocks(FLAGS_s3_native_cache_shard_group_blocks);
   if (FLAGS_s3_native_cache_admission_filter) {
     // Sized for the blocks, the most numerous entries.
     file_cache->EnableAdmissionFilter(
@@ -743,8 +768,13 @@ int64_t InitS3NativeFileCache(int64_t max_capacity) {
   LOG(INFO) << "Native S3 reader: file cache capacity "
             << PrettyPrinter::PrintBytes(capacity) << " ("
             << PrettyPrinter::PrintBytes(reserved) << " reserved, the rest uses memory "
-            << "queries leave free) in " << num_shards
-            << " shards, protected segment " << protected_percent
+            << "queries leave free) in " << num_shards << " shards ("
+            << (FLAGS_s3_native_cache_shard_group_blocks > 0
+                   ? "files spread in groups of "
+                       + std::to_string(FLAGS_s3_native_cache_shard_group_blocks)
+                       + " blocks"
+                   : std::string("one shard per file"))
+            << "), protected segment " << protected_percent
             << "%, admission filter "
             << (FLAGS_s3_native_cache_admission_filter
                    ? "on (window " + std::to_string(

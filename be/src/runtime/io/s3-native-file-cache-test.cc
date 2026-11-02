@@ -801,6 +801,55 @@ TEST(S3NativeFileCacheTest, ReadBlocksWaiterRetriesFailedFetch) {
   EXPECT_EQ(300, cache.TotalBytes());
 }
 
+// A file larger than one shard: with its blocks spread over the shards in groups, a
+// repeated read is served from the cache; with one shard per file the file keeps
+// evicting its own blocks and only the last ones are hits.
+TEST(S3NativeFileCacheTest, ShardGroupsSpreadLargeFile) {
+  for (int64_t group_blocks : {0, 4}) {
+    // 16 shards of 500 bytes; the file has 200 blocks of 10 bytes (2000 bytes).
+    S3NativeFileCache cache(8000, 80, 16);
+    cache.SetShardGroupBlocks(group_blocks);
+    FakeObject object(2000);
+    vector<uint8_t> buffer(2000);
+    int64_t bytes_read = 0;
+    S3NativeFileCache::BlockStats first;
+    ASSERT_OK(cache.ReadBlocks("big@1", 2000, 10, 0, buffer.data(), 2000, OWNER_1,
+        object.Fetcher(), &bytes_read, &first));
+    EXPECT_EQ(2000, bytes_read);
+    S3NativeFileCache::BlockStats second;
+    ASSERT_OK(cache.ReadBlocks("big@1", 2000, 10, 0, buffer.data(), 2000, OWNER_1,
+        object.Fetcher(), &bytes_read, &second));
+    EXPECT_EQ(2000, bytes_read);
+    for (int64_t i = 0; i < bytes_read; ++i) {
+      ASSERT_EQ(static_cast<uint8_t>(i % 251), buffer[i]) << "offset " << i;
+    }
+    if (group_blocks == 0) {
+      EXPECT_LE(second.hit_blocks, 50) << "one shard of 500 bytes holds 50 blocks";
+    } else {
+      // 50 groups of 40 bytes over 16 shards of 500 bytes (12 groups each): all fit.
+      EXPECT_EQ(200, second.hit_blocks);
+      EXPECT_EQ(2000, cache.TotalBytes());
+    }
+  }
+}
+
+// A read across a group boundary: the missing run is still fetched with one request,
+// and its blocks (in the shards of both groups) are hits on the next read.
+TEST(S3NativeFileCacheTest, ReadAcrossShardGroups) {
+  S3NativeFileCache cache(10000, 80, 4);
+  cache.SetShardGroupBlocks(4);
+  FakeObject object(1000);
+  S3NativeFileCache::BlockStats stats;
+  // Blocks 3-5: block 3 in group 0, blocks 4 and 5 in group 1.
+  EXPECT_EQ(200, ReadAndCheck(&cache, &object, 1000, 350, 200, OWNER_1, &stats));
+  EXPECT_EQ((Fetches{{300, 300}}), object.TakeFetches());
+  EXPECT_EQ(3, stats.missed_blocks);
+  S3NativeFileCache::BlockStats again;
+  EXPECT_EQ(200, ReadAndCheck(&cache, &object, 1000, 350, 200, OWNER_1, &again));
+  EXPECT_TRUE(object.TakeFetches().empty());
+  EXPECT_EQ(3, again.hit_blocks);
+}
+
 // The GC function shared with the buffer pool: the buffer pool gets what the cache did
 // not free, also all of it when the cache is empty or off.
 TEST(S3NativeFileCacheTest, ReleaseCacheThenBufferPool) {
