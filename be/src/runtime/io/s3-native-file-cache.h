@@ -423,10 +423,12 @@ class S3NativeFileCache {
 
   /// Evicts entries, least recently used first, until 'bytes_to_free' bytes are released
   /// or at most 'keep_bytes' are left; returns the number of bytes freed now (evicted
-  /// entries that no reader still holds). Returns that memory to the system, updates the
-  /// metrics of 'reason' with the bytes evicted and logs them (at most every few seconds
-  /// per reason).
-  int64_t Release(int64_t bytes_to_free, int64_t keep_bytes, ReleaseReason reason);
+  /// entries that no reader still holds) and sets 'evicted_bytes', if not null, to the
+  /// bytes evicted. Returns free memory to the system (up to the bytes evicted), updates
+  /// the metrics of 'reason' with the bytes evicted and logs them (at most every few
+  /// seconds per reason).
+  int64_t Release(int64_t bytes_to_free, int64_t keep_bytes, ReleaseReason reason,
+      int64_t* evicted_bytes = nullptr);
 
   /// Whether an entry of 'len' bytes is not cached because the headroom is low (see the
   /// class comment). Updates the skipped bytes metric.
