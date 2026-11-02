@@ -176,10 +176,13 @@ Status S3NativeFileCache::Lookup(const std::string& file_key, int64_t length,
     // Another thread is loading it: wait for that load instead of sending another
     // request. If it failed (the entry is gone then), retry once with this caller's
     // own request instead of failing with another reader's error.
+    ++num_waiting_;
     LoadResult result = ref.pending.get();
+    --num_waiting_;
     if (result.first.ok()) {
       ref.file = std::move(result.second);
     } else {
+      ++retries_after_failed_wait_;
       ref = Ref();
       Acquire(file_key, kWholeFile, owner, &ref);
       if (!ref.reserved && ref.file == nullptr) {
@@ -378,6 +381,7 @@ Status S3NativeFileCache::ReadBlocks(const std::string& file_key, int64_t file_l
   VLOG_FILE << "Native S3 file cache: retrying a read of " << file_key
             << " after a failed load by another reader: " << waited_error.GetDetail();
   stats->missed_blocks += first.missed_blocks;
+  ++retries_after_failed_wait_;
   return ReadBlocksOnce(file_key, file_length, block_size, offset, buffer, len, owner,
       fetch, bytes_read, stats, nullptr);
 }
@@ -474,7 +478,9 @@ Status S3NativeFileCache::ReadBlocksOnce(const std::string& file_key,
   for (int i = 0; i < num_blocks && pos < end; ++i) {
     bool hit = !refs[i].reserved;
     if (refs[i].file == nullptr) {
+      ++num_waiting_;
       const LoadResult& result = refs[i].pending.get();
+      --num_waiting_;
       if (!result.first.ok()) {
         if (waited_error == nullptr) return result.first;
         *waited_error = result.first;
@@ -546,8 +552,8 @@ void S3NativeFileCache::DemoteLocked(Shard* shard) {
   }
 }
 
-int64_t S3NativeFileCache::RemoveLastLocked(
-    Shard* shard, Segment segment_id, std::vector<Evicted>* evicted) {
+int64_t S3NativeFileCache::RemoveLastLocked(Shard* shard, Segment segment_id,
+    std::vector<Evicted>* evicted, int64_t* freed_now) {
   std::list<LruItem>& segment = segment_id == Segment::kWindow ? shard->window
       : segment_id == Segment::kProbation ? shard->probation
       : shard->protected_lru;
@@ -559,6 +565,9 @@ int64_t S3NativeFileCache::RemoveLastLocked(
   auto it = item.file->blocks.find(item.block);
   DCHECK(it != item.file->blocks.end());
   int64_t len = it->second.file->len;
+  // References are taken only under the shard lock, so the count cannot grow here; a
+  // reader that lets go right after this check is not counted (the safe direction).
+  if (freed_now != nullptr && it->second.file.use_count() == 1) *freed_now += len;
   if (evicted != nullptr && it->second.reused && eviction_handler_) {
     evicted->push_back(Evicted{*item.file->key, item.block, it->second.file});
   }
@@ -660,7 +669,10 @@ int64_t S3NativeFileCache::Release(
     int64_t bytes_to_free, int64_t keep_bytes, ReleaseReason reason) {
   bytes_to_free = std::min(bytes_to_free, total_bytes_.load() - keep_bytes);
   if (bytes_to_free <= 0) return 0;
+  // 'freed' counts the bytes evicted, 'freed_now' those whose memory is freed now (not
+  // held by a reader).
   int64_t freed = 0;
+  int64_t freed_now = 0;
   const int64_t num_shards = shards_.size();
   // First an equal share from every shard, then whatever is still missing.
   for (int pass = 0; pass < 2 && freed < bytes_to_free; ++pass) {
@@ -675,7 +687,7 @@ int64_t S3NativeFileCache::Release(
         // Probation first, then the window, protected last.
         Segment segment = !shard->probation.empty() ? Segment::kProbation
             : !shard->window.empty() ? Segment::kWindow : Segment::kProtected;
-        shard_freed += RemoveLastLocked(shard.get(), segment);
+        shard_freed += RemoveLastLocked(shard.get(), segment, nullptr, &freed_now);
       }
       freed += shard_freed;
     }
@@ -685,7 +697,7 @@ int64_t S3NativeFileCache::Release(
 #if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
   // The freed blocks go to tcmalloc's free lists, which still count as process memory
   // (memory.total-used): return them to the system so that the process headroom grows.
-  MallocExtension::instance()->ReleaseToSystem(freed);
+  if (freed_now > 0) MallocExtension::instance()->ReleaseToSystem(freed_now);
 #endif
   const bool headroom = reason == ReleaseReason::kHeadroom;
   if (ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_RELEASED_BYTES != nullptr) {
@@ -710,7 +722,7 @@ int64_t S3NativeFileCache::Release(
                            : "the process is over its memory limit")
               << " (cache now " << PrettyPrinter::PrintBytes(total_bytes_.load()) << ")";
   }
-  return freed;
+  return freed_now;
 }
 
 void S3NativeFileCache::UpdateGauges() {

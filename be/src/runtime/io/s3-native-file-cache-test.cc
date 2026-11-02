@@ -176,6 +176,31 @@ TEST(S3NativeFileCacheTest, ReleaseMemoryEvictsOldestFirst) {
   EXPECT_EQ(0, cache.ReleaseMemory(1000));
 }
 
+// An entry that a reader still holds is evicted, but its memory is freed only when the
+// reader lets go: ReleaseMemory() does not count it, and the shared GC function asks the
+// buffer pool for it.
+TEST(S3NativeFileCacheTest, ReleaseMemoryCountsOnlyFreedEntries) {
+  S3NativeFileCache cache(1000, 80);
+  shared_ptr<const S3NativeFileCache::File> held;
+  bool hit;
+  ASSERT_OK(cache.Lookup("a", 100, OWNER_1, FillLoader('a', nullptr), &held, &hit));
+  EXPECT_FALSE(Read(&cache, "b", 100, OWNER_1));
+  EXPECT_EQ(100, cache.ReleaseMemory(1000));
+  EXPECT_EQ(0, cache.NumEntries());
+  EXPECT_EQ(0, cache.TotalBytes());
+  // The reader still reads the evicted entry.
+  EXPECT_EQ('a', held->data[0]);
+
+  ASSERT_OK(cache.Lookup("a", 100, OWNER_1, FillLoader('a', nullptr), &held, &hit));
+  EXPECT_FALSE(Read(&cache, "b", 100, OWNER_1));
+  vector<int64_t> pool_requests;
+  ReleaseCacheThenBufferPool(&cache, 500, [&pool_requests](int64_t bytes) {
+    pool_requests.push_back(bytes);
+  });
+  EXPECT_EQ(0, cache.TotalBytes());
+  EXPECT_EQ((vector<int64_t>{400}), pool_requests);
+}
+
 // When the process headroom drops below the margin, a fill gives the elastic part of
 // the capacity back, least recently used first, but keeps the reserved part.
 TEST(S3NativeFileCacheTest, ElasticPartReleasedWhenHeadroomLow) {
@@ -735,6 +760,14 @@ struct BlockingFailure {
   }
 };
 
+// Waits until 'n' callers wait for another caller's load (fails the test after 10 s).
+static void WaitForWaiters(const S3NativeFileCache& cache, int64_t n) {
+  for (int i = 0; i < 10000 && cache.NumWaiting() < n; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_EQ(n, cache.NumWaiting());
+}
+
 // A caller that waited for a whole-file load that failed loads the file itself instead
 // of failing with the other reader's error.
 TEST(S3NativeFileCacheTest, WaiterRetriesFailedLoad) {
@@ -756,11 +789,13 @@ TEST(S3NativeFileCacheTest, WaiterRetriesFailedLoad) {
     second_status =
         cache.Lookup("a", 100, OWNER_2, FillLoader('y', &calls), &file, &hit);
   });
-  // Let the second caller start waiting for the first load, then fail that load.
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  // Fail the first load only once the second caller waits for it.
+  WaitForWaiters(cache, 1);
   failure.release.set_value();
   first.join();
   second.join();
+  EXPECT_EQ(1, cache.RetriesAfterFailedWait());
+  EXPECT_EQ(0, cache.NumWaiting());
   EXPECT_FALSE(first_status.ok());
   ASSERT_OK(second_status);
   EXPECT_FALSE(hit);
@@ -790,10 +825,12 @@ TEST(S3NativeFileCacheTest, ReadBlocksWaiterRetriesFailedFetch) {
   std::thread second([&]() {
     bytes_read = ReadAndCheck(&cache, &object, 1000, 50, 200, OWNER_2);
   });
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  WaitForWaiters(cache, 1);
   failure.release.set_value();
   first.join();
   second.join();
+  EXPECT_EQ(1, cache.RetriesAfterFailedWait());
+  EXPECT_EQ(0, cache.NumWaiting());
   EXPECT_FALSE(first_status.ok());
   EXPECT_EQ(200, bytes_read);
   // The second reader fetched blocks 0-2 itself after the failed load.
