@@ -185,7 +185,8 @@ class S3NativeFileCache {
 
   /// Spreads the blocks of a file over the shards in groups of 'group_blocks' blocks
   /// (--s3_native_cache_shard_group_blocks), so that a file larger than one shard can use
-  /// the whole cache; 0 (the default) keeps all blocks of a file in one shard. Whole
+  /// the whole cache; 0 keeps all blocks of a file in one shard. 0 until this is called
+  /// (the flag defaults to 64, set by InitS3NativeFileCache()). Whole
   /// files always stay in the shard of their key. Must be called before the cache is
   /// used.
   void SetShardGroupBlocks(int64_t group_blocks);
@@ -238,12 +239,18 @@ class S3NativeFileCache {
   /// released or the cache is empty, also the reserved part. Called when the process is
   /// over its memory limit, so that queries take priority over cached files. Entries
   /// still being read are freed when their last reader is done. Returns the number of
-  /// bytes evicted.
+  /// bytes freed now: entries that a reader still holds are evicted but not counted, so
+  /// that the caller asks the buffer pool for the rest.
   int64_t ReleaseMemory(int64_t bytes_to_free);
 
   /// Number of bytes and entries currently cached (not counting entries being loaded).
   int64_t TotalBytes() const { return total_bytes_.load(); }
   int64_t NumEntries() const { return num_entries_.load(); }
+
+  /// For tests: callers now waiting for another caller's load, and the number of
+  /// retries after such a load failed.
+  int64_t NumWaiting() const { return num_waiting_.load(); }
+  int64_t RetriesAfterFailedWait() const { return retries_after_failed_wait_.load(); }
 
  private:
   struct FileEntries;
@@ -401,9 +408,11 @@ class S3NativeFileCache {
 
   /// Removes the least recently used entry of 'segment' of the shard and returns its
   /// size. Adds it to 'evicted' if that is not null, it was reused and there is an
-  /// eviction handler.
+  /// eviction handler. If 'freed_now' is not null, adds the size to it only if the cache
+  /// held the last reference, i.e. no reader still holds the entry and its memory is
+  /// freed now.
   int64_t RemoveLastLocked(Shard* shard, Segment segment,
-      std::vector<Evicted>* evicted = nullptr);
+      std::vector<Evicted>* evicted = nullptr, int64_t* freed_now = nullptr);
 
   /// Updates the size and entry count gauges.
   void UpdateGauges();
@@ -413,9 +422,10 @@ class S3NativeFileCache {
   enum class ReleaseReason { kHeadroom = 0, kProcessLimit = 1 };
 
   /// Evicts entries, least recently used first, until 'bytes_to_free' bytes are released
-  /// or at most 'keep_bytes' are left; returns the number of bytes released. Returns the
-  /// freed memory to the system, updates the metrics of 'reason' and logs it (at most
-  /// every few seconds per reason).
+  /// or at most 'keep_bytes' are left; returns the number of bytes freed now (evicted
+  /// entries that no reader still holds). Returns that memory to the system, updates the
+  /// metrics of 'reason' with the bytes evicted and logs them (at most every few seconds
+  /// per reason).
   int64_t Release(int64_t bytes_to_free, int64_t keep_bytes, ReleaseReason reason);
 
   /// Whether an entry of 'len' bytes is not cached because the headroom is low (see the
@@ -461,6 +471,9 @@ class S3NativeFileCache {
   /// Totals over all shards, for the gauges and TotalBytes() / NumEntries().
   std::atomic<int64_t> total_bytes_{0};
   std::atomic<int64_t> num_entries_{0};
+  /// See NumWaiting() and RetriesAfterFailedWait().
+  std::atomic<int64_t> num_waiting_{0};
+  std::atomic<int64_t> retries_after_failed_wait_{0};
 };
 
 /// Creates the process-wide cache if --s3_native_cache_capacity and
