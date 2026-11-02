@@ -442,6 +442,29 @@ public class BuiltinsDb extends Db {
             "13DsThetaUpdateIN10impala_udf9StringValEEEvPNS2_15FunctionContextERKT_PS3_")
         .build();
 
+  // Update symbols for ds_theta_sketch_iceberg(). BIGINT and STRING reuse the
+  // ds_theta_sketch() symbols, which already produce the Iceberg Appendix D encoding;
+  // the rest need their own. See AggregateFunctions::DsThetaUpdateIceberg for details.
+  private static final Map<Type, String> DS_THETA_ICEBERG_UPDATE_SYMBOL =
+      ImmutableMap.<Type, String>builder()
+        .put(Type.BOOLEAN,
+            "20DsThetaUpdateIcebergIN10impala_udf10BooleanValEEEvPNS2_15FunctionContextERKT_PNS2_9StringValE")
+        .put(Type.INT,
+            "20DsThetaUpdateIcebergIN10impala_udf6IntValEEEvPNS2_15FunctionContextERKT_PNS2_9StringValE")
+        .put(Type.BIGINT, DS_THETA_UPDATE_SYMBOL.get(Type.BIGINT))
+        .put(Type.FLOAT,
+            "20DsThetaUpdateIcebergIN10impala_udf8FloatValEEEvPNS2_15FunctionContextERKT_PNS2_9StringValE")
+        .put(Type.DOUBLE,
+            "20DsThetaUpdateIcebergIN10impala_udf9DoubleValEEEvPNS2_15FunctionContextERKT_PNS2_9StringValE")
+        .put(Type.STRING, DS_THETA_UPDATE_SYMBOL.get(Type.STRING))
+        .put(Type.TIMESTAMP,
+            "20DsThetaUpdateIcebergIN10impala_udf12TimestampValEEEvPNS2_15FunctionContextERKT_PNS2_9StringValE")
+        .put(Type.DATE,
+            "20DsThetaUpdateIcebergIN10impala_udf7DateValEEEvPNS2_15FunctionContextERKT_PNS2_9StringValE")
+        .put(Type.DECIMAL,
+            "20DsThetaUpdateIcebergIN10impala_udf10DecimalValEEEvPNS2_15FunctionContextERKT_PNS2_9StringValE")
+        .build();
+
   private static final Map<Type, String> SAMPLED_NDV_UPDATE_SYMBOL =
       ImmutableMap.<Type, String>builder()
         .put(Type.BOOLEAN,
@@ -972,6 +995,21 @@ public class BuiltinsDb extends Db {
         false, true);
   }
 
+  // Registers ds_theta_sketch_iceberg() for type t, if supported. This is an
+  // undocumented flavor of ds_theta_sketch() used by COMPUTE STATS on Iceberg tables:
+  // same lifecycle, but with the Iceberg encoding.
+  private void registerDsThetaIcebergBuiltin(Db db, String prefix, Type t) {
+    if (!DS_THETA_ICEBERG_UPDATE_SYMBOL.containsKey(t)) return;
+    db.addBuiltin(AggregateFunction.createBuiltin(db, "ds_theta_sketch_iceberg",
+        Lists.newArrayList(t), Type.STRING, Type.STRING,
+        prefix + "11DsThetaInitEPN10impala_udf15FunctionContextEPNS1_9StringValE",
+        prefix + DS_THETA_ICEBERG_UPDATE_SYMBOL.get(t),
+        prefix + "12DsThetaMergeEPN10impala_udf15FunctionContextERKNS1_9StringValEPS4_",
+        prefix + "16DsThetaSerializeEPN10impala_udf15FunctionContextERKNS1_9StringValE",
+        prefix + "21DsThetaFinalizeSketchEPN10impala_udf15FunctionContextERKNS1_" +
+            "9StringValE", true, false, true));
+  }
+
   // Populate all the aggregate builtins in the catalog.
   // null symbols indicate the function does not need that step of the evaluation.
   // An empty symbol indicates a TODO for the BE to implement the function.
@@ -1038,6 +1076,8 @@ public class BuiltinsDb extends Db {
       if (t.isScalarType(PrimitiveType.CHAR)) continue; // promoted to STRING
       if (t.isScalarType(PrimitiveType.VARCHAR)) continue; // promoted to STRING
       if (t.isBinary()) continue; // Only supported for count/min/max
+
+      registerDsThetaIcebergBuiltin(db, prefix, t);
 
       // Sample
       db.addBuiltin(AggregateFunction.createBuiltin(db, "sample",

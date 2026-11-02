@@ -16,6 +16,8 @@
 # under the License.
 
 from __future__ import absolute_import, division, print_function
+from copy import deepcopy
+
 from tests.common.file_utils import create_table_from_parquet
 from tests.common.impala_test_suite import ImpalaTestSuite
 from tests.common.test_dimensions import create_single_exec_option_dimension
@@ -46,7 +48,10 @@ class TestDatasketches(ImpalaTestSuite):
   def test_theta(self, vector, unique_database):
     create_table_from_parquet(self.client, unique_database, 'theta_sketches_from_hive')
     create_table_from_parquet(self.client, unique_database, 'theta_sketches_from_impala')
-    self.run_test_case('QueryTest/datasketches-theta', vector, unique_database)
+    new_vector = deepcopy(vector)
+    # .test file sets disable_codegen_rows_threshold
+    del new_vector.get_value('exec_option')['disable_codegen_rows_threshold']
+    self.run_test_case('QueryTest/datasketches-theta', new_vector, unique_database)
 
   def test_kll(self, vector, unique_database):
     create_table_from_parquet(self.client, unique_database, 'kll_sketches_from_hive')
