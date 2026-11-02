@@ -140,6 +140,11 @@ DEFINE_int32(s3_native_cache_admission_window_percent, 50, "(Experimental) With 
 DEFINE_int32(s3_native_cache_protected_percent, 80, "(Experimental) Share, in "
     "percent of the capacity, of the protected segment of the native S3 file cache: "
     "files read by more than one scan. One large scan evicts only the rest.");
+DEFINE_int32(s3_native_cache_shard_group_blocks, 64, "(Experimental) Blocks of a file "
+    "are spread over the shards of the native S3 file cache in groups of this many "
+    "blocks (--s3_native_block_size), so that a file larger than one shard can use the "
+    "whole cache and reads of one file do not all wait for one shard lock. 0 keeps all "
+    "blocks of a file in one shard.");
 
 DECLARE_int32(num_s3_io_threads);
 
