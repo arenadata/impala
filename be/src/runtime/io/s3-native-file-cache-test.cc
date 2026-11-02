@@ -760,12 +760,14 @@ struct BlockingFailure {
   }
 };
 
-// Waits until 'n' callers wait for another caller's load (fails the test after 10 s).
-static void WaitForWaiters(const S3NativeFileCache& cache, int64_t n) {
+// Waits up to 10 s until 'n' callers wait for another caller's load; returns whether they
+// do. The caller checks the result only after joining its threads: leaving a test with a
+// thread still running would terminate the test binary.
+static bool WaitForWaiters(const S3NativeFileCache& cache, int64_t n) {
   for (int i = 0; i < 10000 && cache.NumWaiting() < n; ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  ASSERT_EQ(n, cache.NumWaiting());
+  return cache.NumWaiting() == n;
 }
 
 // A caller that waited for a whole-file load that failed loads the file itself instead
@@ -790,10 +792,11 @@ TEST(S3NativeFileCacheTest, WaiterRetriesFailedLoad) {
         cache.Lookup("a", 100, OWNER_2, FillLoader('y', &calls), &file, &hit);
   });
   // Fail the first load only once the second caller waits for it.
-  WaitForWaiters(cache, 1);
+  bool waiting = WaitForWaiters(cache, 1);
   failure.release.set_value();
   first.join();
   second.join();
+  ASSERT_TRUE(waiting) << "the second reader never waited for the first load";
   EXPECT_EQ(1, cache.RetriesAfterFailedWait());
   EXPECT_EQ(0, cache.NumWaiting());
   EXPECT_FALSE(first_status.ok());
@@ -825,10 +828,11 @@ TEST(S3NativeFileCacheTest, ReadBlocksWaiterRetriesFailedFetch) {
   std::thread second([&]() {
     bytes_read = ReadAndCheck(&cache, &object, 1000, 50, 200, OWNER_2);
   });
-  WaitForWaiters(cache, 1);
+  bool waiting = WaitForWaiters(cache, 1);
   failure.release.set_value();
   first.join();
   second.join();
+  ASSERT_TRUE(waiting) << "the second reader never waited for the first load";
   EXPECT_EQ(1, cache.RetriesAfterFailedWait());
   EXPECT_EQ(0, cache.NumWaiting());
   EXPECT_FALSE(first_status.ok());

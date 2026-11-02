@@ -186,7 +186,9 @@ Status S3NativeFileCache::Lookup(const std::string& file_key, int64_t length,
       ref = Ref();
       Acquire(file_key, kWholeFile, owner, &ref);
       if (!ref.reserved && ref.file == nullptr) {
+        ++num_waiting_;
         result = ref.pending.get();
+        --num_waiting_;
         RETURN_IF_ERROR(result.first);
         ref.file = std::move(result.second);
       }
@@ -648,8 +650,11 @@ void S3NativeFileCache::ReleaseForHeadroom() {
   int64_t headroom = headroom_fn_();
   bool low = headroom < min_headroom_;
   low_headroom_ = low;
-  if (low && Release(min_headroom_ - headroom, reserved_, ReleaseReason::kHeadroom) > 0
-      && after_release_fn_) {
+  int64_t evicted = 0;
+  if (low) {
+    Release(min_headroom_ - headroom, reserved_, ReleaseReason::kHeadroom, &evicted);
+  }
+  if (evicted > 0 && after_release_fn_) {
     after_release_fn_();
   }
 }
@@ -665,8 +670,8 @@ void S3NativeFileCache::HeadroomCheckLoop(int64_t interval_ms) {
   }
 }
 
-int64_t S3NativeFileCache::Release(
-    int64_t bytes_to_free, int64_t keep_bytes, ReleaseReason reason) {
+int64_t S3NativeFileCache::Release(int64_t bytes_to_free, int64_t keep_bytes,
+    ReleaseReason reason, int64_t* evicted_bytes) {
   bytes_to_free = std::min(bytes_to_free, total_bytes_.load() - keep_bytes);
   if (bytes_to_free <= 0) return 0;
   // 'freed' counts the bytes evicted, 'freed_now' those whose memory is freed now (not
@@ -693,11 +698,14 @@ int64_t S3NativeFileCache::Release(
     }
   }
   UpdateGauges();
+  if (evicted_bytes != nullptr) *evicted_bytes = freed;
   if (freed <= 0) return 0;
 #if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER)
   // The freed blocks go to tcmalloc's free lists, which still count as process memory
   // (memory.total-used): return them to the system so that the process headroom grows.
-  if (freed_now > 0) MallocExtension::instance()->ReleaseToSystem(freed_now);
+  // All evicted bytes: ReleaseToSystem() returns at most that much of the memory that is
+  // free now, so entries still held by readers are returned by a later release.
+  MallocExtension::instance()->ReleaseToSystem(freed);
 #endif
   const bool headroom = reason == ReleaseReason::kHeadroom;
   if (ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_RELEASED_BYTES != nullptr) {
