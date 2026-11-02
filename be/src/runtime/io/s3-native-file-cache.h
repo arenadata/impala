@@ -55,9 +55,11 @@ namespace io {
 /// If several threads miss on the same entry at the same time, one of them loads it and
 /// the others wait for that load instead of sending their own requests.
 ///
-/// The cache is split into shards by file key, each with its own lock, eviction lists
-/// and an equal share of the capacity, so that concurrent reads of different files do
-/// not contend for one lock. Within a shard, eviction is a segmented LRU, so that one
+/// The cache is split into shards, each with its own lock, eviction lists and an equal
+/// share of the capacity, so that concurrent reads do not contend for one lock. A whole
+/// file goes to the shard of its key; the blocks of a larger file go to shards by file
+/// key and group of blocks (SetShardGroupBlocks()), so that a file larger than one shard
+/// can use the whole cache. Within a shard, eviction is a segmented LRU, so that one
 /// large scan does not flush the cache: a loaded entry enters the probation segment and
 /// moves to the protected segment (at most --s3_native_cache_protected_percent of
 /// the shard's capacity) only when a different reader (another scan of the same or of
@@ -180,6 +182,13 @@ class S3NativeFileCache {
   /// with the frequency sketch sized for entries of about 'entry_size' bytes. Must be
   /// called once, before the cache is used.
   void EnableAdmissionFilter(int64_t entry_size, int window_percent);
+
+  /// Spreads the blocks of a file over the shards in groups of 'group_blocks' blocks
+  /// (--s3_native_cache_shard_group_blocks), so that a file larger than one shard can use
+  /// the whole cache; 0 (the default) keeps all blocks of a file in one shard. Whole
+  /// files always stay in the shard of their key. Must be called before the cache is
+  /// used.
+  void SetShardGroupBlocks(int64_t group_blocks);
 
   /// Sets the handler of evicted entries that were read again (see EvictionHandler).
   /// Must be called before the cache is used.
@@ -323,7 +332,13 @@ class S3NativeFileCache {
     FrequencySketch sketch;
   };
 
-  Shard& ShardFor(const std::string& file_key);
+  /// The shard of block 'block' of 'file_key' (kWholeFile for whole files).
+  Shard& ShardFor(const std::string& file_key, int64_t block);
+
+  /// For a read of 'num_blocks' blocks starting at block 'first_block': the index (into
+  /// the read's blocks) after the last block of the shard group that contains block
+  /// 'i' of the read, at most 'num_blocks'.
+  int GroupEnd(int64_t first_block, int i, int num_blocks) const;
 
   /// Returns the entries of 'file_key' in 'shard', inserting them if 'create'.
   FileEntries* FindFileLocked(Shard* shard, const std::string& file_key, bool create);
@@ -421,6 +436,8 @@ class S3NativeFileCache {
 
   const int64_t capacity_;
   const int protected_percent_;
+  /// Blocks per shard group (SetShardGroupBlocks()), 0 for one shard per file.
+  int64_t shard_group_blocks_ = 0;
   /// Part of the capacity that the headroom check keeps.
   const int64_t reserved_;
   /// Filled bytes between two headroom checks.
