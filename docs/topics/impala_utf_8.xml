@@ -91,6 +91,10 @@ under the License.
       <li>The unit of the operation is a UTF-8 character, ie. they won't mask the string
        byte-to-byte.</li>
      </ul></li>
+    <li>TRANSLATE(STRING input, STRING from, STRING to)<ul id="ul_translate_utf8">
+      <li>Characters in all three arguments are matched by UTF-8 code point instead of
+       by byte. Illegal or incomplete UTF-8 produces a warning and a NULL result.</li>
+     </ul></li>
     <li>upper/lower/initcap<ul id="ul_x3c_wbl_gtb">
       <li>These functions will recognize non-ascii characters and transform them based on the
        current locale used by the Impala process.</li>

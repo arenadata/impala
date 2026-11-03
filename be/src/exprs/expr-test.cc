@@ -11137,7 +11137,58 @@ TEST_P(ExprTest, Utf8Test) {
   TestStringValue("utf8_ltrim('hello你好👋', '👋hello')", "你好👋");
   TestStringValue("utf8_btrim('hello你好👋', '👋hello')", "你好");
 
+  // Legacy translate() retains byte semantics for arbitrary input.
+  TestStringValue("hex(translate(unhex('80'), unhex('80'), 'x'))", "78");
+
   executor_->PushExecOption("utf8_mode=true");
+
+  // Tests translate() with UTF-8 code points in UTF8_MODE.
+  TestStringValue("translate('Парашют', 'аш', 'ощ')", "Порощют");
+  TestStringValue("translate('Иванов И.И.', '.', '')", "Иванов ИИ");
+  TestStringValue("translate('aé你🙂', 'é🙂a', 'XY好')", "好X你Y");
+  TestStringValue("translate('aaaa', 'a', '🙂')", "🙂🙂🙂🙂");
+  TestStringValue("translate('🙂🙂', '🙂', 'x')", "xx");
+  TestStringValue("translate('a你b🙂c', '你🙂', '')", "abc");
+  TestStringValue("translate('aé你', 'aé你', '🙂')", "🙂");
+  TestStringValue("translate('aa', 'aa', '🙂é')", "🙂🙂");
+  TestStringValue("translate('ab', 'aab', 'xyz')", "xz");
+  TestStringValue("translate('ab', 'aab', 'x🙂z')", "xz");
+  TestStringValue("translate('你a', '你你a', 'xyzw')", "xz");
+  TestStringValue("translate('a', 'a', '🙂é')", "🙂");
+  TestStringValue("translate('ab你', '你a', 'x好')", "好bx");
+
+  // ASCII source and destination use the one-pass fast path, including non-ASCII input.
+  TestStringValue("translate('a你b🙂', 'ab', 'xy')", "x你y🙂");
+  TestStringValue("translate('a你b🙂c', 'ab', '')", "你🙂c");
+  TestStringValue("translate('', '你', '🙂')", "");
+  TestStringValue("translate('abc', '', '🙂')", "abc");
+  TestStringValue("translate('你', '', '')", "你");
+  TestStringValue("hex(translate(unhex('004100'), unhex('00'), 'x'))", "784178");
+  TestIsNull("translate(NULL, '你', '🙂')", TYPE_STRING);
+  TestIsNull("translate('你', NULL, '🙂')", TYPE_STRING);
+  TestIsNull("translate('你', '你', NULL)", TYPE_STRING);
+
+  const vector<string> valid_utf8_boundaries = {
+      "00", "7F", "C280", "DFBF", "E0A080", "ED9FBF", "EE8080", "F0908080", "F48FBFBF"};
+  for (const string& bytes : valid_utf8_boundaries) {
+    TestStringValue(
+        "hex(translate(unhex('" + bytes + "'), unhex('" + bytes + "'), 'x'))", "78");
+  }
+
+  // Malformed UTF-8 returns NULL instead of crashing or reading outside the input.
+  const vector<string> invalid_utf8 = {
+      "80", "FF", "E282", "E228A1", "C0AF", "E080AF", "F08080AF", "EDA080", "F4908080"};
+  for (const string& bytes : invalid_utf8) {
+    TestIsNull("translate(unhex('" + bytes + "'), 'a', 'b')", TYPE_STRING);
+  }
+  TestIsNull("translate(concat('abc', unhex('80')), 'a', 'x')", TYPE_STRING);
+  // Exercise malformed input handling in the generic code-point path as well.
+  TestIsNull("translate(unhex('80'), '你', 'x')", TYPE_STRING);
+  TestIsNull("translate(concat('a', unhex('80')), 'a', '🙂')", TYPE_STRING);
+  TestIsNull("translate('abc', unhex('C0AF'), 'x')", TYPE_STRING);
+  TestIsNull("translate('abc', 'a', unhex('EDA080'))", TYPE_STRING);
+  TestIsNull("translate('abc', 'a', concat('x', unhex('80')))", TYPE_STRING);
+
   // Each Chinese character is encoded into 3 bytes. But in UTF-8 mode, the positions
   // are counted by UTF-8 characters.
   TestValue("instr('最快的SQL引擎', 'SQL')", TYPE_INT, 4);
