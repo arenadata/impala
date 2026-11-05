@@ -112,6 +112,8 @@ enum TStmtType {
   CONVERT = 8
   UNKNOWN = 9
   KILL = 10
+  // ADH-TSQL. Append only. A procedure batch executed by the coordinator.
+  TSQL = 11
 }
 
 enum TIcebergOperation {

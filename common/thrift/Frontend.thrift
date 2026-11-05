@@ -29,6 +29,7 @@ include "CatalogObjects.thrift"
 include "CatalogService.thrift"
 include "LineageGraph.thrift"
 include "Query.thrift"
+include "Tsql.thrift"
 
 // These are supporting structs for JniFrontend.java, which serves as the glue
 // between our C++ execution environment and the Java frontend.
@@ -732,6 +733,9 @@ struct TExecRequest {
 
   // Request for "KILL QUERY" statements.
   26: optional TKillQueryReq kill_query_request
+
+  // ADH-TSQL. Set iff stmt_type is TSQL.
+  27: optional Tsql.TSqlRequest tsql_request
 }
 
 // Parameters to FeSupport.cacheJar().

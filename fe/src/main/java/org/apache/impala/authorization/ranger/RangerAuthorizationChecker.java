@@ -153,6 +153,10 @@ public class RangerAuthorizationChecker extends BaseAuthorizationChecker {
             .function(authorizable.getFnName())
             .build());
         break;
+      case PROCEDURE:
+        // ADH-TSQL. Does not add a resource type to the deployed Hive service def.
+        org.apache.impala.tsql.TsqlAuthorizer.addResource(resources, authorizable);
+        break;
       case URI:
         resources.add(new RangerImpalaResourceBuilder()
             .uri(authorizable.getName())
