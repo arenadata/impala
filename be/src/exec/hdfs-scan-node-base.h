@@ -72,7 +72,7 @@ struct HdfsFileDesc {
 
   io::ScanRange::FileInfo GetFileInfo() const {
     return io::ScanRange::FileInfo{
-        filename.c_str(), fs, mtime, is_encrypted, is_erasure_coded};
+        filename.c_str(), fs, mtime, is_encrypted, is_erasure_coded, file_length};
   }
 
   /// Connection to the filesystem containing the file.

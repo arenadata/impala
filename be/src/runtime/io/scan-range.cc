@@ -20,6 +20,8 @@
 #include "runtime/io/disk-io-mgr.h"
 #include "runtime/io/hdfs-file-reader.h"
 #include "runtime/io/local-file-reader.h"
+#include "runtime/io/s3-native-client.h"
+#include "runtime/io/s3-native-file-reader.h"
 #include "util/error-util.h"
 #include "util/hdfs-util.h"
 
@@ -512,7 +514,18 @@ void ScanRange::Reset(const FileInfo &fi, int64_t len, int64_t offset, int disk_
          buffer_opts.client_buffer_len_ >= len_);
   fs_ = fi.fs;
   if (fs_ != nullptr) {
-    file_reader_ = make_unique<HdfsFileReader>(this, fs_, false);
+    // Only paths that name the s3a:// scheme: a path without a scheme on a cluster whose
+    // default filesystem is S3A is left to HdfsFileReader (ParseS3Path() needs a bucket).
+    // Spill files of TmpFileMgr (remote scratch dirs, 'disk_file' set) also keep
+    // HdfsFileReader: they are read once through a local buffer file, so the native
+    // reader's cache does not help, and their bucket may be set up only in core-site.
+    if (S3NativeClientEnabled() && disk_file == nullptr
+        && IsS3APath(fi.filename, /* check_default_fs */ false)) {
+      // Experimental: read s3a:// files with aws-sdk-cpp (--s3_native_reader).
+      file_reader_ = make_unique<S3NativeFileReader>(this);
+    } else {
+      file_reader_ = make_unique<HdfsFileReader>(this, fs_, false);
+    }
     local_buffer_reader_ = make_unique<LocalFileReader>(this);
   } else {
     file_reader_ = make_unique<LocalFileReader>(this);
@@ -531,6 +544,7 @@ void ScanRange::Reset(const FileInfo &fi, int64_t len, int64_t offset, int disk_
   // HDFS ranges must have an mtime > 0. Local ranges do not use mtime.
   mtime_ = fi.mtime;
   if (fs_) DCHECK_GT(mtime_, 0);
+  file_length_ = fi.file_length;
   meta_data_ = meta_data;
   if (buffer_opts.client_buffer_ != nullptr) {
     buffer_manager_->set_client_buffer();
