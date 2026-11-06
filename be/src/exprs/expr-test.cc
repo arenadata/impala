@@ -5149,6 +5149,117 @@ TEST_P(ExprTest, StringBase64Coding) {
   }
 }
 
+TEST_P(ExprTest, ConvertEncoding) {
+  TestStringValue("typeof(convert_encoding('abc', 'UTF8', 'CP1251'))", "BINARY");
+  TestStringValue(
+      "typeof(convert_encoding(cast('abc' as binary), 'CP1251', 'UTF8'))", "STRING");
+  TestStringValue(
+      "hex(cast(convert_encoding('Привет', 'UTF-8', 'CP1251') as string))",
+      "CFF0E8E2E5F2");
+  TestStringValue(
+      "convert_encoding(cast(unhex('CFF0E8E2E5F2') as binary), 'CP1251', 'UTF-8')",
+      "Привет");
+  TestStringValue(
+      "hex(cast(convert_encoding('abc', 'uTf8', 'wInDoWs-1251') as string))", "616263");
+  TestStringValue(
+      "convert_encoding(cast(unhex('616263') as binary), 'cP1251', 'UtF-8')", "abc");
+  TestStringValue(
+      "hex(cast(convert_encoding(cast('Привет' as varchar(20)), 'UTF8', 'CP1251') "
+      "as string))",
+      "CFF0E8E2E5F2");
+
+  // Empty strings, ASCII and NULL arguments are safe in both directions.
+  TestStringValue("hex(cast(convert_encoding('', 'UTF8', 'CP1251') as string))", "");
+  TestStringValue("convert_encoding(cast('' as binary), 'CP1251', 'UTF8')", "");
+  TestStringValue(
+      "hex(cast(convert_encoding('ABC', 'UTF8', 'CP1251') as string))", "414243");
+  TestStringValue(
+      "convert_encoding(cast(unhex('414243') as binary), 'CP1251', 'UTF8')", "ABC");
+  TestValue("convert_encoding(cast(NULL as string), 'UTF8', 'CP1251') is null",
+      TYPE_BOOLEAN, true);
+  TestValue("convert_encoding(cast(NULL as binary), 'CP1251', 'UTF8') is null",
+      TYPE_BOOLEAN, true);
+  TestValue("convert_encoding('a', cast(NULL as string), 'CP1251') is null", TYPE_BOOLEAN,
+      true);
+  TestValue(
+      "convert_encoding('a', 'UTF8', cast(NULL as string)) is null", TYPE_BOOLEAN, true);
+
+  // Check representative non-Cyrillic CP1251 mappings.
+  TestStringValue("hex(cast(convert_encoding(unhex('D082E282ACD290E28496E284A2'), "
+                  "'UTF8', 'CP1251') as string))",
+      "8088A5B999");
+  TestStringValue(
+      "hex(convert_encoding(cast(unhex('8088A5B999') as binary), 'CP1251', 'UTF8'))",
+      "D082E282ACD290E28496E284A2");
+  TestStringValue(
+      "hex(convert_encoding(cast(unhex('98') as binary), 'CP1251', 'UTF8'))", "3F");
+
+  // Valid unmappable code points become one '?'. Malformed bytes become one '?' each.
+  TestStringValue(
+      "hex(cast(convert_encoding('A🙂你B', 'UTF8', 'CP1251') as string))", "413F3F42");
+  TestStringValue(
+      "hex(cast(convert_encoding(unhex('80'), 'UTF8', 'CP1251') as string))", "3F");
+  TestStringValue(
+      "hex(cast(convert_encoding(unhex('E228A1'), 'UTF8', 'CP1251') as string))",
+      "3F283F");
+  TestStringValue(
+      "hex(cast(convert_encoding(unhex('E282'), 'UTF8', 'CP1251') as string))", "3F3F");
+  TestStringValue(
+      "hex(cast(convert_encoding(unhex('C0AF'), 'UTF8', 'CP1251') as string))", "3F3F");
+  TestStringValue(
+      "hex(cast(convert_encoding(unhex('EDA080'), 'UTF8', 'CP1251') as string))",
+      "3F3F3F");
+  TestStringValue(
+      "hex(cast(convert_encoding(unhex('F4908080'), 'UTF8', 'CP1251') as string))",
+      "3F3F3F3F");
+
+  TestError("convert_encoding('', 'LATIN1', 'CP1251')");
+  TestError("convert_encoding('', 'UTF8', 'UTF8')");
+  TestError("convert_encoding('abc', 'CP1251', 'UTF8')");
+  TestError("convert_encoding(cast('' as binary), 'CP1251', 'CP1251')");
+  TestError("convert_encoding(cast('abc' as binary), 'UTF8', 'CP1251')");
+
+  // Independently generated with Python's cp1251 codec; undefined 0x98 is mapped to '?'.
+  const vector<string> expected_utf8 = {"00", "01", "02", "03", "04", "05", "06", "07",
+      "08", "09", "0A", "0B", "0C", "0D", "0E", "0F", "10", "11", "12", "13", "14", "15",
+      "16", "17", "18", "19", "1A", "1B", "1C", "1D", "1E", "1F", "20", "21", "22", "23",
+      "24", "25", "26", "27", "28", "29", "2A", "2B", "2C", "2D", "2E", "2F", "30", "31",
+      "32", "33", "34", "35", "36", "37", "38", "39", "3A", "3B", "3C", "3D", "3E", "3F",
+      "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "4A", "4B", "4C", "4D",
+      "4E", "4F", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "5A", "5B",
+      "5C", "5D", "5E", "5F", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69",
+      "6A", "6B", "6C", "6D", "6E", "6F", "70", "71", "72", "73", "74", "75", "76", "77",
+      "78", "79", "7A", "7B", "7C", "7D", "7E", "7F", "D082", "D083", "E2809A", "D193",
+      "E2809E", "E280A6", "E280A0", "E280A1", "E282AC", "E280B0", "D089", "E280B9",
+      "D08A", "D08C", "D08B", "D08F", "D192", "E28098", "E28099", "E2809C", "E2809D",
+      "E280A2", "E28093", "E28094", "3F", "E284A2", "D199", "E280BA", "D19A", "D19C",
+      "D19B", "D19F", "C2A0", "D08E", "D19E", "D088", "C2A4", "D290", "C2A6", "C2A7",
+      "D081", "C2A9", "D084", "C2AB", "C2AC", "C2AD", "C2AE", "D087", "C2B0", "C2B1",
+      "D086", "D196", "D291", "C2B5", "C2B6", "C2B7", "D191", "E28496", "D194", "C2BB",
+      "D198", "D085", "D195", "D197", "D090", "D091", "D092", "D093", "D094", "D095",
+      "D096", "D097", "D098", "D099", "D09A", "D09B", "D09C", "D09D", "D09E", "D09F",
+      "D0A0", "D0A1", "D0A2", "D0A3", "D0A4", "D0A5", "D0A6", "D0A7", "D0A8", "D0A9",
+      "D0AA", "D0AB", "D0AC", "D0AD", "D0AE", "D0AF", "D0B0", "D0B1", "D0B2", "D0B3",
+      "D0B4", "D0B5", "D0B6", "D0B7", "D0B8", "D0B9", "D0BA", "D0BB", "D0BC", "D0BD",
+      "D0BE", "D0BF", "D180", "D181", "D182", "D183", "D184", "D185", "D186", "D187",
+      "D188", "D189", "D18A", "D18B", "D18C", "D18D", "D18E", "D18F"};
+  ASSERT_EQ(expected_utf8.size(), 256);
+
+  // Verify every mapping independently and every defined byte with a round trip.
+  for (int i = 0; i < 256; ++i) {
+    char hex_buf[3];
+    snprintf(hex_buf, sizeof(hex_buf), "%02X", i);
+    const string hex(hex_buf);
+    TestStringValue(
+        "hex(convert_encoding(cast(unhex('" + hex + "') as binary), 'CP1251', 'UTF-8'))",
+        expected_utf8[i]);
+    const string expected = i == 0x98 ? "3F" : hex;
+    TestStringValue("hex(cast(convert_encoding(convert_encoding(cast(unhex('" + hex
+            + "') as binary), 'CP1251', 'UTF-8'), 'UTF-8', 'CP1251') as string))",
+        expected);
+  }
+}
+
 TEST_P(ExprTest, LongReverse) {
   static const int MAX_LEN = 2048;
   string to_reverse(MAX_LEN, ' '), reversed(MAX_LEN, ' ');
