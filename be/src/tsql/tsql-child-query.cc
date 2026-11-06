@@ -4,6 +4,7 @@
 #include "gen-cpp/TCLIService_types.h"
 #include "service/client-request-state.h"
 #include "service/impala-server.h"
+#include "service/impala-server.inline.h"
 #include "util/debug-util.h"
 
 #include "common/names.h"
