@@ -34,12 +34,6 @@ under the License.
 
   <dependencies>
     <dependency>
-      <groupId>org.apache.hive</groupId>
-      <artifactId>hive-service-rpc</artifactId>
-      <version>${hive.version}</version>
-    </dependency>
-
-    <dependency>
       <groupId>org.apache.impala</groupId>
       <artifactId>impala-executor-deps</artifactId>
       <version>${project.version}</version>
@@ -350,12 +344,6 @@ under the License.
       <groupId>net.sourceforge.czt.dev</groupId>
       <artifactId>java-cup</artifactId>
       <version>0.11-a-czt02-cdh</version>
-    </dependency>
-
-    <dependency>
-      <groupId>net.sourceforge.czt.dev</groupId>
-      <artifactId>java-cup-runtime</artifactId>
-      <version>0.11-a-czt01-cdh</version>
     </dependency>
 
     <dependency>
