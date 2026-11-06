@@ -17,6 +17,9 @@
 
 #include "service/client-request-state.h"
 
+#include "tsql/tsql-executor.h"
+#include "tsql/tsql-flags.h"
+
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
@@ -368,6 +371,18 @@ Status ClientRequestState::Exec() {
       DCHECK(exec_req.__isset.kill_query_request);
       LOG_AND_RETURN_IF_ERROR(ExecKillQueryRequest());
       break;
+    case TStmtType::TSQL: {
+      // ADH-TSQL. Return as soon as the loop is scheduled. WaitInternal joins it.
+      DCHECK(exec_req.__isset.tsql_request);
+      if (!FLAGS_enable_tsql) {
+        return Status("T-SQL procedures are disabled (--enable_tsql=false)");
+      }
+      tsql_executor_.reset(new TsqlExecutor(this, parent_server_));
+      UpdateNonErrorExecState(ExecState::PENDING);
+      RETURN_IF_ERROR(Thread::Create("query-exec-state", "async-exec-thread",
+          &TsqlExecutor::Run, tsql_executor_.get(), &async_exec_thread_, true));
+      break;
+    }
     default:
       return Status(Substitute("Unknown exec request stmt type: $0", exec_req.stmt_type));
   }
@@ -1572,6 +1587,8 @@ void ClientRequestState::Cancel(const Status* cause, bool wait_until_finalized) 
   // because a) ChildQuery::Cancel() calls back into ImpalaServer and b) cancellation
   // involves RPCs and can take quite some time.
   child_query_executor_->Cancel();
+  // ADH-TSQL
+  if (tsql_executor_ != nullptr) tsql_executor_->Cancel();
 
   // Ensure the parent query is cancelled if execution has started (if the query was not
   // started, cancellation is handled by the 'async-exec-thread' thread). 'lock_' should
