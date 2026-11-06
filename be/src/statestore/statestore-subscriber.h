@@ -150,7 +150,10 @@ class StatestoreSubscriber {
   virtual Status Start();
 
   /// Set Register Request
-  virtual Status SetRegisterRequest(TRegisterSubscriberRequest* request);
+  /// Fills the registration request. 'may_claim_active' is true if a catalogd may claim
+  /// the active role with this registration (see StatestoreStub::Register()).
+  virtual Status SetRegisterRequest(
+      TRegisterSubscriberRequest* request, bool may_claim_active);
 
   /// Return the port that the subscriber is listening on.
   int heartbeat_port() const { return heartbeat_address_.port; }
@@ -333,8 +336,13 @@ class StatestoreSubscriber {
     Status CheckRegistrationId(const RegistrationId& registration_id);
 
     /// Check if the given statestore ID is matching with the statestore ID of this
-    /// statestore.
+    /// statestore. Any ID matches while a registration RPC is in flight, when an RPC
+    /// from the statestore can arrive before the registration response.
     bool IsMatchingStatestoreId(const TUniqueId& statestore_id);
+
+    /// True if the statestore ID received in the registration response equals the given
+    /// non-zero ID.
+    bool HasStatestoreId(const TUniqueId& statestore_id);
 
     int64_t MilliSecondsSinceLastRegistration() const {
       return MonotonicMillis() - last_registration_ms_.Load();
@@ -493,6 +501,13 @@ class StatestoreSubscriber {
     /// from the statestore.
     TUniqueId statestore_id_;
 
+    /// True while a RegisterSubscriber RPC is in flight. Protected by 'id_lock_'.
+    bool registration_in_flight_ = false;
+
+    /// Instance ID of the statestore of the last successful registration, kept across
+    /// re-registration attempts. Protected by 'id_lock_'.
+    TUniqueId last_registered_statestore_id_;
+
     /// Monotonic timestamp of the last successful registration.
     AtomicInt64 last_registration_ms_{0};
   };
@@ -539,6 +554,17 @@ class StatestoreSubscriber {
   /// Return the pointer of the active/standby StatestoreStub.
   StatestoreStub* GetActiveStatestore();
   StatestoreStub* GetStandbyStatestore();
+
+  /// Follows the registered stub reporting active with the highest version and clears
+  /// the active flag of the other stub. Takes 'statestore_ha_lock_'.
+  void ReconcileRoles(const char* reason);
+
+  /// True if the checks of --statestore_subscriber_ha_role_checks apply (HA only).
+  bool HaRoleChecks() const;
+
+  /// True if an RPC from 'statestore_id' belongs to 'stub'; with the HA role checks an
+  /// exact match on the other stub wins over this stub's registration wildcard.
+  bool IsStubFor(StatestoreStub* stub, const TUniqueId& statestore_id);
 
   /// Subscriber thrift implementation, needs to access UpdateState
   friend class StatestoreSubscriberThriftIf;

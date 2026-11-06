@@ -78,6 +78,24 @@ class BaseImpalaService(object):
   def read_debug_webpage(self, page_name, timeout=10, interval=1):
     return self.open_debug_webpage(page_name, timeout=timeout, interval=interval).text
 
+  def wait_for_page_ready(self, page_name, timeout=10, interval=1):
+    start_time = time()
+    total_wait = 0
+    while (total_wait < timeout):
+      response = self.open_debug_webpage(page_name)
+      total_wait = time() - start_time
+      if response.status_code == requests.codes.not_found:
+        LOG.info(
+            "Debug webpage {}:{}/{} not yet available. Sleeping {}s before next retry"
+            .format(self.webserver_interface, self.webserver_port, page_name,
+                    interval))
+        sleep(interval)
+        continue
+      LOG.info(
+          "Debug webpage {}:{}/{} is ready. total_wait: {}s"
+          .format(self.webserver_interface, self.webserver_port, page_name, total_wait))
+      return
+
   def get_debug_webpage_json(self, page_name):
     """Returns the json for the given Impala debug webpage, eg. '/queries'"""
     return json.loads(self.read_debug_webpage(page_name + "?json"))
