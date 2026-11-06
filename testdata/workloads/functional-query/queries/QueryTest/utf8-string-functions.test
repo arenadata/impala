@@ -17,6 +17,76 @@ INT,INT,INT
 ====
 ---- QUERY
 set utf8_mode=true;
+select translate('Парашют', 'аш', 'ощ'),
+       translate('Иванов И.И.', '.', ''),
+       translate('aé你🙂', 'é🙂a', 'XY好'),
+       translate('aaaa', 'a', '🙂')
+---- RESULTS: RAW_STRING
+'Порощют','Иванов ИИ','好X你Y','🙂🙂🙂🙂'
+---- TYPES
+STRING,STRING,STRING,STRING
+====
+---- QUERY
+set utf8_mode=true;
+select translate('ab', 'aab', 'x🙂z'), translate('a你b🙂c', '你🙂', ''),
+       translate('ab你', '你a', 'x好')
+---- RESULTS: RAW_STRING
+'xz','abc','好bx'
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+set utf8_mode=true;
+select translate('a你b🙂', 'ab', 'xy'), translate('a你b🙂c', 'ab', '')
+---- RESULTS: RAW_STRING
+'x你y🙂','你🙂c'
+---- TYPES
+STRING,STRING
+====
+---- QUERY
+set utf8_mode=false;
+select translate('a你b🙂', 'ab', 'xy'), translate('a你b🙂c', 'ab', '')
+---- RESULTS: RAW_STRING
+'x你y🙂','你🙂c'
+---- TYPES
+STRING,STRING
+====
+---- QUERY
+set utf8_mode=true;
+select id, translate(name, '李Бö', 'XY好') from functional.utf8_str_tiny order by id
+---- RESULTS: RAW_STRING
+1,'张三'
+2,'X四'
+3,'王五'
+4,'X小龙'
+5,'Alice'
+6,'陈Bob'
+7,'Yopиc'
+8,'J好rg'
+9,'ひなた'
+10,'서연'
+---- TYPES
+INT,STRING
+====
+---- QUERY
+set utf8_mode=true;
+select translate(unhex('80'), 'a', 'b'), translate('abc', unhex('C0AF'), 'x'),
+       translate('abc', 'a', unhex('EDA080'))
+---- RESULTS
+NULL,NULL,NULL
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+set utf8_mode=false;
+select hex(translate(unhex('80'), unhex('80'), 'x'))
+---- RESULTS
+'78'
+---- TYPES
+STRING
+====
+---- QUERY
+set utf8_mode=true;
 select substring('你好hello', 1, 3)
 ---- RESULTS: RAW_STRING
 '你好h'
