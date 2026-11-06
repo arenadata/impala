@@ -214,6 +214,10 @@ class StringFunctions {
 
   static StringVal Base64Encode(FunctionContext* ctx, const StringVal& str);
   static StringVal Base64Decode(FunctionContext* ctx, const StringVal& str);
+  static StringVal ConvertEncodingToBinary(FunctionContext* ctx, const StringVal& str,
+      const StringVal& from_encoding, const StringVal& to_encoding);
+  static StringVal ConvertEncodingToString(FunctionContext* ctx, const StringVal& str,
+      const StringVal& from_encoding, const StringVal& to_encoding);
 
   static StringVal GetJsonObject(FunctionContext* ctx, const StringVal& json_str,
       const StringVal& path_str);

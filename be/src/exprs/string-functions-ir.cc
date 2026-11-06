@@ -17,12 +17,14 @@
 
 #include "exprs/string-functions.h"
 
+#include <stdint.h>
+#include <array>
 #include <cctype>
 #include <numeric>
-#include <stdint.h>
 #include <re2/re2.h>
 #include <re2/stringpiece.h>
 
+#include <boost/locale/utf8_codecvt.hpp>
 #include <boost/static_assert.hpp>
 
 #include "exprs/anyval-util.h"
@@ -42,8 +44,9 @@
 #include "common/names.h"
 
 using namespace impala_udf;
-using std::bitset;
+using boost::locale::utf8_codecvt;
 using std::any_of;
+using std::bitset;
 
 // NOTE: be careful not to use string::append.  It is not performant.
 namespace impala {
@@ -1629,6 +1632,175 @@ StringVal StringFunctions::SplitPart(FunctionContext* context,
     }
   }
   return StringVal();
+}
+
+// High-half CP1251 decoding table. Python's cp1251 codec leaves 0x98 undefined;
+// convert_encoding() replaces it with '?'.
+constexpr std::array<uint16_t, 128> CP1251_DECODE = {
+    {0x0402, 0x0403, 0x201a, 0x0453, 0x201e, 0x2026, 0x2020, 0x2021, 0x20ac, 0x2030,
+        0x0409, 0x2039, 0x040a, 0x040c, 0x040b, 0x040f, 0x0452, 0x2018, 0x2019, 0x201c,
+        0x201d, 0x2022, 0x2013, 0x2014, 0x003f, 0x2122, 0x0459, 0x203a, 0x045a, 0x045c,
+        0x045b, 0x045f, 0x00a0, 0x040e, 0x045e, 0x0408, 0x00a4, 0x0490, 0x00a6, 0x00a7,
+        0x0401, 0x00a9, 0x0404, 0x00ab, 0x00ac, 0x00ad, 0x00ae, 0x0407, 0x00b0, 0x00b1,
+        0x0406, 0x0456, 0x0491, 0x00b5, 0x00b6, 0x00b7, 0x0451, 0x2116, 0x0454, 0x00bb,
+        0x0458, 0x0405, 0x0455, 0x0457, 0x0410, 0x0411, 0x0412, 0x0413, 0x0414, 0x0415,
+        0x0416, 0x0417, 0x0418, 0x0419, 0x041a, 0x041b, 0x041c, 0x041d, 0x041e, 0x041f,
+        0x0420, 0x0421, 0x0422, 0x0423, 0x0424, 0x0425, 0x0426, 0x0427, 0x0428, 0x0429,
+        0x042a, 0x042b, 0x042c, 0x042d, 0x042e, 0x042f, 0x0430, 0x0431, 0x0432, 0x0433,
+        0x0434, 0x0435, 0x0436, 0x0437, 0x0438, 0x0439, 0x043a, 0x043b, 0x043c, 0x043d,
+        0x043e, 0x043f, 0x0440, 0x0441, 0x0442, 0x0443, 0x0444, 0x0445, 0x0446, 0x0447,
+        0x0448, 0x0449, 0x044a, 0x044b, 0x044c, 0x044d, 0x044e, 0x044f}};
+
+constexpr int CP1251_REVERSE_INDEX_SIZE = 0x2123; // Through U+2122, inclusive.
+constexpr uint16_t CP1251_UNMAPPABLE = 0xffff;
+
+constexpr std::array<uint16_t, CP1251_REVERSE_INDEX_SIZE> BuildCp1251ReverseIndex() {
+  std::array<uint16_t, CP1251_REVERSE_INDEX_SIZE> result{};
+  for (int i = 0; i < CP1251_REVERSE_INDEX_SIZE; ++i) {
+    result[i] = CP1251_UNMAPPABLE;
+  }
+  for (int i = 0; i < 128; ++i) result[i] = i;
+  for (int i = 0; i < 128; ++i) {
+    const int byte = i + 128;
+    const uint16_t codepoint = CP1251_DECODE[i];
+    // 0x98 is an undefined CP1251 byte, not an alternate encoding of '?'.
+    if (byte != 0x98 && codepoint < CP1251_REVERSE_INDEX_SIZE) {
+      result[codepoint] = byte;
+    }
+  }
+  return result;
+}
+
+constexpr std::array<uint16_t, CP1251_REVERSE_INDEX_SIZE> CP1251_REVERSE_INDEX =
+    BuildCp1251ReverseIndex();
+
+static inline uint8_t AsciiLower(uint8_t c) {
+  return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c;
+}
+
+template <size_t N>
+static bool EncodingEquals(const StringVal& encoding, const char (&expected)[N]) {
+  const int expected_len = N - 1;
+  if (encoding.len != expected_len) return false;
+  for (int i = 0; i < expected_len; ++i) {
+    if (AsciiLower(encoding.ptr[i]) != AsciiLower(static_cast<uint8_t>(expected[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool IsUtf8Encoding(const StringVal& encoding) {
+  return EncodingEquals(encoding, "UTF-8") || EncodingEquals(encoding, "UTF8");
+}
+
+static bool IsCp1251Encoding(const StringVal& encoding) {
+  return EncodingEquals(encoding, "CP1251") || EncodingEquals(encoding, "WINDOWS-1251");
+}
+
+// boost::locale::utf8_codecvt leaves 'input' unchanged for malformed input. Consume
+// exactly one byte in that case so each malformed byte produces one '?'.
+static uint32_t DecodeUtf8CodePoint(
+    utf8_codecvt<char>::state_type* state, const char** input, const char* end) {
+  const char* const initial = *input;
+  const uint32_t codepoint = utf8_codecvt<char>::to_unicode(*state, *input, end);
+  if (UNLIKELY(codepoint == boost::locale::utf::illegal
+          || codepoint == boost::locale::utf::incomplete)) {
+    *input = initial + 1;
+  }
+  return codepoint;
+}
+
+static uint8_t CodePointToCp1251(uint32_t codepoint) {
+  if (codepoint >= CP1251_REVERSE_INDEX.size()) return '?';
+  const uint16_t byte = CP1251_REVERSE_INDEX[codepoint];
+  return byte == CP1251_UNMAPPABLE ? '?' : static_cast<uint8_t>(byte);
+}
+
+static uint32_t Cp1251ToCodePoint(uint8_t byte) {
+  return byte < 0x80 ? byte : CP1251_DECODE[byte - 0x80];
+}
+
+StringVal StringFunctions::ConvertEncodingToBinary(FunctionContext* ctx,
+    const StringVal& str, const StringVal& from_encoding, const StringVal& to_encoding) {
+  if (str.is_null || from_encoding.is_null || to_encoding.is_null) {
+    return StringVal::null();
+  }
+  if (!IsUtf8Encoding(from_encoding) || !IsCp1251Encoding(to_encoding)) {
+    ctx->SetError(
+        "convert_encoding() STRING input supports only UTF-8 to CP1251 conversion");
+    return StringVal::null();
+  }
+
+  bool ascii_only = true;
+  for (int i = 0; i < str.len; ++i) {
+    if (str.ptr[i] >= 0x80) {
+      ascii_only = false;
+      break;
+    }
+  }
+  if (ascii_only) return str;
+
+  // Every decoded code point or malformed input byte produces at most one byte.
+  StringVal result(ctx, str.len);
+  if (UNLIKELY(result.is_null)) return result;
+  const char* input = reinterpret_cast<const char*>(str.ptr);
+  const char* const end = input + str.len;
+  uint8_t* output = result.ptr;
+  utf8_codecvt<char>::state_type state = {};
+  while (input < end) {
+    const uint32_t codepoint = DecodeUtf8CodePoint(&state, &input, end);
+    *output++ = CodePointToCp1251(codepoint);
+  }
+  result.len = output - result.ptr;
+  return result;
+}
+
+StringVal StringFunctions::ConvertEncodingToString(FunctionContext* ctx,
+    const StringVal& str, const StringVal& from_encoding, const StringVal& to_encoding) {
+  if (str.is_null || from_encoding.is_null || to_encoding.is_null) {
+    return StringVal::null();
+  }
+  if (!IsCp1251Encoding(from_encoding) || !IsUtf8Encoding(to_encoding)) {
+    ctx->SetError(
+        "convert_encoding() BINARY input supports only CP1251 to UTF-8 conversion");
+    return StringVal::null();
+  }
+
+  int64_t result_len = 0;
+  bool ascii_only = true;
+  for (int i = 0; i < str.len; ++i) {
+    const uint8_t byte = str.ptr[i];
+    if (byte >= 0x80) ascii_only = false;
+    const int width =
+        boost::locale::utf::utf_traits<char>::width(Cp1251ToCodePoint(byte));
+    // Use subtraction to avoid overflow in the MAX_LENGTH comparison.
+    if (UNLIKELY(result_len > static_cast<int64_t>(StringVal::MAX_LENGTH) - width)) {
+      ctx->SetError("convert_encoding() result exceeds maximum string length");
+      return StringVal::null();
+    }
+    result_len += width;
+  }
+  if (ascii_only) return str;
+
+  StringVal result(ctx, result_len);
+  if (UNLIKELY(result.is_null)) return result;
+  char* output = reinterpret_cast<char*>(result.ptr);
+  const char* const output_end = output + result_len;
+  utf8_codecvt<char>::state_type state = {};
+  for (int i = 0; i < str.len; ++i) {
+    const uint32_t width = utf8_codecvt<char>::from_unicode(
+        state, Cp1251ToCodePoint(str.ptr[i]), output, output_end);
+    if (UNLIKELY(width == boost::locale::utf::illegal
+            || width == boost::locale::utf::incomplete)) {
+      ctx->SetError("Failed to encode CP1251 character as UTF-8");
+      return StringVal::null();
+    }
+    output += width;
+  }
+  DCHECK_EQ(output, output_end);
+  result.len = output - reinterpret_cast<char*>(result.ptr);
+  return result;
 }
 
 StringVal StringFunctions::Base64Encode(FunctionContext* ctx, const StringVal& str) {
