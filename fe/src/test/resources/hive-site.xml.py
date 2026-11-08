@@ -228,7 +228,7 @@ CONFIG.update({
 if db_type == 'postgres':
   CONFIG.update({
    'javax.jdo.option.ConnectionDriverName': 'org.postgresql.Driver',
-   'javax.jdo.option.ConnectionURL': 'jdbc:postgresql://localhost:5432/${METASTORE_DB}',
+   'javax.jdo.option.ConnectionURL': 'jdbc:postgresql://localhost:%s/${METASTORE_DB}' % os.environ.get('HMS_DB_PORT', '5432'),
   })
 elif db_type == 'mysql':
   CONFIG.update({
