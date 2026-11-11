@@ -915,6 +915,8 @@ class ClientRequestState {
   void SetResultSet(const std::vector<std::string>& col1,
       const std::vector<std::string>& col2, const std::vector<std::string>& col3,
       const std::vector<std::string>& col4);
+  // ADH-TSQL. Replaces the schema and the rows together. Caller holds lock().
+  void SetResultSet(const TResultSetMetadata& metadata, std::vector<TResultRow> rows);
 
   /// Sets the result set for a CREATE TABLE AS SELECT statement. The results will not be
   /// ready until all BEs complete execution. This can be called as part of Wait(),

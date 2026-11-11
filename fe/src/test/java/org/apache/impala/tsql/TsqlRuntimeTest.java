@@ -22,6 +22,10 @@ public final class TsqlRuntimeTest {
     tryCatchSwallowsChildFailure();
     nestedExec();
     cursorFetchStatus();
+    cursorSumsWhileFetchStatusIsZero();
+    castAsTypeConcatenates();
+    createRuntimeDictParses();
+    negativeArgumentSubstitutes();
     if (failed > 0) {
       System.err.println(failed + " test(s) failed");
       System.exit(1);
@@ -135,6 +139,89 @@ public final class TsqlRuntimeTest {
     check(step.sql.contains("alpha"), "fetched name: " + step.sql);
   }
 
+  private static void cursorSumsWhileFetchStatusIsZero() {
+    String src = ""
+        + "DECLARE @n INT;\n"
+        + "DECLARE @s INT = 0;\n"
+        + "DECLARE c CURSOR FOR SELECT n FROM lpsql_q.nums WHERE n > 1;\n"
+        + "OPEN c;\n"
+        + "FETCH NEXT FROM c INTO @n;\n"
+        + "WHILE @@FETCH_STATUS = 0\n"
+        + "BEGIN\n"
+        + "  SET @s = @s + @n;\n"
+        + "  FETCH NEXT FROM c INTO @n;\n"
+        + "END\n"
+        + "SELECT @s AS total;\n";
+    RecordingRunner runner = new RecordingRunner();
+    runner.cursorRows = Arrays.asList("2", "3", "4");
+    TsqlRuntime.Step step = runUntilClient(src, runner);
+    check(step.kind == TsqlRuntime.Kind.CLIENT_RESULT, "cursor sum reached client select");
+    check(step.sql.contains("9"), "cursor sum was " + step.sql);
+  }
+
+  private static void castAsTypeConcatenates() {
+    String src = ""
+        + "DECLARE @ndv INT = 7;\n"
+        + "DECLARE @sql STRING;\n"
+        + "SET @sql = 'ndv=' + CAST(@ndv AS STRING);\n"
+        + "EXEC(@sql);\n";
+    RecordingRunner runner = new RecordingRunner();
+    runUntilClient(src, runner);
+    String executed = String.join("\n", runner.sql);
+    check(executed.contains("ndv=7"), "cast concatenation was " + executed);
+  }
+
+  private static void createRuntimeDictParses() {
+    String src = ""
+        + "CREATE OR ALTER PROCEDURE create_runtime_dict\n"
+        + "AS\n"
+        + "BEGIN\n"
+        + "  DECLARE @name STRING;\n"
+        + "  DECLARE @col STRING;\n"
+        + "  DECLARE @tp STRING;\n"
+        + "  DECLARE @ndv INT;\n"
+        + "  DECLARE @sql STRING;\n"
+        + "  EXEC('CREATE TABLE default.cursor_result_table (dist_rows INT) STORED AS PARQUET');\n"
+        + "  DECLARE c1 CURSOR FOR SHOW TABLES IN default;\n"
+        + "  OPEN c1;\n"
+        + "  FETCH NEXT FROM c1 INTO @name;\n"
+        + "  WHILE @@FETCH_STATUS = 0\n"
+        + "  BEGIN\n"
+        + "    BEGIN TRY\n"
+        + "      SET @sql = 'SHOW COLUMN STATS default.' + @name;\n"
+        + "      DECLARE c2 CURSOR FOR @sql;\n"
+        + "      OPEN c2;\n"
+        + "      FETCH NEXT FROM c2 INTO @col, @tp, @ndv;\n"
+        + "      WHILE @@FETCH_STATUS = 0\n"
+        + "      BEGIN\n"
+        + "        SET @sql = 'INSERT INTO default.cursor_result_table VALUES ('\n"
+        + "          + QUOTE_LITERAL(@name) + ', '\n"
+        + "          + CAST(@ndv AS DECIMAL(10, 2)) + ')';\n"
+        + "        EXEC(@sql);\n"
+        + "        FETCH NEXT FROM c2 INTO @col, @tp, @ndv;\n"
+        + "      END\n"
+        + "      CLOSE c2;\n"
+        + "      DEALLOCATE c2;\n"
+        + "    END TRY\n"
+        + "    BEGIN CATCH\n"
+        + "    END CATCH\n"
+        + "    FETCH NEXT FROM c1 INTO @name;\n"
+        + "  END\n"
+        + "  CLOSE c1;\n"
+        + "  DEALLOCATE c1;\n"
+        + "END\n";
+    TsqlParser.parse(src);
+  }
+
+  private static void negativeArgumentSubstitutes() {
+    String src = ""
+        + "CREATE PROCEDURE if_sign @n INT AS BEGIN SELECT @n AS n; END\n"
+        + "EXEC if_sign @n = -2;\n";
+    RecordingRunner runner = new RecordingRunner();
+    TsqlRuntime.Step step = runUntilClient(src, runner);
+    check(step.sql.contains("-2"), "negative arg substituted: " + step.sql);
+  }
+
   private static TsqlRuntime.Step runUntilClient(String src, RecordingRunner runner) {
     TsqlRuntime rt = new TsqlRuntime(src, "default", "tester", new TsqlRuntime.MemoryStore());
     TsqlSqlRunner.Result prev = null;
@@ -184,6 +271,9 @@ public final class TsqlRuntimeTest {
         return new Result(Collections.singletonList("count"),
             Collections.singletonList(Collections.singletonList(Cell.of("6"))), 0, null);
       }
+      if (upper.startsWith("SELECT") && !cursorRows.isEmpty()) {
+        return cursorResult();
+      }
       if (upper.startsWith("SELECT NAME") || upper.contains("FROM T")) {
         List<List<Cell>> rows = new ArrayList<List<Cell>>();
         for (String value : cursorRows) {
@@ -193,6 +283,14 @@ public final class TsqlRuntimeTest {
       }
       return new Result(Collections.<String>emptyList(),
           Collections.<List<Cell>>emptyList(), 0, null);
+    }
+
+    private Result cursorResult() {
+      List<List<Cell>> rows = new ArrayList<List<Cell>>();
+      for (String value : cursorRows) {
+        rows.add(Collections.singletonList(Cell.of(value)));
+      }
+      return new Result(Collections.singletonList("n"), rows, 0, null);
     }
   }
 }

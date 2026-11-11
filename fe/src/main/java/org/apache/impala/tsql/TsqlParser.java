@@ -455,6 +455,11 @@ public final class TsqlParser {
   }
 
   private TsqlAst.Expr parsePrimary() {
+    if (check("-")) {
+      // Leading minus is numeric negation. Unary is reserved for NOT.
+      bump();
+      return new TsqlAst.Binary("-", new TsqlAst.Literal("0", false), parsePrimary());
+    }
     if (check("(")) {
       bump();
       TsqlAst.Expr e = parseExpr();
@@ -483,12 +488,15 @@ public final class TsqlParser {
         if (!check(")")) {
           do {
             if (check(",")) bump();
+            // CAST(expr AS type). The value stays argument 0; the type is not evaluated.
+            call.args.add(parseExpr());
             if (check("AS")) {
-              // CAST(x AS type) — the type is an identifier, not an expression.
               bump();
-              call.args.add(new TsqlAst.Literal(ident(), false));
-            } else {
-              call.args.add(parseExpr());
+              ident();
+              if (check("(")) {
+                bump();
+                readRawBalanced();
+              }
             }
           } while (check(","));
         }
@@ -641,7 +649,8 @@ public final class TsqlParser {
   private String atName() {
     if (!checkAt()) throw new ParseException("Expected @name at " + peekText());
     String raw = bump().text;
-    return raw.startsWith("@") ? raw.substring(1) : raw;
+    while (raw.startsWith("@")) raw = raw.substring(1);
+    return raw;
   }
 
   private static String unescape(String quotedBody) {

@@ -4,9 +4,12 @@
 #include "tsql/tsql-child-query.h"
 #include "tsql/tsql-flags.h"
 
+#include <exception>
+
 #include "gen-cpp/Tsql_types.h"
 #include "rpc/thrift-util.h"
 #include "runtime/exec-env.h"
+#include "runtime/types.h"
 #include "service/client-request-state.h"
 #include "service/impala-server.h"
 #include "util/jni-util.h"
@@ -75,10 +78,50 @@ void TsqlExecutor::Cancel() {
 }
 
 void TsqlExecutor::Run() {
-  Status status = RunInternal();
+  Status status;
+  try {
+    status = RunInternal();
+  } catch (const std::exception& e) {
+    const char* what = e.what();
+    status = Status(what == nullptr ? "T-SQL execution failed" : what);
+  }
   if (!status.ok()) {
     lock_guard<mutex> guard(*parent_->lock());
     discard_result(parent_->UpdateQueryStatus(status));
+  }
+}
+
+static TColumn StringResultColumn(const string& name) {
+  TColumn col;
+  col.__set_columnName(name);
+  col.__set_columnType(ColumnType(TYPE_STRING).ToThrift());
+  return col;
+}
+
+void TsqlExecutor::PublishClientResult(const TsqlChildQuery& child) {
+  vector<string> names = child.columns();
+  if (names.empty()) names.push_back("result");
+  TResultSetMetadata meta;
+  for (const string& name : names) meta.columns.push_back(StringResultColumn(name));
+
+  vector<TResultRow> rows;
+  rows.reserve(child.values().size());
+  for (size_t r = 0; r < child.values().size(); ++r) {
+    TResultRow row;
+    row.__isset.colVals = true;
+    row.colVals.resize(names.size());
+    for (size_t c = 0; c < names.size(); ++c) {
+      bool missing = c >= child.values()[r].size();
+      bool is_null = missing
+          || (r < child.nulls().size() && c < child.nulls()[r].size()
+              && child.nulls()[r][c]);
+      if (!is_null) row.colVals[c].__set_string_val(child.values()[r][c]);
+    }
+    rows.push_back(std::move(row));
+  }
+  {
+    lock_guard<mutex> guard(*parent_->lock());
+    parent_->SetResultSet(meta, std::move(rows));
   }
 }
 
@@ -123,7 +166,10 @@ Status TsqlExecutor::RunInternal() {
       } else {
         summary.push_back("OK");
       }
-      parent_->SetResultSet(summary);
+      {
+        lock_guard<mutex> guard(*parent_->lock());
+        parent_->SetResultSet(summary);
+      }
       return Status::OK();
     }
     if (step.kind == TSqlStepKind::SQL || step.kind == TSqlStepKind::CLIENT_RESULT
@@ -148,27 +194,7 @@ Status TsqlExecutor::RunInternal() {
       }
       RETURN_IF_ERROR(child_status);
       if (step.kind != TSqlStepKind::SQL) {
-        TResultSetMetadata meta;
-        for (const string& name : child->columns()) {
-          TColumn col;
-          col.__set_columnName(name);
-          meta.columns.push_back(col);
-        }
-        if (meta.columns.empty()) {
-          TColumn col;
-          col.__set_columnName("result");
-          meta.columns.push_back(col);
-        }
-        parent_->set_result_metadata(meta);
-        if (child->values().empty()) {
-          parent_->SetResultSet(vector<string>());
-        } else if (child->values()[0].size() == 1) {
-          vector<string> col;
-          for (const auto& row : child->values()) col.push_back(row[0]);
-          parent_->SetResultSet(col);
-        } else {
-          parent_->SetResultSet(vector<string>(1, "OK"));
-        }
+        PublishClientResult(*child);
         return Status::OK();
       }
       feed = TSqlFeed();

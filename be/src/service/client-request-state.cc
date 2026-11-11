@@ -372,7 +372,9 @@ Status ClientRequestState::Exec() {
       LOG_AND_RETURN_IF_ERROR(ExecKillQueryRequest());
       break;
     case TStmtType::TSQL: {
-      // ADH-TSQL. Return as soon as the loop is scheduled. WaitInternal joins it.
+      // ADH-TSQL. Finish the procedure before Exec() returns. impala-shell reads
+      // GetResultSetMetadata as soon as ExecuteStatement returns, so the schema
+      // has to be the final one. WaitInternal must not join this thread again.
       DCHECK(exec_req.__isset.tsql_request);
       if (!FLAGS_enable_tsql) {
         return Status("T-SQL procedures are disabled (--enable_tsql=false)");
@@ -381,6 +383,14 @@ Status ClientRequestState::Exec() {
       UpdateNonErrorExecState(ExecState::PENDING);
       RETURN_IF_ERROR(Thread::Create("query-exec-state", "async-exec-thread",
           &TsqlExecutor::Run, tsql_executor_.get(), &async_exec_thread_, true));
+      async_exec_thread_->Join();
+      async_exec_thread_.reset();
+      Status tsql_status;
+      {
+        lock_guard<mutex> l(lock_);
+        tsql_status = query_status_;
+      }
+      if (!tsql_status.ok()) return tsql_status;
       break;
     }
     default:
@@ -1814,6 +1824,12 @@ void ClientRequestState::SetResultSet(const vector<string>& col1,
     (*request_result_set_.get())[i].colVals[1].__set_string_val(col2[i]);
     (*request_result_set_.get())[i].colVals[2].__set_string_val(col3[i]);
   }
+}
+
+void ClientRequestState::SetResultSet(const TResultSetMetadata& metadata,
+    vector<TResultRow> rows) {
+  result_metadata_ = metadata;
+  request_result_set_.reset(new vector<TResultRow>(std::move(rows)));
 }
 
 void ClientRequestState::SetResultSet(const vector<string>& col1,
