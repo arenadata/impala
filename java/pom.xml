@@ -465,6 +465,7 @@ under the License.
     <module>shaded-deps/hive-exec</module>
     <module>shaded-deps/impala-iceberg-runtime</module>
     <module>shaded-deps/s3a-aws-sdk</module>
+    <module>shaded-deps/arrow-flight</module>
     <module>TableFlattener</module>
     <module>test-hive-udfs</module>
     <module>test-corrupt-hive-udfs</module>

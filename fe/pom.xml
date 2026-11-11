@@ -500,6 +500,22 @@ under the License.
       <version>${project.version}</version>
     </dependency>
 
+    <!-- Arrow Flight SQL endpoint of the coordinator (org.apache.impala.service.flight).
+         Shaded jar: gRPC, netty, protobuf, Guava and Jackson inside are relocated; the
+         remaining transitive dependencies (slf4j, annotation jars, netty-tcnative) are
+         not wanted on the impalad classpath. -->
+    <dependency>
+      <groupId>org.apache.impala</groupId>
+      <artifactId>impala-arrow-flight</artifactId>
+      <version>${project.version}</version>
+      <exclusions>
+        <exclusion>
+          <groupId>*</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
     <!-- Needed for reading Iceberg Puffin files. -->
     <dependency>
       <groupId>org.apache.datasketches</groupId>
@@ -779,6 +795,14 @@ under the License.
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>
         <version>3.3.0</version>
+        <configuration>
+          <archive>
+            <manifest>
+              <!-- Implementation-Version: reported by the Flight SQL endpoint -->
+              <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+            </manifest>
+          </archive>
+        </configuration>
       <executions>
         <execution>
           <goals>
