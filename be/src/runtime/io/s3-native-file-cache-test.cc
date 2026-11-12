@@ -61,9 +61,10 @@ static bool Read(S3NativeFileCache* cache, const string& key, int64_t length,
 }
 
 // Looks up 'key' like Read() and returns whether the cache left the read to the caller
-// (low headroom): no file and the loader was not called.
+// (low headroom): no file and the loader was not called. Then reports 'read_bytes' (the
+// whole file if negative) with SkippedRead(), like the reader does after its own read.
 static bool Skips(S3NativeFileCache* cache, const string& key, int64_t length,
-    const void* owner) {
+    const void* owner, int64_t read_bytes = -1) {
   shared_ptr<const S3NativeFileCache::File> file;
   bool hit = true;
   std::atomic<int> calls(0);
@@ -71,6 +72,7 @@ static bool Skips(S3NativeFileCache* cache, const string& key, int64_t length,
       &hit);
   EXPECT_TRUE(status.ok()) << status.GetDetail();
   EXPECT_FALSE(hit);
+  if (file == nullptr) cache->SkippedRead(read_bytes < 0 ? length : read_bytes);
   return file == nullptr && calls == 0;
 }
 
@@ -307,17 +309,22 @@ TEST(S3NativeFileCacheTest, SkipsFillsWhileHeadroomLow) {
   EXPECT_FALSE(Read(&cache, "f", 100, OWNER_1));
   EXPECT_EQ(300, cache.TotalBytes());
   // Not cached while the headroom is low: each read is left to the caller, which reads
-  // only the bytes it needs instead of the whole file.
-  EXPECT_TRUE(Skips(&cache, "g", 100, OWNER_1));
+  // only the bytes it needs instead of the whole file. Only the bytes the caller read
+  // count as skipped, not the file length.
+  EXPECT_EQ(0, cache.SkippedBytes());
+  EXPECT_TRUE(Skips(&cache, "g", 100, OWNER_1, 30));
   EXPECT_EQ(300, cache.TotalBytes());
-  EXPECT_TRUE(Skips(&cache, "g", 100, OWNER_1));
+  EXPECT_TRUE(Skips(&cache, "g", 100, OWNER_1, 30));
   EXPECT_EQ(300, cache.TotalBytes());
   EXPECT_EQ(3, cache.NumEntries());
+  EXPECT_EQ(60, cache.SkippedBytes());
 
   headroom = 1000;
-  // Skipped: the flag is from the last check; this read's check clears it.
-  EXPECT_TRUE(Skips(&cache, "h", 100, OWNER_1));
+  // Skipped: the flag is from the last check; this read's check (the reported bytes
+  // reach the check interval) clears it.
+  EXPECT_TRUE(Skips(&cache, "h", 100, OWNER_1, 30));
   EXPECT_EQ(300, cache.TotalBytes());
+  EXPECT_EQ(90, cache.SkippedBytes());
   EXPECT_FALSE(Read(&cache, "i", 100, OWNER_1));
   EXPECT_EQ(400, cache.TotalBytes());
   EXPECT_TRUE(Read(&cache, "i", 100, OWNER_1));
@@ -389,6 +396,8 @@ TEST(S3NativeFileCacheTest, BlocksReadIntoBufferWhileHeadroomLow) {
   EXPECT_EQ(4, stats.missed_blocks);
   EXPECT_EQ(300, cache.TotalBytes());
   EXPECT_EQ(3, cache.NumEntries());
+  // Skipped bytes: the blocks fetched (whole blocks 0-1 and 3-4).
+  EXPECT_EQ(400, cache.SkippedBytes());
 
   // An object shorter than the catalog says: the read ends where the object does.
   vector<std::pair<int64_t, S3NativeFileCache::Segments>> short_calls;
@@ -398,13 +407,16 @@ TEST(S3NativeFileCacheTest, BlocksReadIntoBufferWhileHeadroomLow) {
   for (int64_t i = 0; i < 250; ++i) ASSERT_EQ(PatternByte(i), buffer[i]) << i;
   EXPECT_EQ(1, short_calls.size());
   EXPECT_EQ(300, cache.TotalBytes());
+  // Counted with the bytes received, not the length of the blocks.
+  EXPECT_EQ(650, cache.SkippedBytes());
 
-  // A failed fetch is returned and caches nothing.
+  // A failed fetch is returned, caches nothing and counts nothing.
   ASSERT_FALSE(cache.ReadBlocks("z", 1000, 100, 0, buffer.data(), 200, OWNER_1,
       [] (int64_t, const S3NativeFileCache::Segments&, int64_t*) {
         return Status("fetch failed");
       }, &bytes_read, &stats).ok());
   EXPECT_EQ(3, cache.NumEntries());
+  EXPECT_EQ(650, cache.SkippedBytes());
 
   // With enough headroom (the first read runs the check) blocks are cached again.
   headroom = 1000;

@@ -195,9 +195,8 @@ Status S3NativeFileCache::Lookup(const std::string& file_key, int64_t length,
     }
   }
   if (ref.skipped) {
-    // Not cached now: the caller reads only what it needs.
-    CountSkipped(length);
-    CheckHeadroom(length);
+    // Not cached now: the caller reads only what it needs and reports it with
+    // SkippedRead() (counting 'length' here would count the whole file on every read).
     file->reset();
     *hit = false;
     return Status::OK();
@@ -436,7 +435,6 @@ Status S3NativeFileCache::FetchSkippedRun(int64_t file_length, int64_t block_siz
     }
     run_len += block_len;
   }
-  CountSkipped(run_len);
   int64_t received = 0;
   RETURN_IF_ERROR(fetch(run_offset, segments, &received));
   for (int k = begin_index; k < end_index; ++k) {
@@ -453,9 +451,11 @@ Status S3NativeFileCache::FetchSkippedRun(int64_t file_length, int64_t block_siz
       (*refs)[k].file = std::move(block);
     }
   }
-  // Counts towards the headroom check like filled bytes: it also ends the low headroom
-  // state once the headroom is back, without a background check.
-  CheckHeadroom(run_len);
+  // Counted after the fetch, with the bytes received. Counts towards the headroom check
+  // like filled bytes: it also ends the low headroom state once the headroom is back,
+  // without a background check.
+  CountSkipped(received);
+  CheckHeadroom(received);
   return Status::OK();
 }
 
@@ -707,6 +707,8 @@ bool S3NativeFileCache::SkipFill(int64_t len) {
 }
 
 void S3NativeFileCache::CountSkipped(int64_t len) {
+  if (len <= 0) return;
+  skipped_bytes_ += len;
   if (ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_SKIPPED_BYTES != nullptr) {
     ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_SKIPPED_BYTES->Increment(len);
   }

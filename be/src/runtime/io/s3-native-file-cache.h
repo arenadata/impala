@@ -209,7 +209,7 @@ class S3NativeFileCache {
   /// On a miss while the cache takes no new entries (low headroom, see the class
   /// comment) sets '*file' to null and '*hit' to false without calling 'loader': the
   /// caller reads only the bytes it needs, instead of the whole file again on every
-  /// read.
+  /// read, and then reports them with SkippedRead().
   /// An error of 'loader' is returned to its caller and nothing is cached; a caller that
   /// waited for that load retries once with its own 'loader', so that one failed
   /// request does not fail every reader of the file. 'owner' identifies the reader (the
@@ -258,6 +258,14 @@ class S3NativeFileCache {
   /// that the caller asks the buffer pool for the rest.
   int64_t ReleaseMemory(int64_t bytes_to_free);
 
+  /// Called after the caller of Lookup() read 'bytes' bytes itself because Lookup()
+  /// returned no file (low headroom): counts them as skipped bytes and towards the
+  /// headroom check, which also ends the low headroom state once the headroom is back.
+  void SkippedRead(int64_t bytes) {
+    CountSkipped(bytes);
+    CheckHeadroom(bytes);
+  }
+
   /// Number of bytes and entries currently cached (not counting entries being loaded).
   int64_t TotalBytes() const { return total_bytes_.load(); }
   int64_t NumEntries() const { return num_entries_.load(); }
@@ -266,6 +274,11 @@ class S3NativeFileCache {
   /// retries after such a load failed.
   int64_t NumWaiting() const { return num_waiting_.load(); }
   int64_t RetriesAfterFailedWait() const { return retries_after_failed_wait_.load(); }
+
+  /// Bytes not cached because the headroom was low (as the skipped bytes metric): loaded
+  /// entries dropped by SkipFill(), bytes reported by SkippedRead() and skipped blocks
+  /// fetched by ReadBlocks().
+  int64_t SkippedBytes() const { return skipped_bytes_.load(); }
 
  private:
   struct FileEntries;
@@ -472,8 +485,8 @@ class S3NativeFileCache {
   /// (!AcceptsNewEntries()). Updates the skipped bytes metric.
   bool SkipFill(int64_t len);
 
-  /// Adds 'len' bytes to the skipped bytes metric.
-  static void CountSkipped(int64_t len);
+  /// Adds 'len' bytes to the skipped bytes (SkippedBytes() and the metric).
+  void CountSkipped(int64_t len);
 
   /// Called after 'filled' bytes of new entries were cached or read without an entry
   /// because the headroom was low: every headroom check interval of such bytes calls
@@ -519,6 +532,8 @@ class S3NativeFileCache {
   /// See NumWaiting() and RetriesAfterFailedWait().
   std::atomic<int64_t> num_waiting_{0};
   std::atomic<int64_t> retries_after_failed_wait_{0};
+  /// See SkippedBytes().
+  std::atomic<int64_t> skipped_bytes_{0};
 };
 
 /// Creates the process-wide cache if --s3_native_cache_capacity and

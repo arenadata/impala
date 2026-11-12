@@ -490,14 +490,13 @@ Status S3NativeFileReader::ReadFromCachedFile(int64_t file_offset, uint8_t* buff
       }, &file, &hit));
   if (file == nullptr) {
     // The cache takes no new entries now (low headroom): read only the requested bytes
-    // instead of the whole file again on every read of it.
-    if (ImpaladMetrics::IO_MGR_S3_NATIVE_WHOLE_FILE_CACHE_MISS_COUNT != nullptr) {
-      ImpaladMetrics::IO_MGR_S3_NATIVE_WHOLE_FILE_CACHE_MISS_COUNT->Increment(1);
-    }
-    if (native_data_cache != nullptr && scan_range_->UseDataCache()) {
-      return ReadThroughDataCache(file_offset, buffer, bytes_to_read, bytes_read);
-    }
-    return GetRange(file_offset, buffer, bytes_to_read, bytes_read);
+    // instead of the whole file again on every read of it. Not through the remote data
+    // cache: it keeps this file whole at offset 0 and looks entries up by exact offset,
+    // so a range would miss there and store another copy of the same bytes. Not a
+    // whole-file miss either (the skipped bytes metric counts these reads).
+    RETURN_IF_ERROR(GetRange(file_offset, buffer, bytes_to_read, bytes_read));
+    GetS3NativeFileCache()->SkippedRead(*bytes_read);
+    return Status::OK();
   }
   if (file_offset < file->len) {
     *bytes_read = min(bytes_to_read, file->len - file_offset);

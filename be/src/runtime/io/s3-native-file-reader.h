@@ -90,8 +90,8 @@ class S3NativeFileReader : public FileReader {
   /// file (of 'file_length' bytes, as known from the catalog) on a miss: through the
   /// remote data cache (ReadThroughDataCache()) if it is enabled, otherwise GetRange().
   /// While the cache takes no new entries (low headroom), a miss reads only the
-  /// requested bytes the same way. Sets 'bytes_read', less than 'bytes_to_read' only at
-  /// the end of the file.
+  /// requested bytes with GetRange(), without the remote data cache. Sets 'bytes_read',
+  /// less than 'bytes_to_read' only at the end of the file.
   Status ReadFromCachedFile(int64_t file_offset, uint8_t* buffer, int64_t bytes_to_read,
       int64_t file_length, int64_t* bytes_read);
 
