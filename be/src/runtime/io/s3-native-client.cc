@@ -48,8 +48,10 @@ DEFINE_string(s3_native_region, "us-east-1", "(Experimental) S3 region of the na
     "reader.");
 DEFINE_bool(s3_native_path_style, true, "(Experimental) Use path-style S3 URLs "
     "(https://endpoint/bucket/key) in the native S3 reader. Needed for Ozone and MinIO.");
-DEFINE_string(s3_native_credentials_file, "", "(Experimental) AWS credentials file (ini "
-    "format with aws_access_key_id and aws_secret_access_key) for the native S3 reader. "
+DEFINE_string(s3_native_credentials_file, "", "(Experimental) AWS credentials file of "
+    "the native S3 reader, in the ini format of ~/.aws/credentials: aws_access_key_id "
+    "and aws_secret_access_key under a [default] section header (or the section named "
+    "by AWS_PROFILE); without the header no keys are found and impalad does not start. "
     "Empty means the default AWS credentials chain (environment variables, "
     "~/.aws/credentials). Keys are deliberately not taken from flags, which are visible "
     "on the debug web pages.");
@@ -220,7 +222,8 @@ Status InitS3NativeClient() {
       Aws::MakeShared<Aws::Auth::DefaultAWSCredentialsProviderChain>(kAllocationTag);
   if (credentials->GetAWSCredentials().IsEmpty()) {
     return Status("--s3_native_reader is set, but no AWS credentials were found. Set "
-        "--s3_native_credentials_file or the AWS_ACCESS_KEY_ID and "
+        "--s3_native_credentials_file (the keys under a [default] section header, or "
+        "the section named by AWS_PROFILE) or the AWS_ACCESS_KEY_ID and "
         "AWS_SECRET_ACCESS_KEY environment variables.");
   }
   s3_client = Aws::MakeShared<Aws::S3::S3Client>(

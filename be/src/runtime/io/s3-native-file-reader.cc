@@ -488,6 +488,17 @@ Status S3NativeFileReader::ReadFromCachedFile(int64_t file_offset, uint8_t* buff
         f->len = loaded;
         return Status::OK();
       }, &file, &hit));
+  if (file == nullptr) {
+    // The cache takes no new entries now (low headroom): read only the requested bytes
+    // instead of the whole file again on every read of it.
+    if (ImpaladMetrics::IO_MGR_S3_NATIVE_WHOLE_FILE_CACHE_MISS_COUNT != nullptr) {
+      ImpaladMetrics::IO_MGR_S3_NATIVE_WHOLE_FILE_CACHE_MISS_COUNT->Increment(1);
+    }
+    if (native_data_cache != nullptr && scan_range_->UseDataCache()) {
+      return ReadThroughDataCache(file_offset, buffer, bytes_to_read, bytes_read);
+    }
+    return GetRange(file_offset, buffer, bytes_to_read, bytes_read);
+  }
   if (file_offset < file->len) {
     *bytes_read = min(bytes_to_read, file->len - file_offset);
     memcpy(buffer, file->data.get() + file_offset, *bytes_read);

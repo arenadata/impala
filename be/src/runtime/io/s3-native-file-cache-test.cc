@@ -60,6 +60,42 @@ static bool Read(S3NativeFileCache* cache, const string& key, int64_t length,
   return hit;
 }
 
+// Looks up 'key' like Read() and returns whether the cache left the read to the caller
+// (low headroom): no file and the loader was not called.
+static bool Skips(S3NativeFileCache* cache, const string& key, int64_t length,
+    const void* owner) {
+  shared_ptr<const S3NativeFileCache::File> file;
+  bool hit = true;
+  std::atomic<int> calls(0);
+  Status status = cache->Lookup(key, length, owner, FillLoader(key[0], &calls), &file,
+      &hit);
+  EXPECT_TRUE(status.ok()) << status.GetDetail();
+  EXPECT_FALSE(hit);
+  return file == nullptr && calls == 0;
+}
+
+// Byte at 'pos' of the test objects of PatternFetcher().
+static uint8_t PatternByte(int64_t pos) { return static_cast<uint8_t>(pos % 251); }
+
+// Fetcher of an object of 'object_length' bytes with PatternByte() data that records
+// each call (offset, segments) in 'calls'.
+static S3NativeFileCache::Fetcher PatternFetcher(int64_t object_length,
+    vector<std::pair<int64_t, S3NativeFileCache::Segments>>* calls) {
+  return [object_length, calls] (int64_t offset,
+      const S3NativeFileCache::Segments& segments, int64_t* received) {
+    calls->emplace_back(offset, segments);
+    *received = 0;
+    int64_t pos = offset;
+    for (const auto& segment : segments) {
+      for (int64_t i = 0; i < segment.second && pos < object_length; ++i, ++pos) {
+        segment.first[i] = PatternByte(pos);
+        ++*received;
+      }
+    }
+    return Status::OK();
+  };
+}
+
 TEST(S3NativeFileCacheTest, HitAfterLoad) {
   S3NativeFileCache cache(1000, 80);
   std::atomic<int> calls(0);
@@ -221,7 +257,8 @@ TEST(S3NativeFileCacheTest, ElasticPartReleasedWhenHeadroomLow) {
   EXPECT_EQ(300, cache.TotalBytes());
   EXPECT_EQ(3, cache.NumEntries());
   EXPECT_TRUE(Read(&cache, "i", 100, OWNER_1));
-  EXPECT_FALSE(Read(&cache, "a", 100, OWNER_1));
+  // Not cached (the reserved part is full): the caller reads it.
+  EXPECT_TRUE(Skips(&cache, "a", 100, OWNER_1));
   // The reserved part stays while the headroom is low.
   EXPECT_EQ(300, cache.TotalBytes());
 
@@ -245,9 +282,13 @@ TEST(S3NativeFileCacheTest, ElasticPartReleasedWhenHeadroomLow) {
   EXPECT_EQ(1, fetches);
   EXPECT_EQ(300, cache.TotalBytes());
 
-  // With enough headroom the cache grows to its capacity again.
+  EXPECT_EQ(3, cache.NumEntries());
+
+  // With enough headroom the cache grows to its capacity again: the state is from the
+  // last check, which the next skipped read runs.
   headroom = S3NativeFileCache::kDefaultMinHeadroom;
-  for (char c = 'k'; c <= 'r'; ++c) Read(&cache, string(1, c), 100, OWNER_1);
+  EXPECT_TRUE(Skips(&cache, "k", 100, OWNER_1));
+  for (char c = 'l'; c <= 'r'; ++c) Read(&cache, string(1, c), 100, OWNER_1);
   EXPECT_EQ(1000, cache.TotalBytes());
 }
 
@@ -265,15 +306,17 @@ TEST(S3NativeFileCacheTest, SkipsFillsWhileHeadroomLow) {
   // Cached, then the check gives back down to the reserved part.
   EXPECT_FALSE(Read(&cache, "f", 100, OWNER_1));
   EXPECT_EQ(300, cache.TotalBytes());
-  // Not cached while the headroom is low.
-  EXPECT_FALSE(Read(&cache, "g", 100, OWNER_1));
+  // Not cached while the headroom is low: each read is left to the caller, which reads
+  // only the bytes it needs instead of the whole file.
+  EXPECT_TRUE(Skips(&cache, "g", 100, OWNER_1));
   EXPECT_EQ(300, cache.TotalBytes());
-  EXPECT_FALSE(Read(&cache, "g", 100, OWNER_1));
+  EXPECT_TRUE(Skips(&cache, "g", 100, OWNER_1));
   EXPECT_EQ(300, cache.TotalBytes());
+  EXPECT_EQ(3, cache.NumEntries());
 
   headroom = 1000;
-  // Skipped: the flag is from the last check; this fill's check clears it.
-  EXPECT_FALSE(Read(&cache, "h", 100, OWNER_1));
+  // Skipped: the flag is from the last check; this read's check clears it.
+  EXPECT_TRUE(Skips(&cache, "h", 100, OWNER_1));
   EXPECT_EQ(300, cache.TotalBytes());
   EXPECT_FALSE(Read(&cache, "i", 100, OWNER_1));
   EXPECT_EQ(400, cache.TotalBytes());
@@ -295,8 +338,81 @@ TEST(S3NativeFileCacheTest, AfterReleaseCalledOnlyAfterRelease) {
   EXPECT_EQ(300, cache.TotalBytes());
   EXPECT_EQ(1, after);
   // Low headroom, but nothing above the reserved part to give back: not called.
-  Read(&cache, "g", 100, OWNER_1);
+  EXPECT_TRUE(Skips(&cache, "g", 100, OWNER_1));
   EXPECT_EQ(1, after);
+}
+
+// While the headroom is low and the reserved part is full, missing blocks are fetched
+// straight into the caller's buffer, whole blocks per run (the first and the last block
+// of the read through temporary blocks), and nothing is cached; cached blocks are still
+// hits.
+TEST(S3NativeFileCacheTest, BlocksReadIntoBufferWhileHeadroomLow) {
+  S3NativeFileCache cache(1000, 80, 1, 300);
+  std::atomic<int64_t> headroom(1000);
+  cache.SetHeadroomFunction([&headroom] () { return headroom.load(); }, 500);
+  vector<std::pair<int64_t, S3NativeFileCache::Segments>> calls;
+  S3NativeFileCache::Fetcher fetch = PatternFetcher(1000, &calls);
+  vector<uint8_t> buffer(1000);
+  int64_t bytes_read = 0;
+  S3NativeFileCache::BlockStats stats;
+  // Block 2 of "x" is cached; then the headroom gets low and the cache gives back down
+  // to its reserved part (b, block 2 of x, c; a is the least recently used).
+  Read(&cache, "a", 100, OWNER_1);
+  Read(&cache, "b", 100, OWNER_1);
+  ASSERT_OK(cache.ReadBlocks("x", 1000, 100, 200, buffer.data(), 100, OWNER_1, fetch,
+      &bytes_read, &stats));
+  headroom = 0;
+  Read(&cache, "c", 100, OWNER_1);
+  ASSERT_EQ(300, cache.TotalBytes());
+  ASSERT_EQ(3, cache.NumEntries());
+
+  // Bytes 50-449: blocks 0-1 and 3-4 are missing, block 2 is cached.
+  calls.clear();
+  stats = S3NativeFileCache::BlockStats();
+  ASSERT_OK(cache.ReadBlocks("x", 1000, 100, 50, buffer.data(), 400, OWNER_1, fetch,
+      &bytes_read, &stats));
+  EXPECT_EQ(400, bytes_read);
+  for (int64_t i = 0; i < 400; ++i) ASSERT_EQ(PatternByte(50 + i), buffer[i]) << i;
+  ASSERT_EQ(2, calls.size());
+  // Blocks 0-1: block 0 is partly before the read (temporary block), block 1 is
+  // fetched into the buffer.
+  EXPECT_EQ(0, calls[0].first);
+  ASSERT_EQ(2, calls[0].second.size());
+  EXPECT_EQ(100, calls[0].second[0].second);
+  EXPECT_EQ(buffer.data() + 50, calls[0].second[1].first);
+  // Blocks 3-4: block 3 into the buffer, block 4 is partly after the read.
+  EXPECT_EQ(300, calls[1].first);
+  ASSERT_EQ(2, calls[1].second.size());
+  EXPECT_EQ(buffer.data() + 250, calls[1].second[0].first);
+  EXPECT_EQ(100, calls[1].second[1].second);
+  EXPECT_EQ(1, stats.hit_blocks);
+  EXPECT_EQ(4, stats.missed_blocks);
+  EXPECT_EQ(300, cache.TotalBytes());
+  EXPECT_EQ(3, cache.NumEntries());
+
+  // An object shorter than the catalog says: the read ends where the object does.
+  vector<std::pair<int64_t, S3NativeFileCache::Segments>> short_calls;
+  ASSERT_OK(cache.ReadBlocks("y", 1000, 100, 0, buffer.data(), 400, OWNER_1,
+      PatternFetcher(250, &short_calls), &bytes_read, &stats));
+  EXPECT_EQ(250, bytes_read);
+  for (int64_t i = 0; i < 250; ++i) ASSERT_EQ(PatternByte(i), buffer[i]) << i;
+  EXPECT_EQ(1, short_calls.size());
+  EXPECT_EQ(300, cache.TotalBytes());
+
+  // A failed fetch is returned and caches nothing.
+  ASSERT_FALSE(cache.ReadBlocks("z", 1000, 100, 0, buffer.data(), 200, OWNER_1,
+      [] (int64_t, const S3NativeFileCache::Segments&, int64_t*) {
+        return Status("fetch failed");
+      }, &bytes_read, &stats).ok());
+  EXPECT_EQ(3, cache.NumEntries());
+
+  // With enough headroom (the first read runs the check) blocks are cached again.
+  headroom = 1000;
+  ASSERT_OK(cache.ReadBlocks("x", 1000, 100, 500, buffer.data(), 100, OWNER_1, fetch,
+      &bytes_read, &stats));
+  ASSERT_OK(cache.ReadBlocks("x", 1000, 100, 600, buffer.data(), 100, OWNER_1, fetch,
+      &bytes_read, &stats));
+  EXPECT_EQ(400, cache.TotalBytes());
 }
 
 // The background check gives the elastic part back while nothing is filled (queries

@@ -91,8 +91,10 @@ namespace io {
 /// --s3_native_cache_headroom_check_ms, by a background thread, so that the cache
 /// also makes room while queries grow and the cache does not fill (joins, aggregations
 /// after their scans). While the last check found the headroom below the margin, new
-/// entries above the reserved part are not cached (the data still goes to the reader),
-/// so that the cache does not fill only to give the memory back right after.
+/// entries above the reserved part are not cached, so that the cache does not fill only
+/// to give the memory back right after. Such misses are read without a cache entry:
+/// whole small files are not read whole (Lookup() leaves the read to the caller), and
+/// blocks are fetched straight into the caller's buffer (ReadBlocks()).
 ///
 /// Thread safe.
 class S3NativeFileCache {
@@ -141,6 +143,10 @@ class S3NativeFileCache {
     std::shared_future<LoadResult> pending;
     /// The caller must load the entry and call Fill() for it, also on error.
     bool reserved = false;
+    /// Missing, and not reserved because the cache takes no new entries now (low
+    /// headroom): the caller reads the data itself and does not call Fill(). Never set
+    /// by Acquire().
+    bool skipped = false;
   };
 
   /// Called for an entry evicted to make room in its shard (not for entries given back
@@ -200,6 +206,10 @@ class S3NativeFileCache {
   /// Returns in '*file' the whole file stored under 'file_key'. On a miss allocates a
   /// buffer of 'length' bytes and calls 'loader' to fill it; concurrent calls for the
   /// same key wait for that load. '*hit' is false only for the caller that ran 'loader'.
+  /// On a miss while the cache takes no new entries (low headroom, see the class
+  /// comment) sets '*file' to null and '*hit' to false without calling 'loader': the
+  /// caller reads only the bytes it needs, instead of the whole file again on every
+  /// read.
   /// An error of 'loader' is returned to its caller and nothing is cached; a caller that
   /// waited for that load retries once with its own 'loader', so that one failed
   /// request does not fail every reader of the file. 'owner' identifies the reader (the
@@ -213,6 +223,11 @@ class S3NativeFileCache {
   /// 'file_key'. Each run of consecutive blocks that are neither cached nor being loaded
   /// is fetched with one call of 'fetch', straight into the new blocks. Sets
   /// 'bytes_read', less than 'len' only at the end of the file. 'owner' as in Lookup().
+  /// While the cache takes no new entries (low headroom), missing blocks are not
+  /// reserved: each run of them is fetched with one call of 'fetch' straight into
+  /// 'buffer' (only the first and the last block of the read, if 'buffer' holds just a
+  /// part of them, go through a temporary block), so that nothing is allocated for
+  /// entries that would be dropped.
   /// An error of 'fetch' is returned and nothing of that read is cached; if a block
   /// loaded by another reader failed, the read is retried once, fetching that block
   /// itself.
@@ -358,8 +373,25 @@ class S3NativeFileCache {
       const void* owner, const Fetcher& fetch, int64_t* bytes_read, BlockStats* stats,
       Status* waited_error);
 
-  /// Acquire() of block 'block' of 'file' in 'shard' with its lock held.
+  /// Fetches the skipped blocks [begin_index, end_index) of a ReadBlocksOnce() read of
+  /// [offset, end) with one call of 'fetch': blocks within the read straight into
+  /// 'buffer' (sets their bytes received in 'in_buffer'), the others into temporary
+  /// blocks set in 'refs'.
+  Status FetchSkippedRun(int64_t file_length, int64_t block_size, int64_t offset,
+      int64_t end, int64_t first_block, int begin_index, int end_index, uint8_t* buffer,
+      const Fetcher& fetch, std::vector<Ref>* refs, std::vector<int64_t>* in_buffer);
+
+  /// Removes 'file' from 'shard' if it has no entries (e.g. after a skipped miss).
+  void EraseIfEmptyLocked(Shard* shard, FileEntries* file);
+
+  /// Acquire() of block 'block' of 'file' in 'shard' with its lock held. With 'reserve'
+  /// false a miss is not reserved: 'ref->skipped' is set instead.
   void AcquireLocked(Shard* shard, FileEntries* file, int64_t block, const void* owner,
+      Ref* ref, bool reserve = true);
+
+  /// Acquire() for Lookup(): 'ref->skipped' instead of a reservation if a whole file of
+  /// 'length' bytes would not be cached now (!AcceptsNewEntries()).
+  void AcquireWholeFile(const std::string& file_key, int64_t length, const void* owner,
       Ref* ref);
 
   /// An entry evicted to make room, kept until the eviction handler ran.
@@ -430,12 +462,23 @@ class S3NativeFileCache {
   int64_t Release(int64_t bytes_to_free, int64_t keep_bytes, ReleaseReason reason,
       int64_t* evicted_bytes = nullptr);
 
-  /// Whether an entry of 'len' bytes is not cached because the headroom is low (see the
-  /// class comment). Updates the skipped bytes metric.
+  /// Whether a new entry of 'len' bytes would be cached now: false while the headroom is
+  /// low and the entry does not fit into the reserved part (see the class comment).
+  bool AcceptsNewEntries(int64_t len) const {
+    return !low_headroom_.load() || total_bytes_.load() + len <= reserved_;
+  }
+
+  /// Whether an entry of 'len' bytes is not cached because the headroom is low
+  /// (!AcceptsNewEntries()). Updates the skipped bytes metric.
   bool SkipFill(int64_t len);
 
-  /// Called after 'filled' bytes of new entries were cached: every headroom check
-  /// interval of filled bytes calls ReleaseForHeadroom().
+  /// Adds 'len' bytes to the skipped bytes metric.
+  static void CountSkipped(int64_t len);
+
+  /// Called after 'filled' bytes of new entries were cached or read without an entry
+  /// because the headroom was low: every headroom check interval of such bytes calls
+  /// ReleaseForHeadroom() (which also clears the low headroom state once the headroom
+  /// is back).
   void CheckHeadroom(int64_t filled);
 
   /// Asks 'headroom_fn_' and gives the elastic part back when the process headroom is

@@ -171,8 +171,8 @@ Status S3NativeFileCache::Lookup(const std::string& file_key, int64_t length,
     bool* hit) {
   DCHECK_GT(length, 0);
   Ref ref;
-  Acquire(file_key, kWholeFile, owner, &ref);
-  if (!ref.reserved && ref.file == nullptr) {
+  AcquireWholeFile(file_key, length, owner, &ref);
+  if (!ref.reserved && !ref.skipped && ref.file == nullptr) {
     // Another thread is loading it: wait for that load instead of sending another
     // request. If it failed (the entry is gone then), retry once with this caller's
     // own request instead of failing with another reader's error.
@@ -184,8 +184,8 @@ Status S3NativeFileCache::Lookup(const std::string& file_key, int64_t length,
     } else {
       ++retries_after_failed_wait_;
       ref = Ref();
-      Acquire(file_key, kWholeFile, owner, &ref);
-      if (!ref.reserved && ref.file == nullptr) {
+      AcquireWholeFile(file_key, length, owner, &ref);
+      if (!ref.reserved && !ref.skipped && ref.file == nullptr) {
         ++num_waiting_;
         result = ref.pending.get();
         --num_waiting_;
@@ -193,6 +193,14 @@ Status S3NativeFileCache::Lookup(const std::string& file_key, int64_t length,
         ref.file = std::move(result.second);
       }
     }
+  }
+  if (ref.skipped) {
+    // Not cached now: the caller reads only what it needs.
+    CountSkipped(length);
+    CheckHeadroom(length);
+    file->reset();
+    *hit = false;
+    return Status::OK();
   }
   if (!ref.reserved) {
     *file = std::move(ref.file);
@@ -213,6 +221,15 @@ void S3NativeFileCache::Acquire(
   Shard& shard = ShardFor(file_key, block);
   std::lock_guard<std::mutex> l(shard.lock);
   AcquireLocked(&shard, FindFileLocked(&shard, file_key, true), block, owner, ref);
+}
+
+void S3NativeFileCache::AcquireWholeFile(
+    const std::string& file_key, int64_t length, const void* owner, Ref* ref) {
+  Shard& shard = ShardFor(file_key, kWholeFile);
+  std::lock_guard<std::mutex> l(shard.lock);
+  FileEntries* entries = FindFileLocked(&shard, file_key, true);
+  AcquireLocked(&shard, entries, kWholeFile, owner, ref, AcceptsNewEntries(length));
+  EraseIfEmptyLocked(&shard, entries);
 }
 
 void S3NativeFileCache::Fill(const std::string& file_key, int64_t block,
@@ -249,7 +266,7 @@ S3NativeFileCache::FileEntries* S3NativeFileCache::FindFileLocked(
 }
 
 void S3NativeFileCache::AcquireLocked(Shard* shard, FileEntries* file, int64_t block,
-    const void* owner, Ref* ref) {
+    const void* owner, Ref* ref, bool reserve) {
   auto it = file->blocks.find(block);
   // Every read counts for the admission filter, also misses and waits.
   uint64_t hash = 0;
@@ -258,7 +275,11 @@ void S3NativeFileCache::AcquireLocked(Shard* shard, FileEntries* file, int64_t b
                                     : SketchHash(file->key_hash, block);
     shard->sketch.Increment(hash);
   }
-  if (it == file->blocks.end()) {
+  if (it == file->blocks.end() && !reserve) {
+    // Miss, not cached now: the caller reads the data without an entry (and removes
+    // 'file' if it is left empty, EraseIfEmptyLocked()).
+    ref->skipped = true;
+  } else if (it == file->blocks.end()) {
     // Miss: the caller loads the entry. Later callers wait for 'load_promise'.
     Entry& entry = file->blocks[block];
     entry.load_promise = std::make_shared<std::promise<LoadResult>>();
@@ -358,6 +379,10 @@ void S3NativeFileCache::DrainWindowLocked(Shard* shard, std::vector<Evicted>* ev
 
 void S3NativeFileCache::EraseLocked(Shard* shard, FileEntries* file, int64_t block) {
   file->blocks.erase(block);
+  EraseIfEmptyLocked(shard, file);
+}
+
+void S3NativeFileCache::EraseIfEmptyLocked(Shard* shard, FileEntries* file) {
   if (file->blocks.empty()) {
     // Copy the key: it is owned by the element being erased.
     std::string key = *file->key;
@@ -388,6 +413,52 @@ Status S3NativeFileCache::ReadBlocks(const std::string& file_key, int64_t file_l
       fetch, bytes_read, stats, nullptr);
 }
 
+Status S3NativeFileCache::FetchSkippedRun(int64_t file_length, int64_t block_size,
+    int64_t offset, int64_t end, int64_t first_block, int begin_index, int end_index,
+    uint8_t* buffer, const Fetcher& fetch, std::vector<Ref>* refs,
+    std::vector<int64_t>* in_buffer) {
+  const int64_t run_offset = (first_block + begin_index) * block_size;
+  // Blocks within the read go straight into 'buffer'. The first and the last block of
+  // the read can be partly outside it: they get a temporary block each, so that the
+  // fetch still covers whole blocks (the remote data cache keeps whole blocks).
+  std::vector<std::shared_ptr<File>> partial;
+  Segments segments;
+  int64_t run_len = 0;
+  for (int k = begin_index; k < end_index; ++k) {
+    int64_t block_start = (first_block + k) * block_size;
+    int64_t block_len = std::min(block_size, file_length - block_start);
+    if (block_start >= offset && block_start + block_len <= end) {
+      partial.push_back(nullptr);
+      segments.emplace_back(buffer + (block_start - offset), block_len);
+    } else {
+      partial.push_back(std::make_shared<File>(block_len));
+      segments.emplace_back(partial.back()->data.get(), block_len);
+    }
+    run_len += block_len;
+  }
+  CountSkipped(run_len);
+  int64_t received = 0;
+  RETURN_IF_ERROR(fetch(run_offset, segments, &received));
+  for (int k = begin_index; k < end_index; ++k) {
+    int64_t block_start = (first_block + k) * block_size;
+    int64_t block_len = std::min(block_size, file_length - block_start);
+    // The object may be shorter than the catalog says: keep what was received.
+    int64_t got =
+        std::max<int64_t>(0, std::min(block_len, received - (block_start - run_offset)));
+    std::shared_ptr<File>& block = partial[k - begin_index];
+    if (block == nullptr) {
+      (*in_buffer)[k] = got;
+    } else {
+      block->len = got;
+      (*refs)[k].file = std::move(block);
+    }
+  }
+  // Counts towards the headroom check like filled bytes: it also ends the low headroom
+  // state once the headroom is back, without a background check.
+  CheckHeadroom(run_len);
+  return Status::OK();
+}
+
 Status S3NativeFileCache::ReadBlocksOnce(const std::string& file_key,
     int64_t file_length, int64_t block_size, int64_t offset, uint8_t* buffer,
     int64_t len, const void* owner, const Fetcher& fetch, int64_t* bytes_read,
@@ -400,6 +471,9 @@ Status S3NativeFileCache::ReadBlocksOnce(const std::string& file_key,
   const int64_t first_block = offset / block_size;
   const int num_blocks = static_cast<int>((end - 1) / block_size - first_block + 1);
   std::vector<Ref> refs(num_blocks);
+  // While the cache takes no new entries (low headroom), missing blocks are not
+  // reserved but read straight into 'buffer'.
+  const bool reserve = AcceptsNewEntries(block_size);
   // The blocks of one group are in one shard: one lock per group of the read.
   for (int i = 0; i < num_blocks;) {
     const int group_end = GroupEnd(first_block, i, num_blocks);
@@ -407,8 +481,9 @@ Status S3NativeFileCache::ReadBlocksOnce(const std::string& file_key,
     std::lock_guard<std::mutex> l(shard.lock);
     FileEntries* entries = FindFileLocked(&shard, file_key, true);
     for (; i < group_end; ++i) {
-      AcquireLocked(&shard, entries, first_block + i, owner, &refs[i]);
+      AcquireLocked(&shard, entries, first_block + i, owner, &refs[i], reserve);
     }
+    if (!reserve) EraseIfEmptyLocked(&shard, entries);
   }
 
   // Load the blocks reserved by this thread first, a run of consecutive blocks with one
@@ -419,7 +494,20 @@ Status S3NativeFileCache::ReadBlocksOnce(const std::string& file_key,
   std::vector<std::shared_ptr<File>> run_blocks;
   Segments segments;
   std::vector<std::pair<std::shared_ptr<std::promise<LoadResult>>, LoadResult>> results;
+  // Bytes of a skipped block that were fetched straight into 'buffer'; -1 for the others.
+  std::vector<int64_t> in_buffer(num_blocks, -1);
   for (int i = 0; i < num_blocks;) {
+    if (refs[i].skipped) {
+      int j = i;
+      while (j < num_blocks && refs[j].skipped) ++j;
+      if (status.ok()) {
+        status = FetchSkippedRun(file_length, block_size, offset, end, first_block, i, j,
+            buffer, fetch, &refs, &in_buffer);
+      }
+      stats->missed_blocks += j - i;
+      i = j;
+      continue;
+    }
     if (!refs[i].reserved) {
       ++i;
       continue;
@@ -478,7 +566,16 @@ Status S3NativeFileCache::ReadBlocksOnce(const std::string& file_key,
 
   int64_t pos = offset;
   for (int i = 0; i < num_blocks && pos < end; ++i) {
-    bool hit = !refs[i].reserved;
+    bool hit = !refs[i].reserved && !refs[i].skipped;
+    if (in_buffer[i] >= 0) {
+      // Fetched straight into 'buffer': the whole block is within the read.
+      int64_t block_start = (first_block + i) * block_size;
+      DCHECK_EQ(pos, block_start);
+      pos = block_start + in_buffer[i];
+      // A short block is the end of the object.
+      if (in_buffer[i] < std::min(block_size, file_length - block_start)) break;
+      continue;
+    }
     if (refs[i].file == nullptr) {
       ++num_waiting_;
       const LoadResult& result = refs[i].pending.get();
@@ -604,11 +701,15 @@ int64_t S3NativeFileCache::ReleaseMemory(int64_t bytes_to_free) {
 }
 
 bool S3NativeFileCache::SkipFill(int64_t len) {
-  if (!low_headroom_.load() || total_bytes_.load() + len <= reserved_) return false;
+  if (AcceptsNewEntries(len)) return false;
+  CountSkipped(len);
+  return true;
+}
+
+void S3NativeFileCache::CountSkipped(int64_t len) {
   if (ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_SKIPPED_BYTES != nullptr) {
     ImpaladMetrics::IO_MGR_S3_NATIVE_CACHE_SKIPPED_BYTES->Increment(len);
   }
-  return true;
 }
 
 S3NativeFileCache::~S3NativeFileCache() {
