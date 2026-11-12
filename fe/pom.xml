@@ -33,6 +33,16 @@ under the License.
   <name>Apache Impala Query Engine Frontend</name>
 
   <dependencies>
+    <!-- ADH-TSQL. Thrift 0.24 generates a three-argument ProcessFunction.
+         Hive 4.3.0.2's TCLIService processor still uses two. This jar is
+         Hive ${hive.version} (4.3.0.3) and must be ahead of the shaded
+         hive-exec inside impala-executor-deps, which can carry the older class. -->
+    <dependency>
+      <groupId>org.apache.hive</groupId>
+      <artifactId>hive-service-rpc</artifactId>
+      <version>${hive.version}</version>
+    </dependency>
+
     <dependency>
       <groupId>org.apache.impala</groupId>
       <artifactId>impala-executor-deps</artifactId>

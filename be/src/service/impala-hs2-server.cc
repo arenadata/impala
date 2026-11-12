@@ -589,7 +589,8 @@ void ImpalaServer::GetInfo(TGetInfoResp& return_val,
 }
 
 void ImpalaServer::ExecuteStatementCommon(TExecuteStatementResp& return_val,
-    const TExecuteStatementReq& request, const TExecRequest* external_exec_request) {
+    const TExecuteStatementReq& request, const TExecRequest* external_exec_request,
+    const std::string* tsql_effective_user) {
   HS2_RETURN_IF_ERROR(return_val, CheckNotShuttingDown(), SQLSTATE_GENERAL_ERROR);
   // We ignore the runAsync flag here: Impala's queries will always run asynchronously,
   // and will block on fetch. To the client, this looks like Hive's synchronous mode; the
@@ -597,6 +598,11 @@ void ImpalaServer::ExecuteStatementCommon(TExecuteStatementResp& return_val,
   TQueryCtx query_ctx;
   Status status = TExecuteStatementReqToTQueryContext(request, &query_ctx);
   HS2_RETURN_IF_ERROR(return_val, status, SQLSTATE_GENERAL_ERROR);
+  // ADH-TSQL. Only TsqlChildQuery passes this pointer. It is not read from confOverlay.
+  if (tsql_effective_user != nullptr && !tsql_effective_user->empty()) {
+    query_ctx.session.connected_user = *tsql_effective_user;
+    query_ctx.session.__isset.delegated_user = false;
+  }
 
   TUniqueId session_id;
   TUniqueId secret;
