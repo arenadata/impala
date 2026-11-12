@@ -36,6 +36,12 @@ class TsqlChildQuery {
   }
 
  private:
+  // Runs the statement and appends fetched rows. Does not close the operation.
+  Status FetchInternal(int max_rows, bool* hit_cap);
+
+  // Closes the HS2 operation after it has been opened. Safe to call when the
+  // statement failed; a second close is ignored by the server.
+  void Close();
   ClientRequestState* parent_;
   ImpalaServer* server_;
   std::string sql_;

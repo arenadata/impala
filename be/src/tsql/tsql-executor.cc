@@ -192,7 +192,16 @@ Status TsqlExecutor::RunInternal() {
         lock_guard<SpinLock> l(lock_);
         active_ = nullptr;
       }
-      RETURN_IF_ERROR(child_status);
+      if (!child_status.ok()) {
+        // Cancellation is not a T-SQL error. TRY/CATCH must not swallow it.
+        if (child_status.IsCancelled()) return child_status;
+        feed = TSqlFeed();
+        feed.__set_sqlcode(-1);
+        string detail = child_status.GetDetail();
+        if (detail.empty()) detail = "SQL failed";
+        feed.__set_error_message(detail);
+        continue;
+      }
       if (step.kind != TSqlStepKind::SQL) {
         PublishClientResult(*child);
         return Status::OK();

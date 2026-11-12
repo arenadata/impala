@@ -20,9 +20,15 @@ public final class TsqlRuntimeTest {
     quoteLiteralEscapesQuoteAndBackslash();
     substitutionSkipsStringLiterals();
     tryCatchSwallowsChildFailure();
+    uncaughtChildFailureFailsTheScript();
+    failedOpenDoesNotConsumeNextStatement();
     nestedExec();
     cursorFetchStatus();
     cursorSumsWhileFetchStatusIsZero();
+    activeOrderTotalAssignsFirstAggregateRow();
+    materializeAmountIsFourStatements();
+    showColumnStatsUsesDistinctCount();
+    procedureSetNumNodesIsVisible();
     castAsTypeConcatenates();
     createRuntimeDictParses();
     negativeArgumentSubstitutes();
@@ -111,6 +117,173 @@ public final class TsqlRuntimeTest {
     runner.failSqlContaining = "boom";
     TsqlRuntime.Step step = runUntilClient(src, runner);
     check(step.kind == TsqlRuntime.Kind.CLIENT_RESULT, "catch continued");
+  }
+
+  private static void uncaughtChildFailureFailsTheScript() {
+    String src = "EXEC('SELECT boom');\nSELECT 1 AS result;\n";
+    RecordingRunner runner = new RecordingRunner();
+    runner.failSqlContaining = "boom";
+    TsqlRuntime rt = new TsqlRuntime(src, "default", "tester", new TsqlRuntime.MemoryStore());
+    TsqlSqlRunner.Result prev = null;
+    TsqlRuntime.Step failed = null;
+    for (int i = 0; i < 10; i++) {
+      TsqlRuntime.Step step = rt.next(prev);
+      if (step.kind == TsqlRuntime.Kind.FAILED) {
+        failed = step;
+        break;
+      }
+      if (step.kind != TsqlRuntime.Kind.SQL) break;
+      prev = runner.execute(step.sql, step.procedureOptions);
+    }
+    check(failed != null && failed.errorMessage != null && failed.errorMessage.contains("boom"),
+        "uncaught child error was " + (failed == null ? "missing" : failed.errorMessage));
+  }
+
+  private static void failedOpenDoesNotConsumeNextStatement() {
+    String src = ""
+        + "DECLARE @n INT;\n"
+        + "BEGIN TRY\n"
+        + "  DECLARE c CURSOR FOR SELECT boom FROM t;\n"
+        + "  OPEN c;\n"
+        + "END TRY\n"
+        + "BEGIN CATCH\n"
+        + "END CATCH\n"
+        + "EXEC('SELECT 9 AS n');\n"
+        + "FETCH NEXT FROM c INTO @n;\n"
+        + "SELECT @n AS result;\n";
+    RecordingRunner runner = new RecordingRunner();
+    runner.failSqlContaining = "boom";
+    runner.cursorRows = Arrays.asList("9");
+    TsqlRuntime.Step step = runUntilClient(src, runner);
+    check(step.sql.toUpperCase(Locale.ROOT).contains("NULL"),
+        "failed open left @n as " + step.sql);
+    check(!step.sql.contains("9"), "next statement was applied to the failed cursor: " + step.sql);
+  }
+
+  private static void activeOrderTotalAssignsFirstAggregateRow() {
+    String src = ""
+        + "CREATE OR ALTER PROCEDURE active_order_total\n"
+        + "AS\n"
+        + "BEGIN\n"
+        + "  DECLARE @cnt INT;\n"
+        + "  DECLARE @amt INT;\n"
+        + "  SELECT @cnt = COUNT(*), @amt = SUM(amount)\n"
+        + "  FROM lpsql_q.orders\n"
+        + "  WHERE customer_id IN (SELECT id FROM lpsql_q.customers WHERE active = 1);\n"
+        + "  SELECT @cnt AS active_orders, @amt AS active_amount;\n"
+        + "END\n"
+        + "EXEC active_order_total;\n";
+    RecordingRunner runner = new RecordingRunner();
+    runner.countRow = Arrays.asList(TsqlSqlRunner.Cell.of("3"), TsqlSqlRunner.Cell.of("32"));
+    TsqlRuntime.Step step = runUntilClient(src, runner);
+    boolean sawAssign = false;
+    for (String sql : runner.sql) {
+      String upper = sql.toUpperCase(Locale.ROOT);
+      if (upper.contains("COUNT") && upper.contains("SUM") && upper.contains(" IN ")) {
+        sawAssign = true;
+        check(upper.contains("CUSTOMERS"), "assignment sql was " + sql);
+      }
+    }
+    check(sawAssign, "missing aggregate assignment: " + runner.sql);
+    check(step.sql.contains("3") && step.sql.contains("32"), "assigned totals were " + step.sql);
+  }
+
+  private static void materializeAmountIsFourStatements() {
+    String src = ""
+        + "CREATE OR ALTER PROCEDURE materialize_amount\n"
+        + "AS\n"
+        + "BEGIN\n"
+        + "  EXEC('DROP TABLE IF EXISTS lpsql_q.amount_mv');\n"
+        + "  CREATE TABLE lpsql_q.amount_mv STORED AS PARQUET AS\n"
+        + "    SELECT SUM(v) AS total FROM lpsql_q.amounts;\n"
+        + "  INSERT INTO lpsql_q.amounts VALUES (5);\n"
+        + "  SELECT m.total AS materialized_total,\n"
+        + "    (SELECT SUM(v) FROM lpsql_q.amounts) AS live_total\n"
+        + "  FROM lpsql_q.amount_mv m;\n"
+        + "END\n"
+        + "EXEC materialize_amount;\n";
+    RecordingRunner runner = new RecordingRunner();
+    TsqlRuntime.Step step = runUntilClient(src, runner);
+    check(runner.sql.size() == 3, "child statements were " + runner.sql);
+    check(runner.sql.get(0).toUpperCase(Locale.ROOT).contains("DROP TABLE"), runner.sql.get(0));
+    String create = runner.sql.get(1).toUpperCase(Locale.ROOT);
+    check(create.contains("CREATE TABLE") && create.contains("SUM"), runner.sql.get(1));
+    check(runner.sql.get(2).toUpperCase(Locale.ROOT).contains("INSERT"), runner.sql.get(2));
+    String client = step.sql.toUpperCase(Locale.ROOT);
+    check(client.contains("MATERIALIZED_TOTAL") && client.contains("LIVE_TOTAL"), step.sql);
+  }
+
+  private static void showColumnStatsUsesDistinctCount() {
+    String src = ""
+        + "CREATE OR ALTER PROCEDURE dict\n"
+        + "AS\n"
+        + "BEGIN\n"
+        + "  DECLARE @name STRING;\n"
+        + "  DECLARE @col STRING;\n"
+        + "  DECLARE @tp STRING;\n"
+        + "  DECLARE @ndv INT;\n"
+        + "  DECLARE @sql STRING;\n"
+        + "  DECLARE c1 CURSOR FOR SHOW TABLES IN default;\n"
+        + "  OPEN c1;\n"
+        + "  FETCH NEXT FROM c1 INTO @name;\n"
+        + "  WHILE @@FETCH_STATUS = 0\n"
+        + "  BEGIN\n"
+        + "    BEGIN TRY\n"
+        + "      SET @sql = 'SHOW COLUMN STATS default.' + @name;\n"
+        + "      DECLARE c2 CURSOR FOR @sql;\n"
+        + "      OPEN c2;\n"
+        + "      FETCH NEXT FROM c2 INTO @col, @tp, @ndv;\n"
+        + "      WHILE @@FETCH_STATUS = 0\n"
+        + "      BEGIN\n"
+        + "        SET @sql = 'INSERT INTO default.cursor_result_table VALUES ('\n"
+        + "          + QUOTE_LITERAL(@name) + ', '\n"
+        + "          + QUOTE_LITERAL(@col) + ', '\n"
+        + "          + CAST(@ndv AS STRING) + ')';\n"
+        + "        EXEC(@sql);\n"
+        + "        FETCH NEXT FROM c2 INTO @col, @tp, @ndv;\n"
+        + "      END\n"
+        + "      CLOSE c2;\n"
+        + "      DEALLOCATE c2;\n"
+        + "    END TRY\n"
+        + "    BEGIN CATCH\n"
+        + "    END CATCH\n"
+        + "    FETCH NEXT FROM c1 INTO @name;\n"
+        + "  END\n"
+        + "  CLOSE c1;\n"
+        + "  DEALLOCATE c1;\n"
+        + "  SELECT @sql AS last_insert;\n"
+        + "END\n"
+        + "EXEC dict;\n";
+    RecordingRunner runner = new RecordingRunner();
+    runner.failSqlContaining = "v_show_table";
+    runner.showTables = Arrays.asList("v_show_table", "lpsql_marker");
+    runner.statsCells = Arrays.asList(
+        TsqlSqlRunner.Cell.of("id"),
+        TsqlSqlRunner.Cell.of("INT"),
+        TsqlSqlRunner.Cell.of("-1"),
+        TsqlSqlRunner.Cell.of("0"),
+        TsqlSqlRunner.Cell.of("4"));
+    TsqlRuntime.Step step = runUntilClient(src, runner);
+    boolean sawMarker = false;
+    for (String sql : runner.sql) {
+      if (sql.toUpperCase(Locale.ROOT).contains("INSERT") && sql.contains("v_show_table")) {
+        fail("view was inserted: " + sql);
+      }
+      if (sql.contains("lpsql_marker") && sql.contains("-1")) {
+        sawMarker = true;
+        check(!sql.contains(", 0)") && !sql.contains(", 4)"), "ndv column was " + sql);
+      }
+    }
+    check(sawMarker, "missing distinct-count insert: " + runner.sql);
+    check(step.kind == TsqlRuntime.Kind.CLIENT_RESULT, "dict did not finish");
+  }
+
+  private static void procedureSetNumNodesIsVisible() {
+    String src = "EXEC('SET num_nodes = 0');\nSELECT 1 AS result;\n";
+    RecordingRunner runner = new RecordingRunner();
+    TsqlRuntime.Step step = runUntilClient(src, runner);
+    check("0".equals(step.procedureOptions.get("num_nodes")),
+        "num_nodes option was " + step.procedureOptions);
   }
 
   private static void nestedExec() {
@@ -259,6 +432,9 @@ public final class TsqlRuntimeTest {
     final Map<String, String> sessionOptions = new java.util.HashMap<String, String>();
     String failSqlContaining;
     List<String> cursorRows = Collections.emptyList();
+    List<String> showTables = Collections.emptyList();
+    List<Cell> countRow;
+    List<Cell> statsCells;
 
     public Result execute(String statement, Map<String, String> procedureOptions) {
       sql.add(statement);
@@ -267,7 +443,22 @@ public final class TsqlRuntimeTest {
             Collections.<List<Cell>>emptyList(), -1, "boom");
       }
       String upper = statement.toUpperCase(Locale.ROOT);
+      if (upper.startsWith("SHOW TABLES") && !showTables.isEmpty()) {
+        List<List<Cell>> rows = new ArrayList<List<Cell>>();
+        for (String name : showTables) {
+          rows.add(Collections.singletonList(Cell.of(name)));
+        }
+        return new Result(Collections.singletonList("name"), rows, 0, null);
+      }
+      if (upper.startsWith("SHOW COLUMN STATS") && statsCells != null) {
+        return new Result(Arrays.asList("column", "type", "ndv", "nulls", "max"),
+            Collections.singletonList(statsCells), 0, null);
+      }
       if (upper.contains("COUNT")) {
+        if (countRow != null) {
+          return new Result(Arrays.asList("cnt", "amt"),
+              Collections.singletonList(countRow), 0, null);
+        }
         return new Result(Collections.singletonList("count"),
             Collections.singletonList(Collections.singletonList(Cell.of("6"))), 0, null);
       }

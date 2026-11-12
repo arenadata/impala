@@ -316,8 +316,13 @@ public final class TsqlRuntime {
     lastError = 0;
     if (previous != null && !previous.ok()) {
       lastError = previous.sqlcode == 0 ? -1 : previous.sqlcode;
-      if (handleError(previous.error)) return;
-      throw new TsqlParser.ParseException(previous.error == null ? "SQL failed" : previous.error);
+      // The failed statement must not consume the next successful result.
+      waitCursor = null;
+      waitAssign = null;
+      waitClient = false;
+      String message = previous.error == null ? "SQL failed" : previous.error;
+      if (handleError(message)) return;
+      throw new TsqlParser.ParseException(message);
     }
     if (waitClient) {
       waitClient = false;

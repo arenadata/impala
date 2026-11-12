@@ -17,6 +17,17 @@ namespace impala {
 
 namespace {
 
+bool IsNumNodesKey(const string& key) {
+  static const char* name = "num_nodes";
+  if (key.size() != 9) return false;
+  for (size_t i = 0; i < key.size(); ++i) {
+    char c = key[i];
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    if (c != name[i]) return false;
+  }
+  return true;
+}
+
 bool NullBit(const string& nulls, uint32_t row_idx) {
   if (nulls.size() <= row_idx / 8) return false;
   return (nulls[row_idx / 8] & (1 << (row_idx % 8))) != 0;
@@ -97,14 +108,40 @@ TsqlChildQuery::TsqlChildQuery(ClientRequestState* parent, ImpalaServer* server,
 Status TsqlChildQuery::Fetch(int max_rows, bool* hit_cap) {
   DCHECK(hit_cap != nullptr);
   *hit_cap = false;
+  Status status = FetchInternal(max_rows, hit_cap);
+  if (running_) Close();
+  return status;
+}
+
+void TsqlChildQuery::Close() {
+  TCloseOperationReq close_req;
+  close_req.operationHandle = handle_;
+  TCloseOperationResp close_resp;
+  server_->CloseOperation(close_resp, close_req);
+  lock_guard<SpinLock> l(lock_);
+  running_ = false;
+}
+
+Status TsqlChildQuery::FetchInternal(int max_rows, bool* hit_cap) {
   const TUniqueId& session_id = parent_->session_id();
   TExecuteStatementReq req;
   ImpalaServer::TUniqueIdToTHandleIdentifier(
       session_id, parent_->session()->secret, &req.sessionHandle.sessionId);
   req.__set_statement(sql_);
-  if (!options_.empty()) {
-    req.__set_confOverlay(options_);
+  // Newly created tables have no stats, so Impala skips the small-query path and
+  // plans a distributed fragment. That plan duplicated rows for filters, semi-joins,
+  // scalar subqueries, and partitioned CTAS. One node keeps a single writer and a
+  // single scan. A procedure SET NUM_NODES still wins.
+  map<string, string> overlay = options_;
+  bool procedure_set_num_nodes = false;
+  for (const auto& opt : overlay) {
+    if (IsNumNodesKey(opt.first)) {
+      procedure_set_num_nodes = true;
+      break;
+    }
   }
+  if (!procedure_set_num_nodes) overlay["NUM_NODES"] = "1";
+  req.__set_confOverlay(overlay);
 
   TExecuteStatementResp exec_resp;
   {
@@ -181,14 +218,6 @@ Status TsqlChildQuery::Fetch(int max_rows, bool* hit_cap) {
     if (*hit_cap || !fetch_resp.hasMoreRows) break;
   }
 
-  TCloseOperationReq close_req;
-  close_req.operationHandle = handle_;
-  TCloseOperationResp close_resp;
-  server_->CloseOperation(close_resp, close_req);
-  {
-    lock_guard<SpinLock> l(lock_);
-    running_ = false;
-  }
   if (*hit_cap) {
     return Status(strings::Substitute(
         "T-SQL result exceeded $0 rows", max_rows));
