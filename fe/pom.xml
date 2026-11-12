@@ -857,6 +857,32 @@ under the License.
         <artifactId>maven-dependency-plugin</artifactId>
         <version>3.5.0</version>
         <executions>
+          <!-- Arrow Flight SQL JDBC drivers for ImpalaFlightJdbcDriverTest. Each version
+               is loaded in its own class loader (the jars bundle their Arrow), so they
+               are copied instead of being test dependencies. -->
+          <execution>
+            <id>copy-flight-sql-jdbc-drivers</id>
+            <phase>process-test-resources</phase>
+            <goals>
+              <goal>copy</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}/flight-jdbc</outputDirectory>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>org.apache.arrow</groupId>
+                  <artifactId>flight-sql-jdbc-driver</artifactId>
+                  <version>16.0.0</version>
+                </artifactItem>
+                <artifactItem>
+                  <groupId>org.apache.arrow</groupId>
+                  <artifactId>flight-sql-jdbc-driver</artifactId>
+                  <version>19.0.0</version>
+                </artifactItem>
+              </artifactItems>
+              <silent>true</silent>
+            </configuration>
+          </execution>
           <!-- TODO(todd): consider removing this execution or moving it to
                some kind of 'dist' profile. No need to copy all of these jars
                on every build of the FE! -->
