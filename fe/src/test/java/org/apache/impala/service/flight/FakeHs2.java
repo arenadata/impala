@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 
 import org.apache.hive.service.rpc.thrift.TBoolColumn;
 import org.apache.hive.service.rpc.thrift.TCancelOperationResp;
@@ -111,6 +112,9 @@ final class FakeHs2 implements AutoCloseable {
   private final Map<String, Script> scripts_ = new ConcurrentHashMap<>();
   /** Metadata method name (GetTables, ...) -> script. */
   private final Map<String, Script> metadata_ = new ConcurrentHashMap<>();
+  /** Metadata method name -> script built from the request (filters by its patterns). */
+  private final Map<String, Function<Object, Script>> metadataFns_ =
+      new ConcurrentHashMap<>();
   /** Metadata requests received, by method name. */
   final Map<String, List<Object>> metadataRequests = new ConcurrentHashMap<>();
   private final Map<Integer, Operation> operations_ = new ConcurrentHashMap<>();
@@ -144,6 +148,11 @@ final class FakeHs2 implements AutoCloseable {
     Script script = new Script();
     metadata_.put(method, script);
     return script;
+  }
+
+  /** Script for a metadata call, built from each request (e.g. to apply its patterns). */
+  void onMetadata(String method, Function<Object, Script> fn) {
+    metadataFns_.put(method, fn);
   }
 
   static TColumn ints(Integer... values) {
@@ -302,7 +311,8 @@ final class FakeHs2 implements AutoCloseable {
   private Object metadataCall(String method, Object request) throws TException {
     metadataRequests.computeIfAbsent(method, m -> new CopyOnWriteArrayList<>())
         .add(request);
-    Script script = metadata_.get(method);
+    Function<Object, Script> fn = metadataFns_.get(method);
+    Script script = fn != null ? fn.apply(request) : metadata_.get(method);
     if (script == null) script = new Script().schema(column("X", TTypeId.STRING_TYPE));
     TStatus status = script.executeError != null ? error(script.executeError) : ok();
     TOperationHandle handle = null;
