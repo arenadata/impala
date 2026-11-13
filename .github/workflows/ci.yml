@@ -1,16 +1,18 @@
 name: CI (build, unit tests)
 
-# Builds Impala with its tests and runs the unit tests that need no minicluster
-# inside the CI environment image (docker/ci/env.Dockerfile, env-image.sh): build
-# dependencies, JDK 21, Maven and the native toolchain, published to GHCR under a
-# tag that is a hash of its inputs. Each stage runs in a fresh container of it with
-# the checkout bind-mounted (docker/ci/run-in-env.sh); ccache is carried between
-# runs through the Actions cache. The steps only call scripts in docker/ci/, which
-# work the same way locally.
+# Builds Impala with its tests and runs the tests that need no minicluster
+# (backend gtests, frontend JUnit tests, and the Flight SQL end-to-end tests in
+# tests/flight_sql) inside the CI environment image (docker/ci/env.Dockerfile,
+# env-image.sh): build dependencies, JDK 21, Maven and the native toolchain,
+# published to GHCR under a tag that is a hash of its inputs. Each stage runs in
+# a fresh container of it with the checkout bind-mounted (docker/ci/run-in-env.sh);
+# ccache is carried between runs through the Actions cache. The steps only call
+# scripts in docker/ci/, which work the same way locally.
 
 # Runs unless a change only touches files the build and unit tests do not read
-# (docs, the Python end-to-end tests, packaging, other Docker images). Patterns
-# apply in order, so docker/ci/** is re-included after docker/** is excluded.
+# (docs, the minicluster tests in tests/, packaging, other Docker images). Patterns
+# apply in order, so docker/ci/** is re-included after docker/** is excluded, and
+# tests/flight_sql/** (run here, see docker/ci/run-unit-tests.sh) after tests/**.
 # Keep the push and pull_request lists identical.
 on:
   push:
@@ -19,6 +21,7 @@ on:
       - '**'
       - '!docs/**'
       - '!tests/**'
+      - 'tests/flight_sql/**'
       - '!**/*.md'
       - '!package/**'
       - '!docker/**'
@@ -29,6 +32,7 @@ on:
       - '**'
       - '!docs/**'
       - '!tests/**'
+      - 'tests/flight_sql/**'
       - '!**/*.md'
       - '!package/**'
       - '!docker/**'

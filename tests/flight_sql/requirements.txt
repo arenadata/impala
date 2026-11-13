@@ -1,0 +1,8 @@
+# Clients for the Flight SQL end-to-end tests (tests/flight_sql). Installed into their own
+# virtualenv, not Impala's: these packages ship as prebuilt wheels only, while
+# infra/python/bootstrap_virtualenv.py builds everything from source.
+adbc-driver-flightsql==1.12.0
+adbc-driver-manager==1.12.0
+gssapi==1.12.0
+pyarrow==25.0.1
+pytest==9.2.0

@@ -776,6 +776,9 @@ under the License.
 
   <properties>
     <buildOutputDirectory>${project.build.directory}/classes</buildOutputDirectory>
+    <!-- Set by jacoco:prepare-agent; empty when tests run without it (surefire:test in
+         docker/ci/run-unit-tests.sh), so that it adds nothing to surefire's argLine -->
+    <surefireJacocoArg></surefireJacocoArg>
   </properties>
 
   <build>
@@ -935,7 +938,9 @@ under the License.
           <trimStackTrace>false</trimStackTrace>
           <reportsDirectory>${surefire.reports.dir}</reportsDirectory>
           <redirectTestOutputToFile>true</redirectTestOutputToFile>
-          <argLine>${surefireJacocoArg}</argLine>
+          <!-- Arrow (Flight SQL tests) reads java.nio.Buffer.address; impalad gets the
+               same flag from impala-env.sh -->
+          <argLine>${surefireJacocoArg} --add-opens=java.base/java.nio=ALL-UNNAMED</argLine>
           <groups>${testcase.groups}</groups>
           <environmentVariables>
             <!-- Set LD_LIBRARY_PATH and LD_PRELOAD to pick up libraries required for
