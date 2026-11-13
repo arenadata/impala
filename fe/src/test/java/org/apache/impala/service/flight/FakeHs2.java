@@ -207,14 +207,20 @@ final class FakeHs2 implements AutoCloseable {
     return operations_.get(handle.getOperationId().bufferForGuid().getInt(0));
   }
 
-  private Script scriptFor(String sql) {
+  /** The OpenSession request of 'handle' (the last session if unknown). */
+  private TOpenSessionReq session(TSessionHandle handle) {
+    int n = handle == null ? 0 : -handle.getSessionId().bufferForGuid().getInt(0);
+    return n >= 1 && n <= opened.size() ? opened.get(n - 1)
+        : opened.get(opened.size() - 1);
+  }
+
+  private Script scriptFor(String sql, TOpenSessionReq session) {
     Script script = scripts_.get(sql);
     if (script != null) return script;
-    // default: one row (connected user, effective user) of the last session
-    TOpenSessionReq last = opened.get(opened.size() - 1);
-    Map<String, String> conf = last.getConfiguration();
+    // default: one row (connected user, effective user) of the statement's session
+    Map<String, String> conf = session.getConfiguration();
     String effective = conf != null && conf.containsKey(LoopbackSession.DOAS_KEY)
-        ? conf.get(LoopbackSession.DOAS_KEY) : last.getUsername();
+        ? conf.get(LoopbackSession.DOAS_KEY) : session.getUsername();
     return new Script().schema(column("user()", TTypeId.STRING_TYPE),
         column("effective_user()", TTypeId.STRING_TYPE))
         .page(strings("impala/host@REALM"), strings(effective));
@@ -230,15 +236,17 @@ final class FakeHs2 implements AutoCloseable {
         }
         TOpenSessionResp resp =
             new TOpenSessionResp(ok(), TProtocolVersion.HIVE_CLI_SERVICE_PROTOCOL_V6);
-        resp.setSessionHandle(new TSessionHandle(id(-1)));
+        // one handle per session (negative, apart from operation handles)
+        resp.setSessionHandle(new TSessionHandle(id(-opened.size())));
         return resp;
       }
       case "ExecuteStatement": {
-        String sql = ((TExecuteStatementReq) args[0]).getStatement();
+        TExecuteStatementReq req = (TExecuteStatementReq) args[0];
+        String sql = req.getStatement();
         statements.add(sql);
         // the client sees a TApplicationException, like a broken connection
         if ("break".equals(sql)) throw new TException("connection broken");
-        Script script = scriptFor(sql);
+        Script script = scriptFor(sql, session(req.getSessionHandle()));
         if (script.executeError != null) {
           return new TExecuteStatementResp(error(script.executeError));
         }

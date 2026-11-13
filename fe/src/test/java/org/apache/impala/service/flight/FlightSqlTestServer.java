@@ -82,6 +82,8 @@ public final class FlightSqlTestServer {
     LDAP_USERS.put("Test2Ldap", "abcde");
   }
   static final List<String> KERBEROS_USERS = java.util.Arrays.asList("alice", "bob");
+  static final int PREPARED_IDLE_S = 5;
+  static final int TICKET_TTL_S = 20;
 
   /** Carries the ApacheDS annotations (as ImpalaFlightLdapAuthTest). */
   @CreateDS(name = "flightTestServerDS",
@@ -107,6 +109,9 @@ public final class FlightSqlTestServer {
       usage("unknown --auth: " + auth);
     }
     boolean tls = Boolean.parseBoolean(opts.getOrDefault("tls", "true"));
+    // the server's log (logins, streams) goes to stdout, i.e. the caller's log file
+    org.apache.log4j.BasicConfigurator.configure();
+    org.apache.log4j.Logger.getRootLogger().setLevel(org.apache.log4j.Level.INFO);
     File workDir = opts.containsKey("work-dir") ? new File(opts.get("work-dir"))
         : Files.createTempDirectory("flight-test-server").toFile();
     workDir.mkdirs();
@@ -146,8 +151,12 @@ public final class FlightSqlTestServer {
     conf.setInt(LoopbackConfig.PORT, hs2.port);
     conf.setBoolean(LoopbackConfig.SSL, false);
     conf.set(LoopbackConfig.IMPERSONATION, "doas");
-    // short so that the tests of kept results do not wait long
-    conf.setInt(ImpalaFlightSqlServer.PREPARED_IDLE_S, 5);
+    // short, so that tests of expiry wait seconds: idle prepared statements are dropped
+    // after PREPARED_IDLE_S by a reaper running every TICKET_TTL_S / 4 (here 5 s)
+    conf.setInt(ImpalaFlightSqlServer.PREPARED_IDLE_S, PREPARED_IDLE_S);
+    conf.setInt(ImpalaFlightSqlServer.TICKET_TTL_S, TICKET_TTL_S);
+    info.put("prepared_idle_s", PREPARED_IDLE_S);
+    info.put("reaper_period_s", TICKET_TTL_S / 4);
 
     conf.setBoolean(ImpalaFlightSqlServer.SSL_ENABLED, tls);
     info.put("tls", tls);

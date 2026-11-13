@@ -16,7 +16,8 @@
 # Optional:
 #   CI_M2_SEED               Maven repository layout mounted at /opt/m2-seed (see ci-build.sh)
 #   BUILD_THREADS            passed through to ci-build.sh
-#   BE_TESTS / FE_TESTS      passed through to run-unit-tests.sh
+#   BE_TESTS / FE_TESTS / PY_TESTS   passed through to run-unit-tests.sh
+#   PYPI_MIRROR              overrides the image's PyPI index (py suite of run-unit-tests.sh)
 set -euo pipefail
 
 image="${1:?usage: run-in-env.sh <image> <command...>}"
@@ -33,7 +34,7 @@ args=(--rm --init --hostname impala-ci --user 1000:1000
 if [[ -n "${CI_M2_SEED:-}" ]]; then
   args+=(-v "$CI_M2_SEED":/opt/m2-seed:ro)
 fi
-for var in BUILD_THREADS BE_TESTS FE_TESTS; do
+for var in BUILD_THREADS BE_TESTS FE_TESTS PY_TESTS PYPI_MIRROR; do
   if [[ -n "${!var:-}" ]]; then
     args+=(-e "$var=${!var}")
   fi
