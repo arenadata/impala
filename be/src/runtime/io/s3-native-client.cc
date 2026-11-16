@@ -21,12 +21,16 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <vector>
 
+#include <boost/algorithm/string/join.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <gflags/gflags.h>
 
 #ifdef IMPALA_HAVE_AWS_SDK_CPP
 #include <aws/core/Aws.h>
 #include <aws/core/Version.h>
+#include <aws/core/auth/AWSCredentialsProvider.h>
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/utils/threading/PooledThreadExecutor.h>
@@ -35,24 +39,36 @@
 #endif
 
 #include "common/logging.h"
+#include "gen-cpp/Frontend_types.h"
 #include "gutil/strings/substitute.h"
+#include "rpc/jni-thrift-util.h"
+#include "util/jni-util.h"
 
 #include "common/names.h"
 
 DEFINE_bool(s3_native_reader, false, "(Experimental) Read s3a:// files with the native "
     "aws-sdk-cpp client instead of libhdfs and the Hadoop S3A connector.");
 DEFINE_string(s3_native_endpoint, "", "(Experimental) S3 endpoint of the native S3 "
-    "reader, e.g. https://s3gateway:9879. Empty means the AWS endpoint of "
-    "--s3_native_region.");
+    "reader, e.g. https://s3gateway:9879. Empty means fs.s3a.endpoint of the S3A "
+    "connector in the Hadoop configuration (core-site.xml; without a scheme it gets "
+    "https://, or http:// if fs.s3a.connection.ssl.enabled is false) and, if that is not "
+    "set either, the AWS endpoint of --s3_native_region.");
 DEFINE_string(s3_native_region, "us-east-1", "(Experimental) S3 region of the native S3 "
-    "reader.");
+    "reader. If not set, fs.s3a.endpoint.region of the Hadoop configuration "
+    "(core-site.xml) if set there, otherwise us-east-1.");
 DEFINE_bool(s3_native_path_style, true, "(Experimental) Use path-style S3 URLs "
-    "(https://endpoint/bucket/key) in the native S3 reader. Needed for Ozone and MinIO.");
+    "(https://endpoint/bucket/key) in the native S3 reader. Needed for Ozone and MinIO. "
+    "If not set, fs.s3a.path.style.access of the Hadoop configuration (core-site.xml) if "
+    "set there, otherwise true. Hadoop's own default (false, core-default.xml) is not "
+    "used.");
 DEFINE_string(s3_native_credentials_file, "", "(Experimental) AWS credentials file of "
     "the native S3 reader, in the ini format of ~/.aws/credentials: aws_access_key_id "
     "and aws_secret_access_key under a [default] section header (or the section named "
     "by AWS_PROFILE); without the header no keys are found and impalad does not start. "
-    "Empty means the default AWS credentials chain (environment variables, "
+    "Empty means the keys of the S3A connector in the Hadoop configuration "
+    "(fs.s3a.access.key, fs.s3a.secret.key and the optional fs.s3a.session.token, from "
+    "core-site.xml or a credential provider of hadoop.security.credential.provider.path) "
+    "and, if they are not set, the default AWS credentials chain (environment variables, "
     "~/.aws/credentials). Keys are deliberately not taken from flags, which are visible "
     "on the debug web pages.");
 DEFINE_int32(s3_native_max_connections, 128, "(Experimental) Maximum number of HTTP "
@@ -164,6 +180,149 @@ const char* const kAllocationTag = "ImpalaS3NativeClient";
 // Shared by all native S3 reads; S3Client is thread-safe. Created once in
 // InitS3NativeClient() and kept for the lifetime of the process.
 std::shared_ptr<Aws::S3::S3Client> s3_client;
+
+// Hadoop configuration properties of the S3A connector's keys.
+const char* const kS3AAccessKey = "fs.s3a.access.key";
+const char* const kS3ASecretKey = "fs.s3a.secret.key";
+const char* const kS3ASessionToken = "fs.s3a.session.token";
+
+// Hadoop configuration properties of the S3A connector's endpoint settings.
+const char* const kS3AEndpoint = "fs.s3a.endpoint";
+const char* const kS3ARegion = "fs.s3a.endpoint.region";
+const char* const kS3APathStyle = "fs.s3a.path.style.access";
+const char* const kS3ASslEnabled = "fs.s3a.connection.ssl.enabled";
+
+// Sets 'value' to the Hadoop configuration property 'name' as returned by the static
+// JniUtil method 'method_name' (TGetHadoopConfigRequest -> TGetHadoopConfigResponse) in
+// the embedded JVM. Empty if not set.
+Status CallHadoopConfigMethod(
+    const char* method_name, const string& name, string* value) {
+  value->clear();
+  JNIEnv* env = JniUtil::GetJNIEnv();
+  if (env == nullptr) return Status("Failed to get/create JVM");
+  jclass jni_util_cl = JniUtil::jni_util_class();
+  if (jni_util_cl == nullptr) return Status("JniUtil::Init() not called");
+  jmethodID method;
+  JniMethodDescriptor descriptor = {method_name, "([B)[B", &method};
+  RETURN_IF_ERROR(JniUtil::LoadStaticJniMethod(env, jni_util_cl, &descriptor));
+  TGetHadoopConfigRequest request;
+  request.__set_name(name);
+  TGetHadoopConfigResponse response;
+  RETURN_IF_ERROR(
+      JniUtil::CallStaticJniMethod(jni_util_cl, method, request, &response));
+  if (response.__isset.value) *value = response.value;
+  return Status::OK();
+}
+
+// Sets 'value' to the secret Hadoop configuration property 'name', read with
+// Configuration.getPassword(): from the credential providers of
+// hadoop.security.credential.provider.path, or from core-site.xml. Empty if not set.
+Status GetHadoopPassword(const string& name, string* value) {
+  return CallHadoopConfigMethod("getHadoopPassword", name, value);
+}
+
+// Sets 'value' to the Hadoop configuration property 'name' if it is set explicitly
+// (core-site.xml), not just by Hadoop's defaults (core-default.xml). Empty otherwise.
+Status GetExplicitHadoopConfig(const string& name, string* value) {
+  return CallHadoopConfigMethod("getExplicitHadoopConfig", name, value);
+}
+
+// Parses a boolean Hadoop property like Configuration.getBoolean() (case-insensitive
+// "true" or "false"), but returns an error for other values instead of the default.
+Status ParseHadoopBool(const string& name, const string& value, bool* result) {
+  if (boost::iequals(value, "true")) {
+    *result = true;
+  } else if (boost::iequals(value, "false")) {
+    *result = false;
+  } else {
+    return Status(Substitute("--s3_native_reader: $0 in the Hadoop configuration is "
+        "'$1', expected true or false", name, value));
+  }
+  return Status::OK();
+}
+
+// True if the command line flag 'name' was set (on the command line or in the flag
+// file), even to its default value.
+bool FlagIsSet(const char* name) {
+  return !google::GetCommandLineFlagInfoOrDie(name).is_default;
+}
+
+// Endpoint settings of the native S3 client.
+struct S3NativeEndpointSettings {
+  string endpoint;
+  string region;
+  bool path_style;
+  // Hadoop properties the settings were taken from, for the startup log.
+  vector<string> from_hadoop;
+};
+
+// Sets 'settings' from the flags, taking each setting whose flag is not set from the
+// S3A connector's explicitly set properties in the Hadoop configuration:
+// --s3_native_endpoint (if empty) from fs.s3a.endpoint, --s3_native_region from
+// fs.s3a.endpoint.region, --s3_native_path_style from fs.s3a.path.style.access. An
+// fs.s3a.endpoint without a scheme gets https:// or, if fs.s3a.connection.ssl.enabled
+// is false, http://, as in S3A; with a scheme it is used as is. The JVM is only asked
+// when a flag is not set.
+Status GetS3NativeEndpointSettings(S3NativeEndpointSettings* settings) {
+  settings->endpoint = FLAGS_s3_native_endpoint;
+  settings->region = FLAGS_s3_native_region;
+  settings->path_style = FLAGS_s3_native_path_style;
+  settings->from_hadoop.clear();
+  string value;
+  if (settings->endpoint.empty()) {
+    RETURN_IF_ERROR(GetExplicitHadoopConfig(kS3AEndpoint, &value));
+    if (!value.empty()) {
+      if (value.find("://") == string::npos) {
+        bool ssl = true;
+        string ssl_value;
+        RETURN_IF_ERROR(GetExplicitHadoopConfig(kS3ASslEnabled, &ssl_value));
+        if (!ssl_value.empty()) {
+          RETURN_IF_ERROR(ParseHadoopBool(kS3ASslEnabled, ssl_value, &ssl));
+          settings->from_hadoop.push_back(kS3ASslEnabled);
+        }
+        value = (ssl ? "https://" : "http://") + value;
+      }
+      settings->endpoint = value;
+      settings->from_hadoop.push_back(kS3AEndpoint);
+    }
+  }
+  if (!FlagIsSet("s3_native_region")) {
+    RETURN_IF_ERROR(GetExplicitHadoopConfig(kS3ARegion, &value));
+    if (!value.empty()) {
+      settings->region = value;
+      settings->from_hadoop.push_back(kS3ARegion);
+    }
+  }
+  if (!FlagIsSet("s3_native_path_style")) {
+    RETURN_IF_ERROR(GetExplicitHadoopConfig(kS3APathStyle, &value));
+    if (!value.empty()) {
+      RETURN_IF_ERROR(ParseHadoopBool(kS3APathStyle, value, &settings->path_style));
+      settings->from_hadoop.push_back(kS3APathStyle);
+    }
+  }
+  return Status::OK();
+}
+
+// Sets 'provider' to the keys of the S3A connector in the Hadoop configuration, or to
+// nullptr if neither fs.s3a.access.key nor fs.s3a.secret.key is set. Returns an error if
+// only one of them is set.
+Status GetS3ACredentialsProvider(
+    std::shared_ptr<Aws::Auth::AWSCredentialsProvider>* provider) {
+  provider->reset();
+  string access_key, secret_key, session_token;
+  RETURN_IF_ERROR(GetHadoopPassword(kS3AAccessKey, &access_key));
+  RETURN_IF_ERROR(GetHadoopPassword(kS3ASecretKey, &secret_key));
+  if (access_key.empty() && secret_key.empty()) return Status::OK();
+  if (access_key.empty() || secret_key.empty()) {
+    return Status(Substitute("--s3_native_reader: $0 is set in the Hadoop configuration, "
+        "but $1 is not", access_key.empty() ? kS3ASecretKey : kS3AAccessKey,
+        access_key.empty() ? kS3AAccessKey : kS3ASecretKey));
+  }
+  RETURN_IF_ERROR(GetHadoopPassword(kS3ASessionToken, &session_token));
+  *provider = Aws::MakeShared<Aws::Auth::SimpleAWSCredentialsProvider>(kAllocationTag,
+      access_key.c_str(), secret_key.c_str(), session_token.c_str());
+  return Status::OK();
+}
 #endif
 
 } // anonymous namespace
@@ -187,11 +346,11 @@ Status InitS3NativeClient() {
   Aws::Client::ClientConfigurationInitValues init_values;
   init_values.shouldDisableIMDS = true;
   Aws::S3::S3ClientConfiguration config(init_values);
-  config.region = FLAGS_s3_native_region.c_str();
-  if (!FLAGS_s3_native_endpoint.empty()) {
-    config.endpointOverride = FLAGS_s3_native_endpoint.c_str();
-  }
-  config.useVirtualAddressing = !FLAGS_s3_native_path_style;
+  S3NativeEndpointSettings endpoint;
+  RETURN_IF_ERROR(GetS3NativeEndpointSettings(&endpoint));
+  config.region = endpoint.region.c_str();
+  if (!endpoint.endpoint.empty()) config.endpointOverride = endpoint.endpoint.c_str();
+  config.useVirtualAddressing = !endpoint.path_style;
   // Reads only: there is no request payload to sign.
   config.payloadSigningPolicy =
       Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never;
@@ -218,21 +377,43 @@ Status InitS3NativeClient() {
   config.requestTimeoutMs = FLAGS_s3_native_request_timeout_ms;
   if (!FLAGS_s3_native_ca_file.empty()) config.caFile = FLAGS_s3_native_ca_file.c_str();
 
-  auto credentials =
-      Aws::MakeShared<Aws::Auth::DefaultAWSCredentialsProviderChain>(kAllocationTag);
+  // Credentials: --s3_native_credentials_file if set, otherwise the S3A keys of the
+  // Hadoop configuration, otherwise the default AWS chain (environment variables,
+  // ~/.aws/credentials).
+  std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentials;
+  string credentials_source;
+  if (FLAGS_s3_native_credentials_file.empty()) {
+    RETURN_IF_ERROR(GetS3ACredentialsProvider(&credentials));
+    if (credentials != nullptr) {
+      credentials_source = Substitute("Hadoop configuration ($0)", kS3AAccessKey);
+    }
+  }
+  if (credentials == nullptr) {
+    credentials =
+        Aws::MakeShared<Aws::Auth::DefaultAWSCredentialsProviderChain>(kAllocationTag);
+    credentials_source = FLAGS_s3_native_credentials_file.empty() ?
+        "default AWS chain" :
+        Substitute("file $0", FLAGS_s3_native_credentials_file);
+  }
   if (credentials->GetAWSCredentials().IsEmpty()) {
-    return Status("--s3_native_reader is set, but no AWS credentials were found. Set "
-        "--s3_native_credentials_file (the keys under a [default] section header, or "
-        "the section named by AWS_PROFILE) or the AWS_ACCESS_KEY_ID and "
-        "AWS_SECRET_ACCESS_KEY environment variables.");
+    return Status(Substitute("--s3_native_reader is set, but no AWS credentials were "
+        "found. Set $0 and $1 in core-site.xml (or in a credential provider of "
+        "hadoop.security.credential.provider.path), --s3_native_credentials_file (the "
+        "keys under a [default] section header, or the section named by AWS_PROFILE) or "
+        "the AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.",
+        kS3AAccessKey, kS3ASecretKey));
   }
   s3_client = Aws::MakeShared<Aws::S3::S3Client>(
       kAllocationTag, credentials, /* endpointProvider */ nullptr, config);
   initialized = true;
   LOG(INFO) << "Native S3 client enabled (aws-sdk-cpp "
             << Aws::Version::GetVersionString() << "), endpoint '"
-            << FLAGS_s3_native_endpoint << "', region " << FLAGS_s3_native_region
-            << ", path-style " << (FLAGS_s3_native_path_style ? "on" : "off")
+            << endpoint.endpoint << "', region " << endpoint.region
+            << ", path-style " << (endpoint.path_style ? "on" : "off")
+            << (endpoint.from_hadoop.empty() ? string() :
+                   Substitute(" (from the Hadoop configuration: $0)",
+                       boost::algorithm::join(endpoint.from_hadoop, ", ")))
+            << ", credentials from " << credentials_source
             << ", max connections " << pool_size << ", parallel reads "
             << (parallel_reads ? Substitute("from $0 bytes in parts of $1 bytes",
                    FLAGS_s3_native_parallel_read_min_size,
