@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <streambuf>
 #include <string>
 #include <utility>
@@ -47,6 +48,11 @@ bool S3NativeClientEnabled();
 /// Returns the S3 client shared by all native S3 reads. Only valid if
 /// S3NativeClientEnabled() returns true.
 Aws::S3::S3Client* GetS3NativeClient();
+
+/// For tests: makes 'client' the client of all native S3 reads (S3NativeClientEnabled()
+/// is then true), or with null turns the native S3 client off again. Does not initialize
+/// the SDK (the caller calls Aws::InitAPI()); not for use with InitS3NativeClient().
+void SetS3NativeClientForTesting(std::shared_ptr<Aws::S3::S3Client> client);
 
 /// Splits an S3 path ('s3a://bucket/key', also 's3://' and 's3n://') into 'bucket' and
 /// 'key'. Returns an error if 'path' is not such a path or has an empty bucket or key.

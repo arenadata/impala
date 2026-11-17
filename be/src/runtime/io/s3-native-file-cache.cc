@@ -930,6 +930,12 @@ S3NativeFileCache* GetS3NativeFileCache() {
   return file_cache.get();
 }
 
+std::unique_ptr<S3NativeFileCache> SwapS3NativeFileCacheForTesting(
+    std::unique_ptr<S3NativeFileCache> cache) {
+  file_cache.swap(cache);
+  return cache;
+}
+
 void ReleaseCacheThenBufferPool(S3NativeFileCache* cache, int64_t bytes_to_free,
     const std::function<void(int64_t)>& release_buffer_pool) {
   if (cache != nullptr) bytes_to_free -= cache->ReleaseMemory(bytes_to_free);

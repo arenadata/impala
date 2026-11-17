@@ -101,6 +101,10 @@ void EnableS3NativeDataCache(DataCache* data_cache) {
             << "kept in the remote data cache on local disk after their eviction";
 }
 
+void SetS3NativeDataCacheForTesting(DataCache* data_cache) {
+  native_data_cache = data_cache;
+}
+
 #ifdef IMPALA_HAVE_AWS_SDK_CPP
 namespace {
 

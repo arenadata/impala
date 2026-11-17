@@ -39,6 +39,10 @@ class DataCache;
 /// reader (HdfsFileReader). Called by ExecEnv::Init() after the DiskIoMgr is set up.
 void EnableS3NativeDataCache(DataCache* data_cache);
 
+/// For tests: sets the remote data cache of the native S3 reader (null: none), without
+/// the flags and the eviction handler of EnableS3NativeDataCache().
+void SetS3NativeDataCacheForTesting(DataCache* data_cache);
+
 /// Experimental FileReader for s3a:// files that reads through the native aws-sdk-cpp
 /// S3 client (s3-native-client.h) instead of libhdfs and the Hadoop S3A connector.
 /// Used by ScanRange when --s3_native_reader is set.

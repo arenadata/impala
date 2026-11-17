@@ -48,6 +48,7 @@ add_library(IoTests STATIC
   disk-io-mgr-test.cc
   disk-file-test.cc
   s3-native-file-cache-test.cc
+  s3-native-file-reader-test.cc
   s3-native-test.cc
 )
 add_dependencies(IoTests gen-deps)
@@ -69,5 +70,6 @@ ADD_UNIFIED_BE_LSAN_TEST(disk-file-test DiskFileTest.*:DiskFileDeathTest.*)
 ADD_UNIFIED_BE_LSAN_TEST(data-cache-trace-test DataCacheTraceTest.*)
 ADD_UNIFIED_BE_LSAN_TEST(s3-native-file-cache-test S3NativeFileCacheTest.*)
 ADD_UNIFIED_BE_LSAN_TEST(s3-native-test S3NativeTest.*)
+ADD_UNIFIED_BE_LSAN_TEST(s3-native-file-reader-test S3NativeFileReaderTest.*)
 # Exception to unified be: Custom main function (platform tests)
 ADD_BE_LSAN_TEST(data-cache-test)

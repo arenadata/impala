@@ -437,6 +437,13 @@ Aws::S3::S3Client* GetS3NativeClient() {
 #endif
 }
 
+void SetS3NativeClientForTesting(std::shared_ptr<Aws::S3::S3Client> client) {
+#ifdef IMPALA_HAVE_AWS_SDK_CPP
+  s3_client = std::move(client);
+  initialized = s3_client != nullptr;
+#endif
+}
+
 Status ParseS3Path(const string& path, string* bucket, string* key) {
   static const char* const kSchemes[] = {"s3a://", "s3://", "s3n://"};
   for (const char* scheme : kSchemes) {

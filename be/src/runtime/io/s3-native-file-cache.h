@@ -556,6 +556,11 @@ int64_t InitS3NativeFileCache(int64_t max_capacity);
 /// Returns the process-wide cache, or nullptr if it is disabled.
 S3NativeFileCache* GetS3NativeFileCache();
 
+/// For tests: replaces the process-wide cache returned by GetS3NativeFileCache() with
+/// 'cache' (null: no cache) and returns the previous one.
+std::unique_ptr<S3NativeFileCache> SwapS3NativeFileCacheForTesting(
+    std::unique_ptr<S3NativeFileCache> cache);
+
 /// GC function of the process MemTracker for the cache and the buffer pool together (see
 /// ExecEnv::InitMemTracker()): releases up to 'bytes_to_free' bytes of 'cache' (if not
 /// null), then calls 'release_buffer_pool' with the bytes still to free, if any. One
