@@ -129,6 +129,8 @@ class StringFunctions {
   static StringVal Utf8Reverse(FunctionContext*, const StringVal& str);
   static StringVal Translate(FunctionContext*, const StringVal& str, const StringVal& src,
       const StringVal& dst);
+  static StringVal Utf8Translate(FunctionContext*, const StringVal& str,
+      const StringVal& src, const StringVal& dst);
   static StringVal Trim(FunctionContext*, const StringVal& str);
   static StringVal Ltrim(FunctionContext*, const StringVal& str);
   static StringVal Rtrim(FunctionContext*, const StringVal& str);

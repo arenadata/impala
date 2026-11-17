@@ -779,6 +779,9 @@ StringVal StringFunctions::Utf8Reverse(FunctionContext* context, const StringVal
 StringVal StringFunctions::Translate(FunctionContext* context, const StringVal& str,
     const StringVal& src, const StringVal& dst) {
   if (str.is_null || src.is_null || dst.is_null) return StringVal::null();
+  if (context->impl()->GetConstFnAttr(FunctionContextImpl::UTF8_MODE)) {
+    return Utf8Translate(context, str, src, dst);
+  }
   StringVal result(context, str.len);
   if (UNLIKELY(result.is_null)) return result;
 
@@ -801,6 +804,285 @@ StringVal StringFunctions::Translate(FunctionContext* context, const StringVal& 
     if (!matched_src) result.ptr[result_len++] = str.ptr[i];
   }
   result.len = result_len;
+  return result;
+}
+
+/// Decodes the UTF-8 code point starting at 'pos'. Returns false for illegal or
+/// incomplete UTF-8 without reading outside 'str'. The outputs are set only after
+/// successful validation.
+static inline bool DecodeUtf8CodePoint(
+    const StringVal& str, int pos, uint32_t* code_point, int* char_len) {
+  DCHECK_GE(pos, 0);
+  DCHECK_LT(pos, str.len);
+  const uint8_t* ptr = str.ptr + pos;
+  const uint8_t first_byte = ptr[0];
+  int width;
+  uint32_t cp;
+  if (first_byte <= 0x7F) {
+    *code_point = first_byte;
+    *char_len = 1;
+    return true;
+  } else if (first_byte >= 0xC2 && first_byte <= 0xDF) {
+    width = 2;
+    cp = first_byte & 0x1F;
+  } else if (first_byte >= 0xE0 && first_byte <= 0xEF) {
+    width = 3;
+    cp = first_byte & 0x0F;
+  } else if (first_byte >= 0xF0 && first_byte <= 0xF4) {
+    width = 4;
+    cp = first_byte & 0x07;
+  } else {
+    return false;
+  }
+
+  if (width > str.len - pos) return false;
+  for (int i = 1; i < width; ++i) {
+    if ((ptr[i] & 0xC0) != 0x80) return false;
+    cp = (cp << 6) | (ptr[i] & 0x3F);
+  }
+  // Reject overlong encodings, UTF-16 surrogates and values outside the Unicode range.
+  if ((width == 2 && cp < 0x80) || (width == 3 && cp < 0x800)
+      || (width == 4 && cp < 0x10000) || (cp >= 0xD800 && cp <= 0xDFFF)
+      || cp > 0x10FFFF) {
+    return false;
+  }
+  *code_point = cp;
+  *char_len = width;
+  return true;
+}
+
+static void AddUtf8TranslateWarning(FunctionContext* context) {
+  context->AddWarning("String contains illegal or incomplete UTF-8 code point in "
+                      "translate(). Return NULL.");
+}
+
+static bool IsAsciiTranslateArg(const StringVal& str) {
+  for (int i = 0; i < str.len; ++i) {
+    if ((str.ptr[i] & 0x80) != 0) return false;
+  }
+  return true;
+}
+
+static constexpr int UTF8_TRANSLATE_NOT_IN_SRC = -2;
+static constexpr int UTF8_TRANSLATE_DELETE = -1;
+
+/// Finds the first occurrence of 'input_cp' in 'src'. Source and destination positions
+/// are advanced together by code point, including positions occupied by duplicate source
+/// characters. The inputs have already been validated by BuildUtf8TranslateAsciiMap().
+static void FindUtf8TranslateMapping(const StringVal& src, const StringVal& dst,
+    uint32_t input_cp, bool* matched, int* dst_offset, int* dst_len) {
+  *matched = false;
+  *dst_offset = 0;
+  *dst_len = 0;
+  int src_pos = 0;
+  int dst_pos = 0;
+  while (src_pos < src.len) {
+    uint32_t src_cp;
+    int src_width;
+    if (UNLIKELY(!DecodeUtf8CodePoint(src, src_pos, &src_cp, &src_width))) {
+      DCHECK(false);
+      return;
+    }
+    const bool has_dst = dst_pos < dst.len;
+    uint32_t dst_cp = 0;
+    int dst_width = 0;
+    if (has_dst && UNLIKELY(!DecodeUtf8CodePoint(dst, dst_pos, &dst_cp, &dst_width))) {
+      DCHECK(false);
+      return;
+    }
+    if (src_cp == input_cp) {
+      *matched = true;
+      *dst_offset = dst_pos;
+      *dst_len = has_dst ? dst_width : 0;
+      return;
+    }
+    src_pos += src_width;
+    if (has_dst) dst_pos += dst_width;
+  }
+}
+
+/// Validates 'src' and 'dst' and builds an ASCII lookup table. Each entry contains a byte
+/// offset into 'dst', UTF8_TRANSLATE_DELETE, or UTF8_TRANSLATE_NOT_IN_SRC.
+/// 'ascii_dst_lens' is meaningful only for entries present in 'src'.
+static bool BuildUtf8TranslateAsciiMap(FunctionContext* context, const StringVal& src,
+    const StringVal& dst, int* ascii_dst_offsets, int* ascii_dst_lens,
+    bool* src_has_non_ascii) {
+  for (int i = 0; i < 128; ++i) ascii_dst_offsets[i] = UTF8_TRANSLATE_NOT_IN_SRC;
+  *src_has_non_ascii = false;
+
+  int src_pos = 0;
+  int dst_pos = 0;
+  while (src_pos < src.len) {
+    uint32_t src_cp;
+    int src_width;
+    if (UNLIKELY(!DecodeUtf8CodePoint(src, src_pos, &src_cp, &src_width))) {
+      AddUtf8TranslateWarning(context);
+      return false;
+    }
+    const bool has_dst = dst_pos < dst.len;
+    uint32_t dst_cp = 0;
+    int dst_width = 0;
+    if (has_dst && UNLIKELY(!DecodeUtf8CodePoint(dst, dst_pos, &dst_cp, &dst_width))) {
+      AddUtf8TranslateWarning(context);
+      return false;
+    }
+    if (src_cp < 128) {
+      if (ascii_dst_offsets[src_cp] == UTF8_TRANSLATE_NOT_IN_SRC) {
+        ascii_dst_offsets[src_cp] = has_dst ? dst_pos : UTF8_TRANSLATE_DELETE;
+        ascii_dst_lens[src_cp] = has_dst ? dst_width : 0;
+      }
+    } else {
+      *src_has_non_ascii = true;
+    }
+    src_pos += src_width;
+    if (has_dst) dst_pos += dst_width;
+  }
+
+  // Extra destination characters are ignored for mapping, but still must be valid UTF-8.
+  while (dst_pos < dst.len) {
+    uint32_t dst_cp;
+    int dst_width;
+    if (UNLIKELY(!DecodeUtf8CodePoint(dst, dst_pos, &dst_cp, &dst_width))) {
+      AddUtf8TranslateWarning(context);
+      return false;
+    }
+    dst_pos += dst_width;
+  }
+  return true;
+}
+
+static void GetUtf8TranslateMapping(const StringVal& src, const StringVal& dst,
+    const int* ascii_dst_offsets, const int* ascii_dst_lens, bool src_has_non_ascii,
+    uint32_t input_cp, bool* matched, int* dst_offset, int* dst_len) {
+  if (input_cp < 128) {
+    const int offset = ascii_dst_offsets[input_cp];
+    if (offset == UTF8_TRANSLATE_NOT_IN_SRC) {
+      *matched = false;
+      *dst_offset = 0;
+      *dst_len = 0;
+    } else {
+      *matched = true;
+      *dst_offset = offset == UTF8_TRANSLATE_DELETE ? 0 : offset;
+      *dst_len = ascii_dst_lens[input_cp];
+    }
+    return;
+  }
+  if (!src_has_non_ascii) {
+    *matched = false;
+    *dst_offset = 0;
+    *dst_len = 0;
+    return;
+  }
+  FindUtf8TranslateMapping(src, dst, input_cp, matched, dst_offset, dst_len);
+}
+
+StringVal StringFunctions::Utf8Translate(FunctionContext* context, const StringVal& str,
+    const StringVal& src, const StringVal& dst) {
+  if (str.is_null || src.is_null || dst.is_null) return StringVal::null();
+
+  // If source and destination are ASCII, a non-ASCII input code point cannot match
+  // anything. Process input in one pass and retain the legacy inner loop for ordinary
+  // ASCII data.
+  if (IsAsciiTranslateArg(src) && IsAsciiTranslateArg(dst)) {
+    StringVal result(context, str.len);
+    if (UNLIKELY(result.is_null)) return result;
+    int input_pos = 0;
+    int result_pos = 0;
+    while (input_pos < str.len) {
+      if (str.ptr[input_pos] < 0x80) {
+        bool matched_src = false;
+        for (int j = 0; j < src.len; ++j) {
+          if (str.ptr[input_pos] == src.ptr[j]) {
+            if (j < dst.len) result.ptr[result_pos++] = dst.ptr[j];
+            matched_src = true;
+            break;
+          }
+        }
+        if (!matched_src) result.ptr[result_pos++] = str.ptr[input_pos];
+        ++input_pos;
+        continue;
+      }
+
+      uint32_t input_cp;
+      int input_width;
+      if (UNLIKELY(!DecodeUtf8CodePoint(str, input_pos, &input_cp, &input_width))) {
+        AddUtf8TranslateWarning(context);
+        return StringVal::null();
+      }
+      DCHECK_LE(result_pos + input_width, result.len);
+      memcpy(result.ptr + result_pos, str.ptr + input_pos, input_width);
+      result_pos += input_width;
+      input_pos += input_width;
+    }
+    result.len = result_pos;
+    return result;
+  }
+
+  int ascii_dst_offsets[128];
+  int ascii_dst_lens[128];
+  bool src_has_non_ascii;
+  if (!BuildUtf8TranslateAsciiMap(
+          context, src, dst, ascii_dst_offsets, ascii_dst_lens, &src_has_non_ascii)) {
+    return StringVal::null();
+  }
+
+  // Validate input and calculate the exact output size. A one-byte input character may
+  // map to a four-byte replacement, so allocating str.len without this pass would be
+  // unsafe.
+  int64_t result_len = 0;
+  int input_pos = 0;
+  while (input_pos < str.len) {
+    uint32_t input_cp;
+    int input_width;
+    if (UNLIKELY(!DecodeUtf8CodePoint(str, input_pos, &input_cp, &input_width))) {
+      AddUtf8TranslateWarning(context);
+      return StringVal::null();
+    }
+    bool matched;
+    int dst_offset;
+    int dst_len;
+    GetUtf8TranslateMapping(src, dst, ascii_dst_offsets, ascii_dst_lens,
+        src_has_non_ascii, input_cp, &matched, &dst_offset, &dst_len);
+    result_len += matched ? dst_len : input_width;
+    if (UNLIKELY(result_len > StringVal::MAX_LENGTH)) {
+      context->SetError(Substitute(ERROR_CHARACTER_LIMIT_EXCEEDED, "translate() result",
+          PrettyPrinter::Print(StringVal::MAX_LENGTH, TUnit::BYTES))
+                            .c_str());
+      return StringVal::null();
+    }
+    input_pos += input_width;
+  }
+
+  StringVal result(context, static_cast<int>(result_len));
+  if (UNLIKELY(result.is_null)) return result;
+  input_pos = 0;
+  int result_pos = 0;
+  while (input_pos < str.len) {
+    uint32_t input_cp;
+    int input_width;
+    const bool valid = DecodeUtf8CodePoint(str, input_pos, &input_cp, &input_width);
+    DCHECK(valid);
+    if (UNLIKELY(!valid)) {
+      AddUtf8TranslateWarning(context);
+      return StringVal::null();
+    }
+    bool matched;
+    int dst_offset;
+    int dst_len;
+    GetUtf8TranslateMapping(src, dst, ascii_dst_offsets, ascii_dst_lens,
+        src_has_non_ascii, input_cp, &matched, &dst_offset, &dst_len);
+    const int output_width = matched ? dst_len : input_width;
+    DCHECK_LE(result_pos + output_width, result.len);
+    if (matched) {
+      if (dst_len > 0) memcpy(result.ptr + result_pos, dst.ptr + dst_offset, dst_len);
+    } else {
+      memcpy(result.ptr + result_pos, str.ptr + input_pos, input_width);
+    }
+    result_pos += output_width;
+    input_pos += input_width;
+  }
+  DCHECK_EQ(static_cast<int64_t>(result_pos), result_len);
+  result.len = result_pos;
   return result;
 }
 

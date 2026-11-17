@@ -1798,6 +1798,22 @@ select replace('hello world','xyz','abc');
             For example: <codeph>translate ('hello','ll','67')</codeph> returns
             <codeph>'he66o'</codeph>.
           </p>
+
+          <p>
+            If the <codeph>UTF8_MODE</codeph> query option is enabled, characters are
+            matched and replaced by UTF-8 code point rather than by byte. This applies to
+            all three arguments, including deletion and duplicate handling. If any
+            argument contains an illegal or incomplete UTF-8 code point, the function
+            adds a warning and returns <codeph>NULL</codeph>. If
+            <codeph>UTF8_MODE</codeph> is disabled, the function retains its original
+            byte-by-byte behavior.
+          </p>
+
+          <p>
+            For example, with <codeph>UTF8_MODE=true</codeph>,
+            <codeph>translate('Парашют', 'аш', 'ощ')</codeph> returns
+            <codeph>'Порощют'</codeph>.
+          </p>
         </dd>
 
       </dlentry>
