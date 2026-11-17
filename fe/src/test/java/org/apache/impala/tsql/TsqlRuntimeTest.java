@@ -123,7 +123,7 @@ public final class TsqlRuntimeTest {
     String src = "EXEC('SELECT boom');\nSELECT 1 AS result;\n";
     RecordingRunner runner = new RecordingRunner();
     runner.failSqlContaining = "boom";
-    TsqlRuntime rt = new TsqlRuntime(src, "default", "tester", new TsqlRuntime.MemoryStore());
+    TsqlRuntime rt = new TsqlRuntime(batch(src), "default", "tester", new TsqlRuntime.MemoryStore());
     TsqlSqlRunner.Result prev = null;
     TsqlRuntime.Step failed = null;
     for (int i = 0; i < 10; i++) {
@@ -395,8 +395,13 @@ public final class TsqlRuntimeTest {
     check(step.sql.contains("-2"), "negative arg substituted: " + step.sql);
   }
 
+  private static String batch(String src) {
+    if (DialectCheck.leadingIs(src, "TSQL") || DialectCheck.leadingIs(src, "LPSQL")) return src;
+    return "TSQL\n" + src;
+  }
+
   private static TsqlRuntime.Step runUntilClient(String src, RecordingRunner runner) {
-    TsqlRuntime rt = new TsqlRuntime(src, "default", "tester", new TsqlRuntime.MemoryStore());
+    TsqlRuntime rt = new TsqlRuntime(batch(src), "default", "tester", new TsqlRuntime.MemoryStore());
     TsqlSqlRunner.Result prev = null;
     for (int i = 0; i < 100; i++) {
       TsqlRuntime.Step step = rt.next(prev);

@@ -224,4 +224,160 @@ public final class TsqlAst {
       this.negated = negated;
     }
   }
+
+  /** Current row of an open cursor, addressed by result column name. */
+  public static final class CursorField extends Expr {
+    public final String cursor;
+    public final String field;
+
+    public CursorField(String cursor, String field) {
+      this.cursor = cursor;
+      this.field = field;
+    }
+  }
+
+  /** Stable tree text used by the keyword tests. No source positions. */
+  public static String dump(Script script) {
+    StringBuilder sb = new StringBuilder();
+    if (script != null) {
+      for (Stmt stmt : script.statements) appendStmt(sb, stmt, 0);
+    }
+    if (sb.length() > 0 && sb.charAt(sb.length() - 1) == '\n') {
+      sb.setLength(sb.length() - 1);
+    }
+    return sb.toString();
+  }
+
+  private static void appendStmt(StringBuilder sb, Stmt stmt, int indent) {
+    if (stmt instanceof DeclareVar) {
+      DeclareVar d = (DeclareVar) stmt;
+      line(sb, indent, "DeclareVar " + d.name + " " + d.typeName
+          + (d.initializer == null ? "" : " = " + expr(d.initializer)));
+    } else if (stmt instanceof SetStmt) {
+      SetStmt s = (SetStmt) stmt;
+      line(sb, indent, "SetStmt " + s.name + " = " + expr(s.value));
+    } else if (stmt instanceof SelectAssign) {
+      SelectAssign s = (SelectAssign) stmt;
+      line(sb, indent, "SelectAssign " + join(s.targets) + " " + s.sql);
+    } else if (stmt instanceof BareSelect) {
+      line(sb, indent, "BareSelect " + ((BareSelect) stmt).sql);
+    } else if (stmt instanceof RawSql) {
+      String sql = ((RawSql) stmt).sql;
+      line(sb, indent, "RawSql" + (sql == null || sql.isEmpty() ? "" : " " + sql));
+    } else if (stmt instanceof ExecString) {
+      line(sb, indent, "ExecString " + expr(((ExecString) stmt).text));
+    } else if (stmt instanceof ExecProc) {
+      ExecProc call = (ExecProc) stmt;
+      line(sb, indent, "ExecProc " + call.name);
+      for (Arg arg : call.args) {
+        String named = arg.paramName == null ? "" : arg.paramName + " = ";
+        line(sb, indent + 1, "Arg " + named + expr(arg.value) + (arg.output ? " out" : ""));
+      }
+    } else if (stmt instanceof IfStmt) {
+      IfStmt s = (IfStmt) stmt;
+      line(sb, indent, "IfStmt " + expr(s.condition));
+      line(sb, indent + 1, "then");
+      for (Stmt child : s.thenBody) appendStmt(sb, child, indent + 2);
+      if (!s.elseBody.isEmpty()) {
+        line(sb, indent + 1, "else");
+        for (Stmt child : s.elseBody) appendStmt(sb, child, indent + 2);
+      }
+    } else if (stmt instanceof WhileStmt) {
+      WhileStmt s = (WhileStmt) stmt;
+      line(sb, indent, "WhileStmt " + expr(s.condition));
+      for (Stmt child : s.body) appendStmt(sb, child, indent + 1);
+    } else if (stmt instanceof TryStmt) {
+      TryStmt s = (TryStmt) stmt;
+      line(sb, indent, "TryStmt");
+      line(sb, indent + 1, "body");
+      for (Stmt child : s.body) appendStmt(sb, child, indent + 2);
+      line(sb, indent + 1, "handler");
+      for (Stmt child : s.handler) appendStmt(sb, child, indent + 2);
+    } else if (stmt instanceof ReturnStmt) {
+      line(sb, indent, "ReturnStmt");
+    } else if (stmt instanceof BreakStmt) {
+      line(sb, indent, "BreakStmt");
+    } else if (stmt instanceof ContinueStmt) {
+      line(sb, indent, "ContinueStmt");
+    } else if (stmt instanceof DeclareCursor) {
+      DeclareCursor d = (DeclareCursor) stmt;
+      if (d.dynamicSql != null) {
+        line(sb, indent, "DeclareCursor " + d.name + " dynamic=" + expr(d.dynamicSql));
+      } else if (d.sql != null && !d.sql.isEmpty()) {
+        line(sb, indent, "DeclareCursor " + d.name + " sql=" + d.sql);
+      } else {
+        line(sb, indent, "DeclareCursor " + d.name);
+      }
+    } else if (stmt instanceof OpenCursor) {
+      line(sb, indent, "OpenCursor " + ((OpenCursor) stmt).name);
+    } else if (stmt instanceof FetchCursor) {
+      FetchCursor f = (FetchCursor) stmt;
+      line(sb, indent, "FetchCursor " + f.name + (f.targets.isEmpty() ? "" : " " + join(f.targets)));
+    } else if (stmt instanceof CloseCursor) {
+      line(sb, indent, "CloseCursor " + ((CloseCursor) stmt).name);
+    } else if (stmt instanceof DeallocateCursor) {
+      line(sb, indent, "DeallocateCursor " + ((DeallocateCursor) stmt).name);
+    } else if (stmt instanceof CreateProc) {
+      CreateProc proc = (CreateProc) stmt;
+      String dialect = proc.source != null && proc.source.startsWith("lpsql") ? "lpsql" : "tsql";
+      line(sb, indent, "CreateProc " + proc.name + " " + dialect + (proc.executeAsOwner ? " owner" : ""));
+      for (Param param : proc.params) {
+        line(sb, indent + 1, "Param " + param.name + " " + param.typeName + (param.output ? " out" : " in"));
+      }
+      for (Stmt child : proc.body) appendStmt(sb, child, indent + 1);
+    } else if (stmt != null) {
+      line(sb, indent, stmt.getClass().getSimpleName());
+    }
+  }
+
+  private static String expr(Expr expr) {
+    if (expr == null) return "null";
+    if (expr instanceof Literal) {
+      Literal lit = (Literal) expr;
+      if (lit.text == null) return "Literal NULL";
+      if (lit.string) return "Literal '" + lit.text.replace("'", "''") + "'";
+      return "Literal " + lit.text;
+    }
+    if (expr instanceof Var) return "Var " + ((Var) expr).name;
+    if (expr instanceof CursorField) {
+      CursorField field = (CursorField) expr;
+      return "CursorField " + field.cursor + "." + field.field;
+    }
+    if (expr instanceof Binary) {
+      Binary b = (Binary) expr;
+      return "(" + expr(b.left) + " " + b.op + " " + expr(b.right) + ")";
+    }
+    if (expr instanceof Unary) {
+      Unary u = (Unary) expr;
+      return "(" + u.op + " " + expr(u.inner) + ")";
+    }
+    if (expr instanceof Call) {
+      Call call = (Call) expr;
+      StringBuilder sb = new StringBuilder("Call ").append(call.name).append('(');
+      for (int i = 0; i < call.args.size(); i++) {
+        if (i > 0) sb.append(", ");
+        sb.append(expr(call.args.get(i)));
+      }
+      return sb.append(')').toString();
+    }
+    if (expr instanceof IsNull) {
+      IsNull isNull = (IsNull) expr;
+      return "(" + expr(isNull.inner) + (isNull.negated ? " IS NOT NULL)" : " IS NULL)");
+    }
+    return expr.getClass().getSimpleName();
+  }
+
+  private static void line(StringBuilder sb, int indent, String text) {
+    for (int i = 0; i < indent; i++) sb.append("  ");
+    sb.append(text).append('\n');
+  }
+
+  private static String join(List<String> parts) {
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < parts.size(); i++) {
+      if (i > 0) sb.append(", ");
+      sb.append(parts.get(i));
+    }
+    return sb.toString();
+  }
 }

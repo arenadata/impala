@@ -14,11 +14,10 @@ import org.apache.thrift.TException;
 
 /**
  * ADH-TSQL. Reads and writes procedure source through the coordinator HMS pool.
- * Hive 4 {@code create_stored_procedure} is create-or-update. The source starts
- * with a {@code tsql} line so it is not treated as HPL/SQL.
+ * Hive 4 {@code create_stored_procedure} is create-or-update. The stored text is
+ * the client batch, which starts with {@code TSQL} or {@code LPSQL}.
  */
 public final class TsqlHms implements TsqlProcedureStore {
-  static final String MARKER = "tsql\n";
   private static final String CATALOG = "hive";
 
   private final MetaStoreClientPool pool;
@@ -36,11 +35,12 @@ public final class TsqlHms implements TsqlProcedureStore {
     proc.setDbName(database);
     proc.setName(name.toLowerCase(Locale.ROOT));
     proc.setOwnerName(owner == null ? "" : owner);
-    String body = source != null && source.startsWith(MARKER) ? source : MARKER + source;
-    if (executeAsOwner && !body.contains("\nWITH EXECUTE AS OWNER\n")) {
-      body = MARKER + "WITH EXECUTE AS OWNER\n" + body.substring(MARKER.length());
+    if (executeAsOwner && (source == null
+        || !source.toUpperCase(Locale.ROOT).contains("EXECUTE AS OWNER"))) {
+      throw new TsqlParser.ParseException(
+          "WITH EXECUTE AS OWNER must be written in the TSQL batch");
     }
-    proc.setSource(body);
+    proc.setSource(source == null ? "" : source);
     try (MetaStoreClient client = pool.getClient()) {
       client.getHiveClient().getThriftClient().getClient().create_stored_procedure(proc);
     } catch (TException e) {

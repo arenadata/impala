@@ -6,7 +6,7 @@ package org.apache.impala.tsql;
 public interface TsqlProcedureStore {
   void upsert(String database, String name, String owner, boolean executeAsOwner, String source);
 
-  /** Source including the leading "tsql\n" marker, or null when the procedure is absent. */
+  /** The stored batch, starting with TSQL or LPSQL, or null when absent. */
   String getSource(String database, String name);
 
   java.util.List<String> list(String database);

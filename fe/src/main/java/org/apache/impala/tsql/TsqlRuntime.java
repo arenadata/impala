@@ -6,6 +6,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+import org.apache.impala.lpsql.LpsqlParser;
+
 /**
  * Interprets a T-SQL script one Impala statement at a time.
  * {@link #next} returns the next statement to run. The caller feeds the result
@@ -89,14 +91,22 @@ public final class TsqlRuntime {
   private String failMessage;
   private int fetchStatus = -1;
   private int lastError;
+  private int sqlCode;
 
   public TsqlRuntime(String source, String database, String owner, TsqlProcedureStore store) {
     this.database = database == null ? "default" : database;
     this.owner = owner == null ? "" : owner;
     this.originalSource = source == null ? "" : source;
     this.store = store == null ? new MemoryStore() : store;
-    TsqlAst.Script script = TsqlParser.parse(source);
+    TsqlAst.Script script = parseDialect(this.originalSource);
     stack.add(new Frame(script.statements, null, null));
+  }
+
+  static TsqlAst.Script parseDialect(String source) {
+    if (source == null) source = "";
+    if (LpsqlParser.looksLikeLpsql(source)) return LpsqlParser.parse(source);
+    if (TsqlParser.looksLikeTsql(source)) return TsqlParser.parse(source);
+    throw new TsqlParser.ParseException("A procedure batch must start with LPSQL or TSQL");
   }
 
   public Step next(TsqlSqlRunner.Result previous) {
@@ -168,6 +178,7 @@ public final class TsqlRuntime {
     }
     if (stmt instanceof TsqlAst.RawSql) {
       String sql = rewrite(((TsqlAst.RawSql) stmt).sql);
+      if (sql == null || sql.trim().isEmpty()) return null;
       if (isSetOption(sql)) {
         applySetOption(sql);
         return null;
@@ -256,6 +267,7 @@ public final class TsqlRuntime {
           else setVar(f.targets.get(i), null);
         }
       }
+      sqlCode = fetchStatus;
       return null;
     }
     if (stmt instanceof TsqlAst.CloseCursor || stmt instanceof TsqlAst.DeallocateCursor) {
@@ -263,8 +275,7 @@ public final class TsqlRuntime {
     }
     if (stmt instanceof TsqlAst.CreateProc) {
       TsqlAst.CreateProc proc = (TsqlAst.CreateProc) stmt;
-      String stored = originalSource.startsWith("tsql\n")
-          ? originalSource : "tsql\n" + originalSource;
+      String stored = originalSource == null ? "" : originalSource;
       proc.source = stored;
       defined.put(proc.name.toLowerCase(Locale.ROOT), proc);
       store.upsert(database, proc.name, owner, proc.executeAsOwner, stored);
@@ -278,8 +289,7 @@ public final class TsqlRuntime {
     if (found == null) {
       String source = store.getSource(database, call.name);
       if (source == null) throw new TsqlParser.ParseException("Unknown procedure " + call.name);
-      String body = source.startsWith("tsql\n") ? source.substring(5) : source;
-      TsqlAst.Script script = TsqlParser.parse(body);
+      TsqlAst.Script script = parseDialect(source);
       for (TsqlAst.Stmt s : script.statements) {
         if (s instanceof TsqlAst.CreateProc
             && ((TsqlAst.CreateProc) s).name.equalsIgnoreCase(call.name)) {
@@ -316,6 +326,7 @@ public final class TsqlRuntime {
     lastError = 0;
     if (previous != null && !previous.ok()) {
       lastError = previous.sqlcode == 0 ? -1 : previous.sqlcode;
+      sqlCode = lastError;
       // The failed statement must not consume the next successful result.
       waitCursor = null;
       waitAssign = null;
@@ -324,6 +335,7 @@ public final class TsqlRuntime {
       if (handleError(message)) return;
       throw new TsqlParser.ParseException(message);
     }
+    sqlCode = 0;
     if (waitClient) {
       waitClient = false;
       stop = true;
@@ -408,8 +420,30 @@ public final class TsqlRuntime {
       String key = ((TsqlAst.Var) expr).name.toLowerCase(Locale.ROOT);
       if (key.equals("fetch_status")) return Integer.toString(fetchStatus);
       if (key.equals("error")) return Integer.toString(lastError);
+      if (key.equals("sqlcode")) return Integer.toString(sqlCode);
       if (Boolean.TRUE.equals(nulls.get(key))) return null;
       return vars.get(key);
+    }
+    if (expr instanceof TsqlAst.CursorField) {
+      TsqlAst.CursorField field = (TsqlAst.CursorField) expr;
+      Cursor c = cursor(field.cursor);
+      if (!c.open || c.index < 0 || c.index >= c.rows.size()) {
+        throw new TsqlParser.ParseException("Cursor " + field.cursor + " has no current row");
+      }
+      int col = -1;
+      for (int i = 0; i < c.columns.size(); i++) {
+        if (c.columns.get(i) != null && c.columns.get(i).equalsIgnoreCase(field.field)) {
+          col = i;
+          break;
+        }
+      }
+      if (col < 0) {
+        throw new TsqlParser.ParseException(
+            "Cursor " + field.cursor + " has no column " + field.field);
+      }
+      List<TsqlSqlRunner.Cell> row = c.rows.get(c.index);
+      if (col >= row.size() || row.get(col).isNull) return null;
+      return row.get(col).value;
     }
     if (expr instanceof TsqlAst.IsNull) {
       TsqlAst.IsNull isNull = (TsqlAst.IsNull) expr;
@@ -425,6 +459,13 @@ public final class TsqlRuntime {
       TsqlAst.Binary b = (TsqlAst.Binary) expr;
       if (b.op.equals("AND")) return truth(eval(b.left)) && truth(eval(b.right)) ? "1" : "0";
       if (b.op.equals("OR")) return truth(eval(b.left)) || truth(eval(b.right)) ? "1" : "0";
+      if (b.op.equals("||")) {
+        String l = eval(b.left);
+        String r = eval(b.right);
+        if (l == null) l = "";
+        if (r == null) r = "";
+        return l + r;
+      }
       if (b.op.equals("+")) {
         String l = eval(b.left);
         String r = eval(b.right);
@@ -609,7 +650,7 @@ public final class TsqlRuntime {
     public void upsert(String database, String name, String owner, boolean executeAsOwner,
         String source) {
       String key = key(database, name);
-      sources.put(key, source.startsWith("tsql\n") ? source : "tsql\n" + source);
+      sources.put(key, source == null ? "" : source);
       owners.put(key, executeAsOwner);
     }
 

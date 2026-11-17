@@ -24,27 +24,13 @@ public final class TsqlParser {
   }
 
   public static boolean looksLikeTsql(String sql) {
-    if (sql == null) return false;
-    String head = firstKeyword(sql);
-    if (head == null) return false;
-    if (head.equals("DECLARE") || head.equals("BEGIN") || head.equals("EXEC")
-        || head.equals("EXECUTE") || head.equals("CALL")) {
-      return true;
-    }
-    if (head.equals("SHOW")) {
-      String rest = sql.replaceAll("(?s)/\\*.*?\\*/", " ").replaceAll("--.*?(\\n|$)", " ");
-      return rest.toUpperCase(Locale.ROOT).contains("PROCEDURE");
-    }
-    if (!head.equals("CREATE")) return false;
-    String upper = stripComments(sql).trim().toUpperCase(Locale.ROOT);
-    return upper.startsWith("CREATE PROC") || upper.startsWith("CREATE OR ALTER PROC");
+    return DialectCheck.leadingIs(sql, "TSQL");
   }
 
   public static TsqlAst.Script parse(String sql) {
-    if (sql != null && stripComments(sql).trim().toUpperCase(Locale.ROOT).startsWith("LPSQL")) {
-      throw new ParseException("LPSQL spelling is not accepted");
-    }
-    List<Tok> toks = lex(sql == null ? "" : sql);
+    String body = DialectCheck.stripLeading(sql, "TSQL");
+    DialectCheck.verifyTsql(body);
+    List<Tok> toks = lex(body);
     TsqlParser parser = new TsqlParser(toks);
     TsqlAst.Script script = new TsqlAst.Script();
     parser.skipSemi();
@@ -56,7 +42,7 @@ public final class TsqlParser {
     return script;
   }
 
-  private static void validateBareSelect(List<TsqlAst.Stmt> stmts, boolean outermost) {
+  public static void validateBareSelect(List<TsqlAst.Stmt> stmts, boolean outermost) {
     for (int i = 0; i < stmts.size(); i++) {
       TsqlAst.Stmt s = stmts.get(i);
       if (s instanceof TsqlAst.BareSelect) {
@@ -761,18 +747,5 @@ public final class TsqlParser {
 
   private static boolean isKeyword(String text) {
     return text != null && text.length() > 0;
-  }
-
-  private static String firstKeyword(String sql) {
-    String stripped = stripComments(sql).trim();
-    if (stripped.isEmpty()) return null;
-    int i = 0;
-    while (i < stripped.length() && Character.isLetter(stripped.charAt(i))) i++;
-    if (i == 0) return null;
-    return stripped.substring(0, i).toUpperCase(Locale.ROOT);
-  }
-
-  private static String stripComments(String sql) {
-    return sql.replaceAll("(?s)/\\*.*?\\*/", " ").replaceAll("--.*?(\\n|$)", " ");
   }
 }

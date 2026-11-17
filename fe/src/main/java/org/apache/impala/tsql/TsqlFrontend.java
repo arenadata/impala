@@ -5,6 +5,7 @@ import java.util.Collections;
 
 import org.apache.impala.catalog.PrimitiveType;
 import org.apache.impala.common.AnalysisException;
+import org.apache.impala.lpsql.LpsqlParser;
 import org.apache.impala.catalog.ScalarType;
 import org.apache.impala.thrift.TColumn;
 import org.apache.impala.thrift.TExecRequest;
@@ -16,7 +17,7 @@ import org.apache.impala.util.TSessionStateUtil;
 
 /**
  * ADH-TSQL. The only class {@code Frontend} names. Returns a finished
- * {@link TExecRequest} for a T-SQL batch and null for ordinary SQL.
+ * {@link TExecRequest} for a T-SQL or LPSQL batch and null for ordinary SQL.
  */
 public final class TsqlFrontend {
   private TsqlFrontend() {}
@@ -27,13 +28,12 @@ public final class TsqlFrontend {
       return null;
     }
     String sql = queryCtx.client_request.stmt;
-    if (!TsqlParser.looksLikeTsql(sql)) return null;
-    // Reject the batch here so a syntax error is a normal analysis failure
-    // rather than a coordinator crash after the handle is returned.
-    try {
-      TsqlParser.parse(sql);
-    } catch (TsqlParser.ParseException e) {
-      throw new AnalysisException(e.getMessage());
+    if (LpsqlParser.looksLikeLpsql(sql)) {
+      rejectUnlessParsed(sql, true);
+    } else if (TsqlParser.looksLikeTsql(sql)) {
+      rejectUnlessParsed(sql, false);
+    } else {
+      return null;
     }
 
     String user = TSessionStateUtil.getEffectiveUser(queryCtx.session);
@@ -58,5 +58,16 @@ public final class TsqlFrontend {
     request.setResult_set_metadata(metadata);
     request.setTsql_request(tsql);
     return request;
+  }
+
+  private static void rejectUnlessParsed(String sql, boolean lpsql) throws AnalysisException {
+    // Reject the batch here so a syntax error is a normal analysis failure
+    // rather than a coordinator crash after the handle is returned.
+    try {
+      if (lpsql) LpsqlParser.parse(sql);
+      else TsqlParser.parse(sql);
+    } catch (TsqlParser.ParseException e) {
+      throw new AnalysisException(e.getMessage());
+    }
   }
 }
