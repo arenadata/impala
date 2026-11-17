@@ -76,6 +76,9 @@ class TestExprs(ImpalaTestSuite):
     """Test handling of expressions with "special" strings."""
     self.run_test_case('QueryTest/special-strings', vector)
 
+  def test_convert_encoding(self, vector):
+    self.run_test_case('QueryTest/convert-encoding', vector)
+
   def test_encryption_exprs(self, vector):
     """Test handling encryption/ decryption functionality.
     Some AES operation modes are not supported by all versions of the OpenSSL

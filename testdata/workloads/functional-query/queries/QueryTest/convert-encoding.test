@@ -1,0 +1,55 @@
+====
+---- QUERY
+select typeof(convert_encoding('Привет', 'UTF-8', 'CP1251')),
+       hex(cast(convert_encoding('Привет', 'UTF-8', 'CP1251') as string))
+---- RESULTS: RAW_STRING
+'BINARY','CFF0E8E2E5F2'
+---- TYPES
+STRING,STRING
+====
+---- QUERY
+select typeof(convert_encoding(cast(unhex('CFF0E8E2E5F2') as binary),
+         'CP1251', 'UTF-8')),
+       convert_encoding(cast(unhex('CFF0E8E2E5F2') as binary), 'CP1251', 'UTF-8')
+---- RESULTS: RAW_STRING
+'STRING','Привет'
+---- TYPES
+STRING,STRING
+====
+---- QUERY
+select hex(cast(convert_encoding('abc', 'uTf8', 'wInDoWs-1251') as string)),
+       convert_encoding(cast(unhex('616263') as binary), 'cP1251', 'UtF-8'),
+       hex(cast(convert_encoding(cast('Привет' as varchar(20)),
+         'UTF8', 'CP1251') as string))
+---- RESULTS: RAW_STRING
+'616263','abc','CFF0E8E2E5F2'
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+select length(convert_encoding('', 'UTF8', 'CP1251')),
+       convert_encoding(cast('' as binary), 'CP1251', 'UTF8'),
+       convert_encoding(cast(null as string), 'UTF8', 'CP1251') is null,
+       convert_encoding(cast(null as binary), 'CP1251', 'UTF8') is null,
+       convert_encoding('a', cast(null as string), 'CP1251') is null,
+       convert_encoding('a', 'UTF8', cast(null as string)) is null
+---- RESULTS: RAW_STRING
+0,'',true,true,true,true
+---- TYPES
+INT,STRING,BOOLEAN,BOOLEAN,BOOLEAN,BOOLEAN
+====
+---- QUERY
+select hex(cast(convert_encoding('A🙂你B', 'UTF8', 'CP1251') as string)),
+       hex(cast(convert_encoding(unhex('E228A1'), 'UTF8', 'CP1251') as string)),
+       hex(convert_encoding(cast(unhex('98') as binary), 'CP1251', 'UTF8'))
+---- RESULTS: RAW_STRING
+'413F3F42','3F283F','3F'
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+select convert_encoding('abc', 'LATIN1', 'CP1251')
+---- RESULTS
+---- CATCH
+supports only
+====

@@ -115,6 +115,10 @@ under the License.
       </li>
 
       <li>
+        <xref href="#string_functions/convert_encoding">CONVERT_ENCODING</xref>
+      </li>
+
+      <li>
         <xref href="#string_functions/find_in_set">FIND_IN_SET</xref>
       </li>
 
@@ -541,6 +545,75 @@ SELECT chr(97);
           </p>
 
           <p conref="../shared/impala_common.xml#common/concat_blurb"/>
+        </dd>
+
+      </dlentry>
+
+      <dlentry id="convert_encoding">
+
+        <dt>
+          CONVERT_ENCODING(STRING input, STRING source_charset, STRING target_charset)
+          CONVERT_ENCODING(BINARY input, STRING source_charset, STRING target_charset)
+        </dt>
+
+        <dd>
+          <b>Purpose:</b> Converts text between UTF-8 and Windows-1251 (CP1251).
+          <p>
+            The <codeph>STRING</codeph> overload converts UTF-8 input to CP1251 and
+            returns <codeph>BINARY</codeph>. <codeph>VARCHAR</codeph> and
+            <codeph>CHAR</codeph> input is accepted through the existing implicit
+            conversion to <codeph>STRING</codeph>. The <codeph>BINARY</codeph> overload
+            converts CP1251 input to UTF-8 and returns <codeph>STRING</codeph>.
+          </p>
+
+          <p>
+            <b>Return type:</b> <codeph>BINARY</codeph> for <codeph>STRING</codeph> input;
+            <codeph>STRING</codeph> for <codeph>BINARY</codeph> input
+          </p>
+
+          <p>
+            <b>Usage notes:</b>
+          </p>
+
+          <p>
+            Supported charset names are <codeph>UTF-8</codeph>, <codeph>UTF8</codeph>,
+            <codeph>CP1251</codeph>, and <codeph>WINDOWS-1251</codeph>. Names are matched
+            case-insensitively. The source and target charsets must specify one of the two
+            supported directions. Unsupported names or directions produce an error.
+          </p>
+
+          <p>
+            If any argument is <codeph>NULL</codeph>, the function returns
+            <codeph>NULL</codeph>. Empty input returns an empty result when the charset
+            arguments are valid.
+          </p>
+
+          <p>
+            A valid Unicode code point that has no CP1251 representation is replaced with
+            <codeph>?</codeph>. Each malformed UTF-8 byte is also replaced with
+            <codeph>?</codeph>. The undefined CP1251 byte <codeph>0x98</code> is converted
+            to <codeph>?</codeph>. These replacements are lossy. In particular, converting
+            <codeph>0x98</codeph> to UTF-8 and back produces <codeph>0x3F</code>.
+          </p>
+
+          <p>
+            The conversion is controlled only by the charset arguments and is independent
+            of the <codeph>UTF8_MODE</codeph> query option.
+          </p>
+
+          <p>
+            Use <codeph>HEX()</codeph> to inspect CP1251 binary output without
+            interpreting it as UTF-8. For example:
+          </p>
+
+<codeblock>SELECT HEX(CAST(
+  CONVERT_ENCODING('Привет', 'UTF-8', 'CP1251') AS STRING));
+-- CFF0E8E2E5F2
+
+SELECT CONVERT_ENCODING(
+  CAST(UNHEX('CFF0E8E2E5F2') AS BINARY), 'CP1251', 'UTF-8');
+-- Привет
+</codeblock>
         </dd>
 
       </dlentry>

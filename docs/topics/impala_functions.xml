@@ -280,6 +280,13 @@ under the License.
           </row>
           <row>
             <entry>
+              <xref
+                href="impala_string_functions.xml#string_functions/convert_encoding"
+                >CONVERT_ENCODING</xref>
+            </entry>
+          </row>
+          <row>
+            <entry>
               <xref href="impala_math_functions.xml#math_functions/conv"
                 >CONV</xref>
             </entry>
