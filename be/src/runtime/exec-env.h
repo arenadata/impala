@@ -301,6 +301,10 @@ class ExecEnv {
   JWTHelper* oauth_helper_;
   bool is_fe_tests_ = false;
 
+  /// Whether InitMemTracker() set the headroom function of the native S3 file cache,
+  /// which uses 'mem_tracker_': the destructor removes it again.
+  bool s3_file_cache_headroom_set_ = false;
+
   /// The network address that the backend KRPC service is listening on:
   /// hostname + krpc_port.
   TNetworkAddress configured_backend_address_;

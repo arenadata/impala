@@ -336,6 +336,9 @@ ExecEnv::ExecEnv(int krpc_port, int subscriber_port, int webserver_port,
 }
 
 ExecEnv::~ExecEnv() {
+  // The process-wide native S3 file cache outlives this ExecEnv: stop its headroom
+  // check, which uses the process MemTracker and metrics, before they are destroyed.
+  if (s3_file_cache_headroom_set_) io::GetS3NativeFileCache()->ClearHeadroomFunction();
   if (buffer_reservation_ != nullptr) buffer_reservation_->Close();
   if (rpc_mgr_ != nullptr) rpc_mgr_->Shutdown();
   disk_io_mgr_.reset(); // Need to tear down before mem_tracker_.
@@ -695,6 +698,7 @@ void ExecEnv::InitMemTracker(int64_t bytes_limit) {
     }, FLAGS_s3_native_cache_min_headroom,
         FLAGS_s3_native_cache_headroom_check_ms,
         [process] () { process->RefreshConsumptionFromMetric(); });
+    s3_file_cache_headroom_set_ = true;
   }
   // One GC function for the native S3 file cache and the buffer pool, see
   // io::ReleaseCacheThenBufferPool().

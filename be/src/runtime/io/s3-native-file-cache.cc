@@ -715,13 +715,25 @@ void S3NativeFileCache::CountSkipped(int64_t len) {
 }
 
 S3NativeFileCache::~S3NativeFileCache() {
-  if (headroom_thread_ == nullptr) return;
-  {
+  ClearHeadroomFunction();
+}
+
+void S3NativeFileCache::ClearHeadroomFunction() {
+  if (headroom_thread_ != nullptr) {
+    {
+      std::lock_guard<std::mutex> l(stop_lock_);
+      stop_ = true;
+    }
+    stop_cv_.notify_all();
+    headroom_thread_->Join();
+    headroom_thread_.reset();
     std::lock_guard<std::mutex> l(stop_lock_);
-    stop_ = true;
+    stop_ = false;
   }
-  stop_cv_.notify_all();
-  headroom_thread_->Join();
+  headroom_fn_ = nullptr;
+  after_release_fn_ = nullptr;
+  low_headroom_ = false;
+  filled_since_check_ = 0;
 }
 
 void S3NativeFileCache::SetHeadroomFunction(HeadroomFn fn, int64_t min_headroom,

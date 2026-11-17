@@ -454,6 +454,50 @@ TEST(S3NativeFileCacheTest, BackgroundHeadroomCheck) {
   EXPECT_EQ(500, reserved.TotalBytes());
 }
 
+// ClearHeadroomFunction() stops the background check before the objects its functions
+// use are destroyed (ExecEnv does it for the process MemTracker); afterwards the cache
+// keeps its entries and takes a new headroom function.
+TEST(S3NativeFileCacheTest, ClearHeadroomFunctionStopsBackgroundCheck) {
+  S3NativeFileCache cache(1000, 80, 1, 300);
+  std::unique_ptr<std::atomic<int64_t>> headroom(new std::atomic<int64_t>(1000));
+  std::atomic<int> checks(0);
+  std::atomic<int> after_release(0);
+  std::atomic<int64_t>* h = headroom.get();
+  cache.SetHeadroomFunction([h, &checks] () {
+    ++checks;
+    return h->load();
+  }, 500, 5, [&after_release] () { ++after_release; });
+  for (char c = 'a'; c <= 'h'; ++c) Read(&cache, string(1, c), 100, OWNER_1);
+  for (int i = 0; i < 200 && checks.load() == 0; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_GT(checks.load(), 0);
+  EXPECT_EQ(800, cache.TotalBytes());
+
+  cache.ClearHeadroomFunction();
+  int checks_after_clear = checks.load();
+  // Freed like the process MemTracker in ~ExecEnv(): ASAN reports any later use.
+  headroom.reset();
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(checks_after_clear, checks.load());
+  // Without a headroom function, fills above the reserved part are cached and the
+  // process limit GC still releases memory.
+  EXPECT_FALSE(Read(&cache, "i", 100, OWNER_1));
+  EXPECT_EQ(900, cache.TotalBytes());
+  EXPECT_EQ(100, cache.ReleaseMemory(100));
+  EXPECT_FALSE(Skips(&cache, "j", 100, OWNER_1));
+  EXPECT_EQ(0, after_release.load());
+
+  // A new headroom function starts a new background check.
+  std::atomic<int64_t> low(0);
+  cache.SetHeadroomFunction([&low] () { return low.load(); }, 500, 5);
+  for (int i = 0; i < 200 && cache.TotalBytes() > 300; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(300, cache.TotalBytes());
+  cache.ClearHeadroomFunction();
+}
+
 // The eviction handler gets entries evicted to make room that were read again after
 // they were loaded; entries read only once and entries given back under memory
 // pressure do not reach it.

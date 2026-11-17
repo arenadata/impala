@@ -183,6 +183,13 @@ class S3NativeFileCache {
   void SetHeadroomFunction(HeadroomFn fn, int64_t min_headroom = kDefaultMinHeadroom,
       int64_t check_interval_ms = 0, AfterReleaseFn after_release = nullptr);
 
+  /// Stops the background headroom check thread, if any, and removes the functions set
+  /// by SetHeadroomFunction(): the cache then keeps its entries until it is full or
+  /// ReleaseMemory() is called, and SetHeadroomFunction() may be called again. For the
+  /// owner of the objects the functions use (ExecEnv), before it destroys them: the
+  /// cache lives until the process exits. Must not run while the cache is used.
+  void ClearHeadroomFunction();
+
   /// Turns on the admission filter (see the class comment) with a window of
   /// 'window_percent' of the capacity (1-50, at least 16 entries of 'entry_size' bytes),
   /// with the frequency sketch sized for entries of about 'entry_size' bytes. Must be
@@ -498,8 +505,8 @@ class S3NativeFileCache {
   /// below 'min_headroom_'.
   void ReleaseForHeadroom();
 
-  /// Body of the background thread: ReleaseForHeadroom() every 'interval_ms' until the
-  /// cache is destroyed.
+  /// Body of the background thread: ReleaseForHeadroom() every 'interval_ms' until
+  /// ClearHeadroomFunction() or the destructor stops it.
   void HeadroomCheckLoop(int64_t interval_ms);
 
   const int64_t capacity_;
