@@ -675,6 +675,11 @@ set (IMPALA_DEPENDENCIES
   cctz
   curl)
 
+# aws-sdk-cpp depends on curl, OpenSSL and zlib, so it must come before them.
+if (AWS_SDK_CPP_FOUND)
+  set(IMPALA_DEPENDENCIES aws_sdk_cpp ${IMPALA_DEPENDENCIES})
+endif()
+
 # When building with Clang, linking fails because it is trying to
 # use a symbol in kudu_client, but that symbol is discarded. To
 # hack around this error, the calloncehack shared library defines the
