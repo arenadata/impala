@@ -84,12 +84,6 @@ namespace impala {
 // Used to identify the statestore in the failure detector
 const string STATESTORE_ID = "STATESTORE";
 
-// Template for metrics that measure the processing time for individual topics.
-const string CALLBACK_METRIC_PATTERN = "statestore-subscriber.topic-$0.processing-time-s";
-
-// Template for metrics that measure the interval between updates for individual topics.
-const string UPDATE_INTERVAL_METRIC_PATTERN = "statestore-subscriber.topic-$0.update-interval";
-
 // Duration, in ms, to sleep between attempts to reconnect to the
 // statestore after a failure.
 const int32_t SLEEP_INTERVAL_MS = 5000;
@@ -546,32 +540,36 @@ StatestoreSubscriber::StatestoreStub::StatestoreStub(StatestoreSubscriber* subsc
     is_registered_(false) {
   std::string name_prefix = first_statestore ? "statestore" : "statestore2";
   metrics_ = metrics->GetOrCreateChildGroup(name_prefix + "-subscriber");
+  // Metric keys must be unique across both stubs so that the Prometheus exposition
+  // (which flattens all child groups without prefixing the group name) does not
+  // contain duplicate metric names when statestored HA is enabled.
+  metric_key_prefix_ = name_prefix + "-subscriber";
   connected_to_statestore_metric_ = metrics_->AddProperty(
-      "statestore-subscriber.connected", false);
+      metric_key_prefix_ + ".connected", false);
   connection_failure_metric_ = metrics_->AddCounter(
-      "statestore-subscriber.num-connection-failures", 0);
+      metric_key_prefix_ + ".num-connection-failures", 0);
   last_recovery_duration_metric_ = metrics_->AddDoubleGauge(
-      "statestore-subscriber.last-recovery-duration", 0.0);
+      metric_key_prefix_ + ".last-recovery-duration", 0.0);
   last_recovery_time_metric_ = metrics_->AddProperty<string>(
-      "statestore-subscriber.last-recovery-time", "N/A");
+      metric_key_prefix_ + ".last-recovery-time", "N/A");
   topic_update_interval_metric_ = StatsMetric<double>::CreateAndRegister(
-      metrics_, "statestore-subscriber.topic-update-interval-time");
+      metrics_, metric_key_prefix_ + ".topic-update-interval-time");
   topic_update_duration_metric_ = StatsMetric<double>::CreateAndRegister(
-      metrics_, "statestore-subscriber.topic-update-duration");
+      metrics_, metric_key_prefix_ + ".topic-update-duration");
   heartbeat_interval_metric_ = StatsMetric<double>::CreateAndRegister(
-      metrics_, "statestore-subscriber.heartbeat-interval-time");
+      metrics_, metric_key_prefix_ + ".heartbeat-interval-time");
   registration_id_metric_ = metrics_->AddProperty<string>(
-      "statestore-subscriber.registration-id", "N/A");
+      metric_key_prefix_ + ".registration-id", "N/A");
   statestore_id_metric_ = metrics_->AddProperty<string>(
-      "statestore-subscriber.statestore-id", "N/A");
+      metric_key_prefix_ + ".statestore-id", "N/A");
   update_catalogd_rpc_metric_ = metrics_->AddCounter(
-      "statestore-subscriber.num-update-catalogd-rpc", 0);
+      metric_key_prefix_ + ".num-update-catalogd-rpc", 0);
   update_statestored_role_rpc_metric_ = metrics_->AddCounter(
-      "statestore-subscriber.num-update-statestored-role-rpc", 0);
+      metric_key_prefix_ + ".num-update-statestored-role-rpc", 0);
   active_status_metric_ = metrics_->AddProperty(
-      name_prefix + "-subscriber.statestore-active-status", is_active_);
+      metric_key_prefix_ + ".statestore-active-status", is_active_);
   re_registr_attempt_metric_ = metrics_->AddCounter(
-      "statestore-subscriber.num-re-register-attempt", 0);
+      metric_key_prefix_ + ".num-re-register-attempt", 0);
 }
 
 Status StatestoreSubscriber::StatestoreStub::AddTopic(
@@ -584,9 +582,9 @@ Status StatestoreSubscriber::StatestoreStub::AddTopic(
   registration.callbacks.push_back(callback);
   if (registration.processing_time_metric == nullptr) {
     registration.processing_time_metric = StatsMetric<double>::CreateAndRegister(
-        metrics_, CALLBACK_METRIC_PATTERN, topic_id);
+        metrics_, metric_key_prefix_ + ".topic-$0.processing-time-s", topic_id);
     registration.update_interval_metric = StatsMetric<double>::CreateAndRegister(
-        metrics_, UPDATE_INTERVAL_METRIC_PATTERN, topic_id);
+        metrics_, metric_key_prefix_ + ".topic-$0.update-interval", topic_id);
     registration.update_interval_timer.Start();
   }
   registration.is_transient = is_transient;
