@@ -15,9 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <map>
+#include <set>
+#include <sstream>
+
 #include "common/init.h"
 #include "statestore/statestore-subscriber.h"
 #include "testutil/gtest-util.h"
+#include "testutil/scoped-flag-setter.h"
 #include "util/asan.h"
 #include "util/metrics.h"
 
@@ -28,6 +33,7 @@ using namespace impala;
 DECLARE_string(ssl_server_certificate);
 DECLARE_string(ssl_private_key);
 DECLARE_string(ssl_client_ca_certificate);
+DECLARE_bool(enable_statestored_ha);
 
 DECLARE_int32(webserver_port);
 DECLARE_int32(state_store_port);
@@ -69,6 +75,47 @@ TEST(StatestoreTest, SmokeTest) {
   ASSERT_FALSE(sub_will_not_start->Start().ok());
 
   statestore->ShutdownForTesting();
+}
+
+// Regression test: with statestored HA enabled, the subscriber creates one
+// StatestoreStub per statestore instance. The stubs must register metrics with unique
+// keys so that the Prometheus exposition (which flattens all metric groups without
+// prefixing the group name) contains each metric name only once.
+TEST(StatestoreTest, HaPrometheusUniqueMetricNames) {
+  auto ha = ScopedFlagSetter<bool>::Make(&FLAGS_enable_statestored_ha, true);
+  MetricGroup* metrics = perm_objects->Add(new MetricGroup("ha_metrics"));
+  StatestoreSubscriber* sub = perm_objects->Add(
+      new StatestoreSubscriber("ha_sub", MakeNetworkAddress("localhost", 0),
+          MakeNetworkAddress("localhost", 0), MakeNetworkAddress("localhost", 0),
+          metrics, TStatestoreSubscriberType::COORDINATOR_EXECUTOR));
+  // Topic metrics are registered by AddTopic(); registration with a running statestore
+  // is not required for this test.
+  ASSERT_OK(sub->AddTopic("test-topic", true, false, "",
+      [](const StatestoreSubscriber::TopicDeltaMap& state,
+          vector<TTopicDelta>* topic_updates) {}));
+
+  stringstream prometheus_output;
+  metrics->ToPrometheus(true, &prometheus_output);
+
+  // Collect the metric names from '# HELP <name>' lines and sample lines and verify
+  // that no metric is exposed more than once. Prometheus rejects an exposition with a
+  // second HELP line for the same metric name.
+  set<string> help_names;
+  map<string, int> sample_counts;
+  string line;
+  while (getline(prometheus_output, line)) {
+    if (line.empty()) continue;
+    if (line.compare(0, 7, "# HELP ") == 0) {
+      const string name = line.substr(7, line.find(' ', 7) - 7);
+      EXPECT_TRUE(help_names.insert(name).second)
+          << "duplicate HELP line for metric: " << name;
+    } else if (line[0] != '#') {
+      ++sample_counts[line.substr(0, line.find(' '))];
+    }
+  }
+  for (const auto& entry : sample_counts) {
+    EXPECT_EQ(entry.second, 1) << "duplicate samples for metric: " << entry.first;
+  }
 }
 
 // Runs an SSL smoke test with provided parameters.

@@ -419,6 +419,11 @@ class StatestoreSubscriber {
     /// MetricGroup instance that all metrics are registered in. Not owned by this class.
     MetricGroup* metrics_;
 
+    /// Prefix for the keys of all metrics registered by this stub, e.g.
+    /// "statestore-subscriber" or "statestore2-subscriber". Ensures metric keys are
+    /// unique between the two stubs when statestored HA is enabled.
+    std::string metric_key_prefix_;
+
     /// Metric to indicate if we are successfully registered with the statestore
     BooleanProperty* connected_to_statestore_metric_;
 
