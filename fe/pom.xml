@@ -23,7 +23,7 @@ under the License.
   <parent>
     <groupId>org.apache.impala</groupId>
     <artifactId>impala-parent</artifactId>
-    <version>4.5.0.4-4.5.0-0</version>
+    <version>4.5.0.4-4.5.0-1</version>
     <relativePath>../java/pom.xml</relativePath>
   </parent>
   <modelVersion>4.0.0</modelVersion>
@@ -1035,7 +1035,6 @@ under the License.
                     <include>org.apache.hbase:*:${hbase.version}</include>
                     <include>org.apache.hive:*:${hive.version}</include>
                     <include>org.apache.hive:hive-storage-api:${hive.storage.api.version}</include>
-                    <include>org.apache.hive:hive-storage-api:4.0.1</include>
                     <include>org.apache.kudu:*:${kudu.version}</include>
                     <include>org.apache.avro:*:${avro.version}</include>
                     <include>org.apache.parquet:*:${parquet.version}</include>

@@ -490,7 +490,9 @@ public class Hive3MetastoreShimBase {
    */
   public static ValidWriteIdList getValidWriteIdListFromString(String validWriteIds) {
     Preconditions.checkNotNull(validWriteIds);
-    return new ValidReaderWriteIdList(validWriteIds);
+    ValidReaderWriteIdList writeIdList = new ValidReaderWriteIdList();
+    writeIdList.readFromString(validWriteIds);
+    return writeIdList;
   }
 
   /**
