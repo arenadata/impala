@@ -98,6 +98,13 @@ public final class TsqlRuntime {
     this.owner = owner == null ? "" : owner;
     this.originalSource = source == null ? "" : source;
     this.store = store == null ? new MemoryStore() : store;
+    // A table created in this session has no stats yet. Impala then plans a
+    // distributed scan, and on a local filesystem every executor reads the same
+    // file. The second call is right because the catalog now knows the file
+    // size and uses one node. These options make the first call do that too.
+    procedureOptions.put("num_nodes", "1");
+    procedureOptions.put("sync_ddl", "1");
+    procedureOptions.put("enable_async_ddl_execution", "0");
     TsqlAst.Script script = parseDialect(this.originalSource);
     stack.add(new Frame(script.statements, null, null));
   }

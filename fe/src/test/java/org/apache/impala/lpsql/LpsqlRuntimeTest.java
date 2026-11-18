@@ -25,6 +25,8 @@ public final class LpsqlRuntimeTest {
     storedLpsqlRoundTrips();
     storedTsqlStaysOnTsqlParser();
     bareSelectInTheMiddleFails();
+    aliasKeepsTheVariableName();
+    cursorLoopSumsEachRowOnce();
     if (failed > 0) {
       System.err.println(failed + " test(s) failed");
       System.exit(1);
@@ -179,6 +181,35 @@ public final class LpsqlRuntimeTest {
     TsqlRuntime.Step step = runUntilClient("TSQL\nEXEC q @x = 4;", runner, store);
     check(step.kind == TsqlRuntime.Kind.CLIENT_RESULT, "tsql call");
     check(step.sql.contains("4"), "tsql arg: " + step.sql);
+  }
+
+  private static void aliasKeepsTheVariableName() {
+    String src = lpsql(""
+        + "DECLARE bucket STRING = 'pos';\n"
+        + "DECLARE n INT = 4;\n"
+        + "SELECT bucket AS bucket, n AS n;\n");
+    RecordingRunner runner = new RecordingRunner();
+    TsqlRuntime.Step step = runUntilClient(src, runner);
+    check("SELECT 'pos' AS bucket, 4 AS n".equals(step.sql), "alias sql was " + step.sql);
+  }
+
+  private static void cursorLoopSumsEachRowOnce() {
+    String src = lpsql(""
+        + "DECLARE num INT;\n"
+        + "DECLARE s INT = 0;\n"
+        + "DECLARE c CURSOR FOR SELECT n FROM lpsql_q.nums WHERE n > 1 ORDER BY n;\n"
+        + "OPEN c;\n"
+        + "LOOP\n"
+        + "  FETCH c INTO num;\n"
+        + "  IF SQLCODE <> 0 THEN LEAVE; END IF;\n"
+        + "  SET s = s + num;\n"
+        + "END LOOP;\n"
+        + "CLOSE c;\n"
+        + "SELECT s AS total;\n");
+    RecordingRunner runner = new RecordingRunner();
+    runner.cursorRows = Arrays.asList("2", "3", "4");
+    TsqlRuntime.Step step = runUntilClient(src, runner);
+    check("SELECT 9 AS total".equals(step.sql), "cursor sum was " + step.sql);
   }
 
   private static void bareSelectInTheMiddleFails() {

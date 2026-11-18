@@ -593,7 +593,7 @@ public final class LpsqlParser {
         while (j < sql.length() && isNameChar(sql.charAt(j))) j++;
         String ident = sql.substring(i, j);
         if (scope.contains(ident.toLowerCase(Locale.ROOT)) && !sqlKeyword(ident)
-            && !precededByDot(out)) {
+            && !precededByDot(out) && !precededByWord(out, "AS")) {
           out.append('@').append(ident);
         } else {
           out.append(ident);
@@ -611,6 +611,24 @@ public final class LpsqlParser {
     int k = out.length() - 1;
     while (k >= 0 && Character.isWhitespace(out.charAt(k))) k--;
     return k >= 0 && out.charAt(k) == '.';
+  }
+
+  /** An identifier after AS is a column alias, not a variable value. */
+  private static boolean precededByWord(StringBuilder out, String word) {
+    int k = out.length() - 1;
+    while (k >= 0 && Character.isWhitespace(out.charAt(k))) k--;
+    int end = k + 1;
+    while (k >= 0 && isNameChar(out.charAt(k))) k--;
+    int start = k + 1;
+    if (end - start != word.length()) return false;
+    for (int i = 0; i < word.length(); i++) {
+      char c = out.charAt(start + i);
+      if (c >= 'A' && c <= 'Z') c = (char) (c - 'A' + 'a');
+      char expected = word.charAt(i);
+      if (expected >= 'A' && expected <= 'Z') expected = (char) (expected - 'A' + 'a');
+      if (c != expected) return false;
+    }
+    return true;
   }
 
   private static boolean sqlKeyword(String name) {

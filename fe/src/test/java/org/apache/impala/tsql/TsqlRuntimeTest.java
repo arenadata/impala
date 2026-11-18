@@ -29,6 +29,7 @@ public final class TsqlRuntimeTest {
     materializeAmountIsFourStatements();
     showColumnStatsUsesDistinctCount();
     procedureSetNumNodesIsVisible();
+    firstStatementUsesOneNode();
     castAsTypeConcatenates();
     createRuntimeDictParses();
     negativeArgumentSubstitutes();
@@ -276,6 +277,15 @@ public final class TsqlRuntimeTest {
     }
     check(sawMarker, "missing distinct-count insert: " + runner.sql);
     check(step.kind == TsqlRuntime.Kind.CLIENT_RESULT, "dict did not finish");
+  }
+
+  private static void firstStatementUsesOneNode() {
+    RecordingRunner runner = new RecordingRunner();
+    TsqlRuntime.Step step = runUntilClient("SELECT 1 AS result;\n", runner);
+    check("1".equals(step.procedureOptions.get("num_nodes")),
+        "default num_nodes was " + step.procedureOptions);
+    check("1".equals(step.procedureOptions.get("sync_ddl")),
+        "default sync_ddl was " + step.procedureOptions);
   }
 
   private static void procedureSetNumNodesIsVisible() {

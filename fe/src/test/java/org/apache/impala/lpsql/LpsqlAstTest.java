@@ -72,6 +72,8 @@ public final class LpsqlAstTest {
     expect("n = QUOTE_LITERAL(s);", "SetStmt n = Call QUOTE_LITERAL(Literal s)");
     expect("DECLARE n INT; SELECT n AS result;",
         "DeclareVar n INT\nBareSelect SELECT @n AS result");
+    expect("DECLARE n INT; SELECT n AS n;",
+        "DeclareVar n INT\nBareSelect SELECT @n AS n");
     expectFail("USE other;");
     expectFail("GOTO x;");
     expectFail("n %TYPE;");
