@@ -48,6 +48,13 @@ add_library(Service
 )
 add_dependencies(Service gen-deps)
 
+# ADH-TSQL. Kept off the upstream source list so a merge of that list does not conflict.
+target_sources(Service PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../tsql/tsql-flags.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/../tsql/tsql-child-query.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/../tsql/tsql-executor.cc
+)
+
 # this shared library provides Impala executor functionality to FE test.
 add_library(fesupport SHARED
   fe-support.cc

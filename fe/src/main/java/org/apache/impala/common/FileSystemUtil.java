@@ -128,6 +128,8 @@ public class FileSystemUtil {
           .add(SCHEME_ABFS)
           .add(SCHEME_ABFSS)
           .add(SCHEME_ADL)
+          // ADH-TSQL. The single-VM cluster uses TARGET_FILESYSTEM=local.
+          .add(SCHEME_FILE)
           .add(SCHEME_HDFS)
           .add(SCHEME_S3A)
           .add(SCHEME_OFS)

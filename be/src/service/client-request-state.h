@@ -20,6 +20,7 @@
 #include "common/atomic.h"
 #include "common/object-pool.h"
 #include "common/status.h"
+#include <memory>
 #include "exec/catalog-op-executor.h"
 #include "rpc/rpc-trace.h"
 #include "service/child-query.h"
@@ -39,6 +40,7 @@ namespace impala {
 
 class AdmissionControlClient;
 class ClientRequestStateCleaner;
+class TsqlExecutor;
 class Coordinator;
 class Expr;
 class Frontend;
@@ -548,6 +550,8 @@ class ClientRequestState {
   /// The coordinator is a friend class because it needs to be able to call
   /// UpdateEndTime() when a query's admission control resources are released.
   friend class Coordinator;
+  // ADH-TSQL. The executor materializes the procedure's final result set.
+  friend class TsqlExecutor;
 
   const TQueryCtx query_ctx_;
 
@@ -744,6 +748,8 @@ class ClientRequestState {
   /// The TExecRequest for the query tracked by this ClientRequestState. The TExecRequest
   /// is initialized once it's finalized. It's owned by the parent QueryDriver.
   AtomicPtr<const TExecRequest> exec_request_{&unknown_exec_request_};
+  // ADH-TSQL. Owned here so Cancel() can reach the in-flight child statement.
+  std::unique_ptr<TsqlExecutor> tsql_executor_;
 
   /// If true, effective_user() has access to the runtime profile and execution
   /// summary.
@@ -909,6 +915,8 @@ class ClientRequestState {
   void SetResultSet(const std::vector<std::string>& col1,
       const std::vector<std::string>& col2, const std::vector<std::string>& col3,
       const std::vector<std::string>& col4);
+  // ADH-TSQL. Replaces the schema and the rows together. Caller holds lock().
+  void SetResultSet(const TResultSetMetadata& metadata, std::vector<TResultRow> rows);
 
   /// Sets the result set for a CREATE TABLE AS SELECT statement. The results will not be
   /// ready until all BEs complete execution. This can be called as part of Wait(),

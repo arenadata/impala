@@ -32,6 +32,8 @@ public enum Privilege {
   SELECT,
   INSERT,
   REFRESH,
+  // ADH-TSQL. Invoke a stored procedure. Does not imply SELECT on objects the body reads.
+  EXECUTE,
   ALTER,
   DROP,
   CREATE,
@@ -53,10 +55,11 @@ public enum Privilege {
     INSERT.implied_ = EnumSet.of(INSERT);
     SELECT.implied_ = EnumSet.of(SELECT);
     REFRESH.implied_ = EnumSet.of(REFRESH);
+    EXECUTE.implied_ = EnumSet.of(EXECUTE);
     RWSTORAGE.implied_ = EnumSet.of(RWSTORAGE);
     VIEW_METADATA.implied_ = EnumSet.of(INSERT, SELECT, REFRESH);
     ANY.implied_ = EnumSet.of(ALL, OWNER, ALTER, DROP, CREATE, INSERT, SELECT,
-        REFRESH);
+        REFRESH, EXECUTE);
 
     for (Privilege privilege: values()) {
       Preconditions.checkNotNull(privilege.implied_);

@@ -501,6 +501,29 @@ class ImpalaShell(cmd.Cmd, object):
     args = ' '.join(tokens).strip()
     return args.rstrip(ImpalaShell.CMD_DELIM)
 
+  def _is_go_line(self, line):
+    """A T-SQL batch ends on a line that is only GO."""
+    return strip_comments(line).strip().upper() == 'GO'
+
+  def _batch_is_tsql(self, text):
+    """True when this batch must be sent whole, not cut at the first semicolon."""
+    stripped = strip_comments(text).strip()
+    if not stripped:
+      return False
+    head = stripped.split(None, 1)[0].upper()
+    if head in ('DECLARE', 'BEGIN', 'EXEC', 'EXECUTE', 'CALL'):
+      return True
+    if head != 'CREATE':
+      return False
+    rest = stripped[len('CREATE'):].lstrip().upper()
+    return rest.startswith('PROC') or rest.startswith('OR ALTER PROC')
+
+  def _strip_trailing_go(self, cmd):
+    lines = cmd.splitlines()
+    while lines and self._is_go_line(lines[-1]):
+      lines.pop()
+    return '\n'.join(lines)
+
   def _shlex_split(self, line):
     """Reimplement shlex.split() so that escaped single quotes
     are actually escaped. shlex.split() only escapes double quotes
@@ -524,6 +547,14 @@ class ImpalaShell(cmd.Cmd, object):
     # ending with a delimiter:
     # select 1 + 1; -- this is a comment
     line = strip_comments(line).rstrip()
+    if self._is_go_line(line):
+      return True
+    accumulated = line
+    if self.partial_cmd:
+      accumulated = '%s\n%s' % (self.partial_cmd, line)
+    # ADH-TSQL. A procedure body contains semicolons. Buffer until a GO line.
+    if self._batch_is_tsql(accumulated):
+      return False
     if line.endswith(ImpalaShell.CMD_DELIM):
       try:
         # Look for an open quotation in the entire command, and not just the
@@ -622,6 +653,8 @@ class ImpalaShell(cmd.Cmd, object):
       self.prompt = self.cached_prompt
     else:  # Input has a delimiter and partial_cmd is empty
       completed_cmd = sqlparse.format(cmd)
+    # ADH-TSQL. The GO line is the batch terminator, not part of the statement.
+    completed_cmd = self._strip_trailing_go(completed_cmd)
     return completed_cmd
 
   def _new_impala_client(self):
@@ -1897,6 +1930,23 @@ Welcome to the Impala shell.
 
 def parse_query_text(query_text):
   """Parse query file text to extract queries"""
+  # ADH-TSQL. A line that is only GO ends a batch. sqlparse.split would cut a
+  # procedure body at the first semicolon and at CASE ... END.
+  if any(strip_comments(line).strip().upper() == 'GO' for line in query_text.splitlines()):
+    batches = []
+    current = []
+    for line in query_text.splitlines():
+      if strip_comments(line).strip().upper() == 'GO':
+        text = '\n'.join(current).strip()
+        if text:
+          batches.append(text)
+        current = []
+      else:
+        current.append(line)
+    text = '\n'.join(current).strip()
+    if text:
+      batches.append(text)
+    return batches
   query_list = sqlparse.split(query_text)
   # Remove trailing comments in the input, if any. We do this because sqlparse splits the
   # input at query boundaries and associates the query only with preceding comments

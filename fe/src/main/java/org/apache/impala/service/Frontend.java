@@ -482,6 +482,9 @@ public class Frontend {
   // Stores metastore clients for direct accesses to HMS.
   private final MetaStoreClientPool metaStoreClientPool_;
 
+  // ADH-TSQL. Procedure definitions are stored in HMS from the coordinator.
+  public MetaStoreClientPool getMetaStoreClientPool() { return metaStoreClientPool_; }
+
   private final TransactionKeepalive transactionKeepalive_;
 
   private static ExecutorService checkAuthorizationPool_;
@@ -554,6 +557,8 @@ public class Frontend {
       saml2Client_ = null;
     }
     kuduTxnManager_ = new KuduTransactionManager();
+    // ADH-TSQL
+    org.apache.impala.tsql.TsqlBridge.bindFrontend(this);
   }
 
   /**
@@ -2603,6 +2608,10 @@ public class Frontend {
   private TExecRequest doCreateExecRequest(PlanCtx planCtx,
       EventSequence timeline) throws ImpalaException {
     TQueryCtx queryCtx = planCtx.getQueryContext();
+    // ADH-TSQL. A procedure batch returns its own TExecRequest and does not go
+    // through analysis. getPlannedExecRequest() only accepts query and DML.
+    TExecRequest tsqlRequest = org.apache.impala.tsql.TsqlFrontend.tryExecRequest(queryCtx);
+    if (tsqlRequest != null) return tsqlRequest;
     // Parse stmt and collect/load metadata to populate a stmt-local table cache
     StatementBase stmt = Parser.parse(
         queryCtx.client_request.stmt, queryCtx.client_request.query_options);

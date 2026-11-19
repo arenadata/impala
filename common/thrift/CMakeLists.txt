@@ -208,6 +208,7 @@ set (SRC_FILES
   SqlConstraints.thrift
   StatestoreService.thrift
   SystemTables.thrift
+  Tsql.thrift
   Zip.thrift
   ${TCLI_SERVICE_THRIFT}
   ${EXT_DATA_SRC_FILES}

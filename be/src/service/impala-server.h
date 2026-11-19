@@ -738,6 +738,8 @@ class ImpalaServer : public ImpalaServiceIf,
   friend class ImpalaServerTest;
   friend class QueryDriver;
   friend class QueryScanner;
+  // ADH-TSQL. Submits child statements without a client-controlled user overlay.
+  friend class TsqlChildQuery;
 
   static const string BEESWAX_SERVER_NAME;
   static const string HS2_SERVER_NAME;
@@ -800,7 +802,8 @@ class ImpalaServer : public ImpalaServiceIf,
   void ExecuteStatementCommon(
       apache::hive::service::cli::thrift::TExecuteStatementResp& return_val,
       const apache::hive::service::cli::thrift::TExecuteStatementReq& request,
-      const TExecRequest* external_exec_request = nullptr);
+      const TExecRequest* external_exec_request = nullptr,
+      const std::string* tsql_effective_user = nullptr);
 
   /// Registers the query with query_driver_map_ using the globally unique query_id. The
   /// caller must have checked out the session state.

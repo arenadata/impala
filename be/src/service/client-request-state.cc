@@ -17,6 +17,9 @@
 
 #include "service/client-request-state.h"
 
+#include "tsql/tsql-executor.h"
+#include "tsql/tsql-flags.h"
+
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
@@ -368,6 +371,28 @@ Status ClientRequestState::Exec() {
       DCHECK(exec_req.__isset.kill_query_request);
       LOG_AND_RETURN_IF_ERROR(ExecKillQueryRequest());
       break;
+    case TStmtType::TSQL: {
+      // ADH-TSQL. Finish the procedure before Exec() returns. impala-shell reads
+      // GetResultSetMetadata as soon as ExecuteStatement returns, so the schema
+      // has to be the final one. WaitInternal must not join this thread again.
+      DCHECK(exec_req.__isset.tsql_request);
+      if (!FLAGS_enable_tsql) {
+        return Status("T-SQL procedures are disabled (--enable_tsql=false)");
+      }
+      tsql_executor_.reset(new TsqlExecutor(this, parent_server_));
+      UpdateNonErrorExecState(ExecState::PENDING);
+      RETURN_IF_ERROR(Thread::Create("query-exec-state", "async-exec-thread",
+          &TsqlExecutor::Run, tsql_executor_.get(), &async_exec_thread_, true));
+      async_exec_thread_->Join();
+      async_exec_thread_.reset();
+      Status tsql_status;
+      {
+        lock_guard<mutex> l(lock_);
+        tsql_status = query_status_;
+      }
+      if (!tsql_status.ok()) return tsql_status;
+      break;
+    }
     default:
       return Status(Substitute("Unknown exec request stmt type: $0", exec_req.stmt_type));
   }
@@ -1572,6 +1597,8 @@ void ClientRequestState::Cancel(const Status* cause, bool wait_until_finalized) 
   // because a) ChildQuery::Cancel() calls back into ImpalaServer and b) cancellation
   // involves RPCs and can take quite some time.
   child_query_executor_->Cancel();
+  // ADH-TSQL
+  if (tsql_executor_ != nullptr) tsql_executor_->Cancel();
 
   // Ensure the parent query is cancelled if execution has started (if the query was not
   // started, cancellation is handled by the 'async-exec-thread' thread). 'lock_' should
@@ -1797,6 +1824,12 @@ void ClientRequestState::SetResultSet(const vector<string>& col1,
     (*request_result_set_.get())[i].colVals[1].__set_string_val(col2[i]);
     (*request_result_set_.get())[i].colVals[2].__set_string_val(col3[i]);
   }
+}
+
+void ClientRequestState::SetResultSet(const TResultSetMetadata& metadata,
+    vector<TResultRow> rows) {
+  result_metadata_ = metadata;
+  request_result_set_.reset(new vector<TResultRow>(std::move(rows)));
 }
 
 void ClientRequestState::SetResultSet(const vector<string>& col1,
