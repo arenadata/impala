@@ -2429,6 +2429,163 @@
     "key": "statestore2-subscriber.statestore-active-status"
   },
   {
+    "description": "Whether the subscriber is connected to the second Statestore instance.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Connectivity",
+    "units": "NONE",
+    "kind": "PROPERTY",
+    "key": "statestore2-subscriber.connected"
+  },
+  {
+    "description": "Number of times that the Daemon detected a loss of connectivity to the second Statestore instance.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Connectivity Loss Count.",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "statestore2-subscriber.num-connection-failures"
+  },
+  {
+    "description": "The time (sec) between heartbeats from the second Statestore instance.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Heartbeat Interval Time",
+    "units": "TIME_S",
+    "kind": "STATS",
+    "key": "statestore2-subscriber.heartbeat-interval-time"
+  },
+  {
+    "description": "The amount of time the StateStore subscriber took to recover the connection to the second Statestore instance the last time it was lost.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Last Recovery Duration",
+    "units": "TIME_S",
+    "kind": "GAUGE",
+    "key": "statestore2-subscriber.last-recovery-duration"
+  },
+  {
+    "description": "The local time that the last recovery of the connection to the second Statestore instance happened.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Last Recovery Time",
+    "units": "NONE",
+    "kind": "PROPERTY",
+    "key": "statestore2-subscriber.last-recovery-time"
+  },
+  {
+    "description": "The most recent registration ID for this subscriber with the second Statestore instance. Set to 'N/A' if no registration has been completed",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Registration Id",
+    "units": "NONE",
+    "kind": "PROPERTY",
+    "key": "statestore2-subscriber.registration-id"
+  },
+  {
+    "description": "The most recent statestore ID for this subscriber with the second Statestore instance. Set to 'N/A' if no registration has been completed",
+    "contexts": [
+      "ADMISSIOND",
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Id",
+    "units": "NONE",
+    "kind": "PROPERTY",
+    "key": "statestore2-subscriber.statestore-id"
+  },
+  {
+    "description": "The number of RPCs received from the second Statestore instance for updating catalogd.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Number of UpdateCatalogd RPCs from Second Statestore",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "statestore2-subscriber.num-update-catalogd-rpc"
+  },
+  {
+    "description": "The number of RPCs received from the second Statestore instance for updating role of statestored.",
+    "contexts": [
+      "ADMISSIOND",
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Number of UpdateStatestoredRole RPCs from Second Statestore",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "statestore2-subscriber.num-update-statestored-role-rpc"
+  },
+  {
+    "description": "The number of Re-Registration Attempts to the second Statestore instance.",
+    "contexts": [
+      "ADMISSIOND",
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Number of Re-Registration Attempts to Second Statestore",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "statestore2-subscriber.num-re-register-attempt"
+  },
+  {
+    "description": "Second Statestore Subscriber Topic $0 Processing Time",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Topic $0 Processing Time",
+    "units": "TIME_S",
+    "kind": "STATS",
+    "key": "statestore2-subscriber.topic-$0.processing-time-s"
+  },
+  {
+    "description": "Interval between updates from the second Statestore instance for Topic $0",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Topic $0 Update Interval",
+    "units": "TIME_S",
+    "kind": "STATS",
+    "key": "statestore2-subscriber.topic-$0.update-interval"
+  },
+  {
+    "description": "The time (sec) taken to process topic updates from the second Statestore instance.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Topic Update Duration",
+    "units": "TIME_S",
+    "kind": "STATS",
+    "key": "statestore2-subscriber.topic-update-duration"
+  },
+  {
+    "description": "The time (sec) between topic updates from the second Statestore instance.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Topic Update Interval Time",
+    "units": "TIME_S",
+    "kind": "STATS",
+    "key": "statestore2-subscriber.topic-update-interval-time"
+  },
+  {
     "description": "The time (sec) spent sending heartbeat RPCs. Includes subscriber-side processing time and network transmission time.",
     "contexts": [
       "STATESTORE"
