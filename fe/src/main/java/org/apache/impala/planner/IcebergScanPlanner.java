@@ -19,6 +19,7 @@ package org.apache.impala.planner;
 
 import com.google.common.base.Preconditions;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -38,6 +39,7 @@ import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileContent;
 import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.ExpressionUtil;
 import org.apache.iceberg.expressions.ExpressionVisitors;
@@ -69,6 +71,8 @@ import org.apache.impala.catalog.IcebergTable;
 import org.apache.impala.catalog.TableLoadingException;
 import org.apache.impala.catalog.Type;
 import org.apache.impala.catalog.VirtualColumn;
+import org.apache.impala.catalog.iceberg.IcebergAddedFiles;
+import org.apache.impala.catalog.iceberg.IcebergAddedFiles.GapException;
 import org.apache.impala.catalog.iceberg.IcebergMetadataTable;
 import org.apache.impala.common.AnalysisException;
 import org.apache.impala.common.IcebergPredicateConverter;
@@ -167,15 +171,32 @@ public class IcebergScanPlanner {
    * We can avoid calling Iceberg's expensive planFiles() API when the followings are
    * true:
    *  - we don't push down predicates
-   *  - no time travel
+   *  - the scanned snapshot is the one the file descriptors of the table were loaded
+   *    for: no time travel, or time travel to that snapshot
+   *  - no ICEBERG_ADDED_FILES_AFTER hint, or the table has no delete files: only
+   *    planFiles() tells which delete files apply to the added data files
    */
   private boolean needIcebergForPlanning() {
-    return !impalaIcebergPredicateMapping_.isEmpty()
-        || tblRef_.getTimeTravelSpec() != null;
+    if (!impalaIcebergPredicateMapping_.isEmpty()) return true;
+    if (snapshotId_ != getIceTable().snapshotId()) return true;
+    if (tblRef_.getIcebergAddedFilesAfter() == null) return false;
+    IcebergContentFileStore fileStore = getIceTable().getContentFileStore();
+    return !fileStore.getPositionDeleteFiles().isEmpty()
+        || !fileStore.getEqualityDeleteFiles().isEmpty();
   }
 
   private void setFileDescriptorsBasedOnFileStore() throws ImpalaException {
     IcebergContentFileStore fileStore = getIceTable().getContentFileStore();
+    Set<String> addedFiles = addedFilesOfHint();
+    if (addedFiles != null) {
+      for (String path : addedFiles) {
+        // An added file without a descriptor was removed before the scanned snapshot.
+        FileDescriptor fd =
+            fileStore.getDataFileDescriptor(IcebergUtil.getFilePathHash(path));
+        if (fd != null) dataFilesWithoutDeletes_.add(fd);
+      }
+      return;
+    }
     if (tblRef_.getSelectedDataFilesForOptimize() != null) {
       dataFilesWithoutDeletes_ = tblRef_.getSelectedDataFilesForOptimize();
     } else {
@@ -553,12 +574,17 @@ public class IcebergScanPlanner {
     Preconditions.checkState(equalityIdsToDeleteFiles_.isEmpty());
 
     TimeTravelSpec timeTravelSpec = tblRef_.getTimeTravelSpec();
+    Set<String> addedFiles = addedFilesOfHint();
 
     try (CloseableIterable<FileScanTask> fileScanTasks =
         IcebergUtil.planFiles(getIceTable(),
             new ArrayList<>(impalaIcebergPredicateMapping_.keySet()), timeTravelSpec)) {
       long dataFilesCacheMisses = 0;
       for (FileScanTask fileScanTask : fileScanTasks) {
+        // Neither the data file nor its delete files or residual are scanned.
+        if (addedFiles != null && !addedFiles.contains(fileScanTask.file().location())) {
+          continue;
+        }
         Expression residualExpr = fileScanTask.residual();
         if (residualExpr != null && !(residualExpr instanceof True)) {
           residualExpressions_.add(residualExpr);
@@ -592,6 +618,32 @@ public class IcebergScanPlanner {
           e);
     }
     updateDeleteStatistics();
+  }
+
+  /**
+   * Data files added after the snapshot of the ICEBERG_ADDED_FILES_AFTER hint up to the
+   * scanned snapshot; null without the hint. A gap that cannot be computed (e.g. its base
+   * snapshot expired) fails the query instead of scanning a different set of files.
+   */
+  private Set<String> addedFilesOfHint() throws ImpalaException {
+    Long base = tblRef_.getIcebergAddedFilesAfter();
+    if (base == null) return null;
+    try {
+      return IcebergAddedFiles.compute(getIceTable().getIcebergApiTable(), base,
+          snapshotId_).paths;
+    } catch (GapException e) {
+      if (e.kind() == GapException.Kind.NOT_ANCESTOR) {
+        throw new AnalysisException(String.format(
+            "Snapshot %d is not an ancestor of snapshot %d of table %s", base,
+            snapshotId_, getIceTable().getFullName()), e);
+      }
+      throw new AnalysisException(String.format(
+          "snapshot %d has no manifest list or operation", e.snapshotId()), e);
+    } catch (UncheckedIOException | NotFoundException e) {
+      throw new ImpalaRuntimeException(String.format(
+          "Failed to load data files for Iceberg table: %s", getIceTable().getFullName()),
+          e);
+    }
   }
 
   private void addEqualityDeletesAndIds(FileDescriptor fd) {

@@ -22,7 +22,6 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,7 +38,6 @@ import org.apache.impala.analysis.IcebergPartitionTransform;
 import org.apache.impala.catalog.iceberg.GroupedContentFiles;
 import org.apache.impala.common.ImpalaRuntimeException;
 import org.apache.impala.service.BackendConfig;
-import org.apache.impala.thrift.TAlterTableUpdateStatsParams;
 import org.apache.impala.thrift.TCatalogObjectType;
 import org.apache.impala.thrift.TCompressionCodec;
 import org.apache.impala.thrift.TGetPartialCatalogObjectRequest;
@@ -59,6 +57,8 @@ import org.apache.impala.thrift.TTableType;
 import org.apache.impala.util.EventSequence;
 import org.apache.impala.util.IcebergSchemaConverter;
 import org.apache.impala.util.IcebergUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Representation of an Iceberg table in the catalog cache.
@@ -84,6 +84,8 @@ import org.apache.impala.util.IcebergUtil;
  * 'impala.iceberg_read_puffin_stats' to false.
  */
 public class IcebergTable extends Table implements FeIcebergTable {
+  private static final Logger LOG = LoggerFactory.getLogger(IcebergTable.class);
+
   // Alias to the string key that identifies the storage handler for Iceberg tables.
   public static final String KEY_STORAGE_HANDLER =
       hive_metastoreConstants.META_TABLE_STORAGE;
@@ -119,6 +121,11 @@ public class IcebergTable extends Table implements FeIcebergTable {
   // stats are stored in HMS (i.e. not Puffin stats).
   public static final String COMPUTE_STATS_SNAPSHOT_IDS =
       "impala.computeStatsSnapshotIds";
+
+  // Table property: "false" (case-insensitive) makes COMPUTE STATS use NDV() and write
+  // no Puffin file. Any other value, or no property, leaves Puffin writing enabled.
+  public static final String ICEBERG_WRITE_PUFFIN_STATS =
+      "impala.iceberg_write_puffin_stats";
 
   // Internal Iceberg table property that specifies the absolute path of the current
   // table metadata. This property is only valid for tables in 'hive.catalog'.
@@ -458,8 +465,10 @@ public class IcebergTable extends Table implements FeIcebergTable {
         partitionStats_ = Utils.loadPartitionStats(this, icebergFiles);
         setIcebergTableStats();
         loadAllColumnStats(msClient, catalogTimeline);
-        applyPuffinNdvStats(catalogTimeline);
+        // After setAvroSchema: it rebuilds the columns of 'hdfsTable_' and reloads
+        // their stats from HMS, which would drop the Puffin NDVs set there.
         setAvroSchema(msClient, msTbl, fileStore_, catalogTimeline);
+        applyPuffinNdvStats(catalogTimeline);
 
         // We no longer need to keep Iceberg's content files in memory.
         hdfsTable_.setIcebergFiles(null);
@@ -517,12 +526,18 @@ public class IcebergTable extends Table implements FeIcebergTable {
         // mode: in local catalog mode, the catalog sends the stats in HMS objects, so
         // NDVs for unsupported types would be lost.
         if (ColumnStats.supportsNdv(colType)) {
-          col.getStats().setNumDistinctValues(ndv);
-
           // In local catalog mode, the stats sent from the catalog are those of
-          // 'hdfsTable_', not those of this class.
+          // 'hdfsTable_', not those of this class, so both copies must agree.
+          // The Avro load path takes the columns of 'hdfsTable_' from HMS, which may
+          // lag behind the Iceberg schema if another engine changed it.
           Column hdfsTableCol = hdfsTable_.getColumn(col.getName());
-          Preconditions.checkNotNull(hdfsTableCol);
+          if (hdfsTableCol == null) {
+            LOG.warn("Ignoring Puffin NDV of column {} of table {}: the column is "
+                + "missing from the HMS schema of the table.", col.getName(),
+                getFullName());
+            continue;
+          }
+          col.getStats().setNumDistinctValues(ndv);
           hdfsTableCol.getStats().setNumDistinctValues(ndv);
         }
       }
@@ -537,26 +552,6 @@ public class IcebergTable extends Table implements FeIcebergTable {
     String val = msTable_.getParameters().get(ICEBERG_DISABLE_READING_PUFFIN_STATS);
     if (val == null) return true;
     return Boolean.parseBoolean(val);
-  }
-
-  private long getLastComputeStatsTimeMs() {
-    String val = msTable_.getParameters().get(Table.TBL_PROP_LAST_COMPUTE_STATS_TIME);
-    try {
-      return Long.parseLong(val) * 1000;
-    } catch (Exception e) {
-      return -1;
-    }
-  }
-
-  private Set<Integer> collectFieldIdsWithNdvStats() {
-    Set<Integer> res = new HashSet<>();
-    for (Column col : colsByPos_) {
-      if (col.getStats().hasNumDistinctValues()) {
-        IcebergColumn iCol = (IcebergColumn) col;
-        res.add(iCol.getFieldId());
-      }
-    }
-    return res;
   }
 
   /**
@@ -749,51 +744,12 @@ public class IcebergTable extends Table implements FeIcebergTable {
     return fileStore_;
   }
 
-  /**
-   * The IcebergTable.COMPUTE_STATS_SNAPSHOT_IDS property stores the snapshot id for which
-   * stats have been computed, for each column. It is a comma-separated list of values of
-   * the form "fieldIdRangeStart[-fieldIdRangeEndIncl]:snapshotId". The fieldId part may
-   * be a single value or a contiguous, inclusive range.
-   *
-   * Storing the snapshot ids on a per-column basis is needed because COMPUTE STATS can be
-   * set to calculate stats for only a subset of the columns, and then a different subset
-   * in a subsequent run. The recency of the stats will then be different for each column.
-   *
-   * Storing the Iceberg field ids instead of column names makes the format easier to
-   * handle as we do not need to take care of escaping special characters.
-   */
-  public void updateComputeStatsIcebergSnapshotsProperty(
-      org.apache.hadoop.hive.metastore.api.Table msTbl,
-      TAlterTableUpdateStatsParams params) {
-    TreeMap<Integer, Long> computeStatsMap = getComputeStatsSnapshotMap(msTbl);
-
-    updateComputeStatsIcebergSnapshotMap(computeStatsMap, params);
-    String property =
-        IcebergUtil.ComputeStatsSnapshotPropertyConverter.mapToString(computeStatsMap);
-    msTbl.putToParameters(IcebergTable.COMPUTE_STATS_SNAPSHOT_IDS, property);
-  }
-
   private TreeMap<Integer, Long> getComputeStatsSnapshotMap(
       org.apache.hadoop.hive.metastore.api.Table msTbl) {
     String snapshotIds = msTbl.getParameters().get(
         IcebergTable.COMPUTE_STATS_SNAPSHOT_IDS);
 
     return IcebergUtil.ComputeStatsSnapshotPropertyConverter.stringToMap(snapshotIds);
-  }
-
-  private void updateComputeStatsIcebergSnapshotMap(Map<Integer, Long> map,
-      TAlterTableUpdateStatsParams params) {
-    // This will be -1 if there is no snapshot yet.
-    Preconditions.checkState(params.isSetSnapshot_id());
-    final long currentSnapshotId = params.snapshot_id;
-
-    // Insert/update columns for which we have computed stats.
-    if (params.isSetColumn_stats()) {
-      for (String colName : params.column_stats.keySet()) {
-        int fieldId = getIcebergApiTable().schema().findField(colName).fieldId();
-        map.put(fieldId, currentSnapshotId);
-      }
-    }
   }
 
 }

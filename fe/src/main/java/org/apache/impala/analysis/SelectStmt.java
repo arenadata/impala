@@ -1507,6 +1507,7 @@ public class SelectStmt extends QueryStmt {
    *  - stmt does not have HAVING clause
    *  - tableRefs contains only one BaseTableRef
    *  - tableRef doesn't have sampling param
+   *  - tableRef doesn't have the ICEBERG_ADDED_FILES_AFTER hint
    *  - table is the Iceberg table
    *  - SelectList must contains 'count(*)' or 'count(constant)'
    *  - SelectList can contain constant
@@ -1529,6 +1530,8 @@ public class SelectStmt extends QueryStmt {
     TableRef tableRef = tables.get(0);
     if (!(tableRef instanceof BaseTableRef)) return;
     if (tableRef.getSampleParams() != null) return;
+    // The count from table metadata would ignore the hint.
+    if (tableRef.getIcebergAddedFilesAfter() != null) return;
 
     TableName tableName = tableRef.getDesc().getTableName();
     FeTable table;

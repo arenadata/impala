@@ -452,6 +452,10 @@ public class BackendConfig {
     return backendCfg_.enable_reading_puffin_stats;
   }
 
+  public boolean isWritingPuffinStatsEnabled() {
+    return backendCfg_.enable_writing_puffin_stats;
+  }
+
   public boolean isJsonScannerEnabled() {
     return backendCfg_.enable_json_scanner;
   }

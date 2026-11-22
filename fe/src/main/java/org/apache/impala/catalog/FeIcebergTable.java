@@ -55,6 +55,7 @@ import org.apache.iceberg.util.PropertyUtil;
 import org.apache.iceberg.util.SnapshotUtil;
 import org.apache.impala.analysis.IcebergPartitionField;
 import org.apache.impala.analysis.IcebergPartitionSpec;
+import org.apache.impala.analysis.IcebergStatsBaseResolver;
 import org.apache.impala.analysis.LiteralExpr;
 import org.apache.impala.analysis.TimeTravelSpec;
 import org.apache.impala.analysis.TimeTravelSpec.Kind;
@@ -517,7 +518,8 @@ public interface FeIcebergTable extends FeFsTable {
         rowBuilder.add(rep.toString());
       }
       rowBuilder.add(table.getIcebergFileFormat().toString());
-      rowBuilder.add(Boolean.FALSE.toString());
+      rowBuilder.add(
+          String.valueOf(IcebergStatsBaseResolver.hasIncrementalBase(table)));
       rowBuilder.add(table.getLocation());
       rowBuilder.add(
           FileSystemUtil.getErasureCodingPolicy(new Path(table.getLocation())));
@@ -893,7 +895,7 @@ public interface FeIcebergTable extends FeFsTable {
      */
     public static long getRecordCountV2(FeIcebergTable table, TimeTravelSpec travelSpec)
         throws AnalysisException {
-      if (travelSpec == null) {
+      if (IcebergUtil.scansLoadedSnapshot(table, travelSpec)) {
         return table.getContentFileStore()
             .getDataFilesWithoutDeletes().stream()
             .mapToLong(file -> file.getFbFileMetadata().icebergMetadata().recordCount())
@@ -916,7 +918,7 @@ public interface FeIcebergTable extends FeFsTable {
      */
     public static boolean hasDeleteFiles(FeIcebergTable table,
         TimeTravelSpec travelSpec) throws AnalysisException {
-      if (travelSpec == null) {
+      if (IcebergUtil.scansLoadedSnapshot(table, travelSpec)) {
         IcebergContentFileStore fileStore = table.getContentFileStore();
         return !fileStore.getPositionDeleteFiles().isEmpty()
             || !fileStore.getEqualityDeleteFiles().isEmpty();

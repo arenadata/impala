@@ -126,6 +126,8 @@ endif()
 
 add_library(ExecTests STATIC
   acid-metadata-utils-test.cc
+  catalog-op-executor-iceberg-test.cc
+  catalog-op-executor-test.cc
   delimited-text-parser-test.cc
   hash-table-test.cc
   incr-stats-util-test.cc
@@ -138,6 +140,8 @@ add_dependencies(ExecTests gen-deps)
 
 ADD_UNIFIED_BE_LSAN_TEST(acid-metadata-utils-test ValidWriteIdListTest.*)
 ADD_UNIFIED_BE_LSAN_TEST(zigzag-test ZigzagTest.*)
+ADD_UNIFIED_BE_LSAN_TEST(catalog-op-executor-test CatalogOpExecutorTest.*)
+ADD_UNIFIED_BE_LSAN_TEST(catalog-op-executor-iceberg-test CatalogOpExecutorIcebergTest.*)
 ADD_UNIFIED_BE_LSAN_TEST(hash-table-test HashTableTest.*)
 ADD_UNIFIED_BE_LSAN_TEST(delimited-text-parser-test DelimitedTextParser.*)
 ADD_UNIFIED_BE_LSAN_TEST(read-write-util-test ReadWriteUtil.*)

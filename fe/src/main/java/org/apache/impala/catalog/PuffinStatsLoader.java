@@ -31,6 +31,7 @@ import com.google.common.base.Preconditions;
 import org.apache.datasketches.common.SketchesArgumentException;
 import org.apache.datasketches.memory.Memory;
 import org.apache.datasketches.theta.Sketches;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.hadoop.HadoopInputFile;
@@ -190,12 +191,17 @@ public class PuffinStatsLoader {
     return toCheckTs > baseTs;
   }
 
-  // Returns true if there are HMS stats for the column referenced by 'fieldId' that are
-  // at least as recent as the snapshot referenced by 'snapshotId'
+  // Returns true if there are HMS stats for the column referenced by 'fieldId' whose
+  // snapshot is strictly more recent than the snapshot referenced by 'snapshotId'
   private boolean hmsHasMoreRecentStats(int fieldId, long snapshotId) {
-    Long hmsSnapshot = fieldIdsWithHmsStats_.get(fieldId);
+    Long hmsSnapshotId = fieldIdsWithHmsStats_.get(fieldId);
+    if (hmsSnapshotId == null) return false;
+    // The snapshot of the HMS stats may have expired, or be -1 if the table had no
+    // snapshot at COMPUTE STATS time: then its time is unknown and the blob is used.
+    Snapshot hmsSnapshot = iceApiTable_.snapshot(hmsSnapshotId);
     if (hmsSnapshot == null) return false;
-    return isMoreRecentSnapshot(hmsSnapshot, snapshotId);
+    return hmsSnapshot.timestampMillis()
+        > iceApiTable_.snapshot(snapshotId).timestampMillis();
   }
 
   // Checks the metadata of 'statsFile' and loads NDV values where available.
@@ -270,8 +276,8 @@ public class PuffinStatsLoader {
 
       String colName = fieldIdToColName(fieldId);
       LOG.warn(String.format(
-            "Invalid NDV property in the statistics metadata for column %s: '%s'"),
-            colName, ndvProperty);
+            "Invalid NDV property in the statistics metadata for column %s: '%s'",
+            colName, ndvProperty));
       return -1;
     }
   }

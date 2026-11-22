@@ -17,7 +17,6 @@
 
 #include "service/client-request-state.h"
 
-#include <optional>
 
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -698,6 +697,30 @@ void ClientRequestState::FinishExecQueryOrDmlRequest() {
   UpdateNonErrorExecState(ExecState::RUNNING);
 }
 
+ComputeStatsChildQueries BuildComputeStatsChildQueries(
+    const TComputeStatsParams& params) {
+  ComputeStatsChildQueries result;
+  if (params.__isset.tbl_stats_query) {
+    result.table_index = result.queries.size();
+    result.queries.push_back({params.tbl_stats_query, "Table Stats Query", false});
+  }
+  if (params.__isset.col_stats_query) {
+    result.col_stats_index = result.queries.size();
+    result.queries.push_back({params.col_stats_query, "Column Stats Query",
+        !CatalogOpExecutor::IcebergColStatsQueryOptions(params).empty()});
+  }
+  if (params.__isset.iceberg_theta_query) {
+    result.theta_index = result.queries.size();
+    result.queries.push_back({params.iceberg_theta_query, "Theta Sketch Query", true});
+  }
+  if (result.queries.empty()) {
+    result.no_queries_message = params.__isset.no_child_queries_message ?
+        params.no_child_queries_message :
+        "No partitions selected for incremental stats update.";
+  }
+  return result;
+}
+
 Status ClientRequestState::ExecDdlRequestImplSync() {
 
   if (catalog_op_type() != TCatalogOpType::DDL &&
@@ -713,27 +736,23 @@ Status ClientRequestState::ExecDdlRequestImplSync() {
     RuntimeProfile* child_profile =
         RuntimeProfile::Create(&profile_pool_, "Child Queries");
     profile_->AddChild(child_profile);
-    // Add child queries for computing table and column stats.
+    ComputeStatsChildQueries planned =
+        BuildComputeStatsChildQueries(compute_stats_params);
     vector<ChildQuery> child_queries;
-    if (compute_stats_params.__isset.tbl_stats_query) {
+    for (const ComputeStatsChildQuery& planned_query : planned.queries) {
       RuntimeProfile* profile =
-          RuntimeProfile::Create(&profile_pool_, "Table Stats Query");
+          RuntimeProfile::Create(&profile_pool_, planned_query.profile_name);
       child_profile->AddChild(profile);
-      child_queries.emplace_back(compute_stats_params.tbl_stats_query, this,
-          parent_server_, profile, &profile_pool_);
-    }
-    if (compute_stats_params.__isset.col_stats_query) {
-      RuntimeProfile* profile =
-          RuntimeProfile::Create(&profile_pool_, "Column Stats Query");
-      child_profile->AddChild(profile);
-      child_queries.emplace_back(compute_stats_params.col_stats_query, this,
-          parent_server_, profile, &profile_pool_);
+      map<string, string> overrides;
+      if (planned_query.utc) overrides["TIMEZONE"] = "UTC";
+      child_queries.emplace_back(planned_query.query, this, parent_server_, profile,
+          &profile_pool_, move(overrides));
     }
 
     if (child_queries.size() > 0) {
       RETURN_IF_ERROR(child_query_executor_->ExecAsync(move(child_queries)));
     } else {
-      SetResultSet({"No partitions selected for incremental stats update."});
+      SetResultSet({planned.no_queries_message});
     }
     return Status::OK();
   }
@@ -1869,38 +1888,35 @@ void ClientRequestState::MarkActive() {
   ++ref_count_;
 }
 
-std::optional<long> getIcebergSnapshotId(const TExecRequest& exec_req) {
-  DCHECK(exec_req.__isset.catalog_op_request);
-  DCHECK(exec_req.catalog_op_request.__isset.ddl_params);
-  DCHECK(exec_req.catalog_op_request.ddl_params.__isset.compute_stats_params);
-
-  const TComputeStatsParams& compute_stats_params =
-    exec_req.catalog_op_request.ddl_params.compute_stats_params;
-  if (compute_stats_params.__isset.iceberg_snapshot_id) {
-    return std::optional<long>(compute_stats_params.iceberg_snapshot_id);
-  } else {
-    return {};
-  }
-}
-
 Status ClientRequestState::UpdateTableAndColumnStats(
     const vector<ChildQuery*>& child_queries) {
   DCHECK_GE(child_queries.size(), 1);
-  DCHECK_LE(child_queries.size(), 2);
+  DCHECK_LE(child_queries.size(), 3);
   catalog_op_executor_.reset(
       new CatalogOpExecutor(ExecEnv::GetInstance(), frontend_, server_profile_));
 
+  const TComputeStatsParams& compute_stats_params =
+      exec_request().catalog_op_request.ddl_params.compute_stats_params;
+  ComputeStatsChildQueries planned = BuildComputeStatsChildQueries(compute_stats_params);
+  DCHECK_EQ(child_queries.size(), planned.queries.size());
+  DCHECK_EQ(planned.table_index, 0);
   // If there was no column stats query, pass in empty thrift structures to
   // ExecComputeStats(). Otherwise pass in the column stats result.
   TTableSchema col_stats_schema;
   TRowSet col_stats_data;
-  if (child_queries.size() > 1) {
-    col_stats_schema = child_queries[1]->result_schema();
-    col_stats_data = child_queries[1]->result_data();
+  if (planned.col_stats_index >= 0) {
+    col_stats_schema = child_queries[planned.col_stats_index]->result_schema();
+    col_stats_data = child_queries[planned.col_stats_index]->result_data();
+  }
+  TTableSchema theta_stats_schema;
+  TRowSet theta_stats_data;
+  bool has_theta_query = planned.theta_index >= 0;
+  if (has_theta_query) {
+    theta_stats_schema = child_queries[planned.theta_index]->result_schema();
+    theta_stats_data = child_queries[planned.theta_index]->result_data();
   }
 
   const TExecRequest& exec_req = exec_request();
-  std::optional<long> snapshot_id = getIcebergSnapshotId(exec_req);
   Status status = catalog_op_executor_->ExecComputeStats(
       GetCatalogServiceRequestHeader(),
       exec_req.catalog_op_request,
@@ -1908,7 +1924,8 @@ Status ClientRequestState::UpdateTableAndColumnStats(
       child_queries[0]->result_data(),
       col_stats_schema,
       col_stats_data,
-      snapshot_id);
+      has_theta_query ? &theta_stats_schema : nullptr,
+      has_theta_query ? &theta_stats_data : nullptr);
   AddCatalogTimeline();
   {
     lock_guard<mutex> l(lock_);

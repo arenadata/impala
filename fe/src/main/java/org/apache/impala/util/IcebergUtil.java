@@ -315,6 +315,15 @@ public class IcebergUtil {
     return isHiveCatalog(msTable.getParameters());
   }
 
+  /**
+   * Returns true if commits of the Iceberg table 'msTable' update its HMS table: only
+   * synchronized tables of the HiveCatalog are integrated.
+   */
+  public static boolean isHmsIntegrated(
+      org.apache.hadoop.hive.metastore.api.Table msTable) {
+    return IcebergTable.isSynchronizedTable(msTable) && isHiveCatalog(msTable);
+  }
+
   public static boolean isHiveCatalog(Map<String, String> props) {
     TIcebergCatalog tCat = getTIcebergCatalog(props);
     if (tCat == TIcebergCatalog.HIVE_CATALOG) return true;
@@ -656,6 +665,15 @@ public class IcebergUtil {
     if (timeTravelSpec == null) return table.snapshotId();
     TableScan scan = createScanAsOf(table, timeTravelSpec);
     return scan.snapshot().snapshotId();
+  }
+
+  /**
+   * True if a scan with 'timeTravelSpec' (null: no time travel) reads the snapshot that
+   * the file descriptors of 'table' were loaded for: they list the files of the scan.
+   */
+  public static boolean scansLoadedSnapshot(FeIcebergTable table,
+      TimeTravelSpec timeTravelSpec) {
+    return getSnapshotId(table, timeTravelSpec) == table.snapshotId();
   }
 
   private static TableScan createScanAsOf(FeIcebergTable table,
@@ -1372,11 +1390,16 @@ public class IcebergUtil {
    * part may be a single value or a contiguous, inclusive range.
    */
   public static class ComputeStatsSnapshotPropertyConverter {
+    // The property can be set by hand, so a value expanding to more field ids than this
+    // is rejected as invalid before it is expanded.
+    public static final int MAX_FIELD_IDS = 100_000;
+
     public static TreeMap<Integer, Long> stringToMap(String snapshotIds) {
       TreeMap<Integer, Long> res = new TreeMap<Integer, Long>();
       if (snapshotIds == null) return res;
 
       String[] columns = snapshotIds.split(",");
+      long fieldIdCount = 0;
 
       for (String column : columns) {
         String[] colIdAndSnapshotId = column.split(":");
@@ -1390,12 +1413,17 @@ public class IcebergUtil {
 
           String[] colRange = colStr.split("-");
           if (colRange.length == 1) {
-            res.put(Integer.parseInt(colRange[0]), snapshotId);
+            int colId = Integer.parseInt(colRange[0]);
+            if (++fieldIdCount > MAX_FIELD_IDS) return logAndReturnEmptyMap(snapshotIds);
+            res.put(colId, snapshotId);
           } else if (colRange.length == 2) {
             int rangeStart = Integer.parseInt(colRange[0]);
             int rangeEnd = Integer.parseInt(colRange[1]);
-            for (int colId = rangeStart; colId <= rangeEnd; ++colId) {
-              res.put(colId, snapshotId);
+            fieldIdCount += Math.max(0L, (long) rangeEnd - rangeStart + 1);
+            if (fieldIdCount > MAX_FIELD_IDS) return logAndReturnEmptyMap(snapshotIds);
+            // A long counter: an int one would overflow and never end at MAX_VALUE.
+            for (long colId = rangeStart; colId <= rangeEnd; ++colId) {
+              res.put((int) colId, snapshotId);
             }
           } else {
             return logAndReturnEmptyMap(snapshotIds);

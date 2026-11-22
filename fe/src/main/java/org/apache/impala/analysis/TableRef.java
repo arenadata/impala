@@ -28,9 +28,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import javax.annotation.Nullable;
+
 import org.apache.impala.authorization.Privilege;
 import org.apache.impala.catalog.Column;
 import org.apache.impala.catalog.FeFsTable;
+import org.apache.impala.catalog.FeIcebergTable;
 import org.apache.impala.catalog.FeKuduTable;
 import org.apache.impala.catalog.FeTable;
 import org.apache.impala.catalog.HdfsPartition;
@@ -167,6 +170,9 @@ public class TableRef extends StmtNode {
   // Used only in PARTIAL optimization mode, otherwise it is null.
   private List<HdfsPartition.FileDescriptor> selectedDataFilesWithoutDeletesForOptimize_;
 
+  // Snapshot id from the ICEBERG_ADDED_FILES_AFTER hint; null if there is no hint.
+  private Long icebergAddedFilesAfter_;
+
   // END: Members that need to be reset()
   /////////////////////////////////////////
 
@@ -180,6 +186,8 @@ public class TableRef extends StmtNode {
   private long tableNumRowsHint_ = -1;
   // Table row hint name used in sql.
   private static final String TABLE_ROW_HINT = "TABLE_NUM_ROWS";
+  private static final String ICEBERG_ADDED_FILES_AFTER_HINT =
+      "ICEBERG_ADDED_FILES_AFTER";
 
   /**
    * Returns a new, resolved, and analyzed table ref.
@@ -271,6 +279,7 @@ public class TableRef extends StmtNode {
     zippingUnnestType_ = other.zippingUnnestType_;
     selectedDataFilesWithoutDeletesForOptimize_ =
         other.selectedDataFilesWithoutDeletesForOptimize_;
+    icebergAddedFilesAfter_ = other.icebergAddedFilesAfter_;
   }
 
   @Override
@@ -502,7 +511,8 @@ public class TableRef extends StmtNode {
     analyzeJoinHints(analyzer);
   }
 
-  private void analyzeTableHints(Analyzer analyzer) {
+  private void analyzeTableHints(Analyzer analyzer) throws AnalysisException {
+    analyzeIcebergAddedFilesHint(analyzer);
     if (tableHints_.isEmpty()) return;
     if (!(this instanceof BaseTableRef)) {
       analyzer.addWarning("Table hints not supported for inline view and collections");
@@ -516,6 +526,8 @@ public class TableRef extends StmtNode {
       isTableHintSupported = false;
     }
     for (PlanHint hint: tableHints_) {
+      // Already handled by analyzeIcebergAddedFilesHint().
+      if (hint.is(ICEBERG_ADDED_FILES_AFTER_HINT)) continue;
       if (hint.is("SCHEDULE_CACHE_LOCAL")) {
         analyzer.setHasPlanHints();
         replicaPreference_ = TReplicaPreference.CACHE_LOCAL;
@@ -558,6 +570,37 @@ public class TableRef extends StmtNode {
         addHintWarning(hint, analyzer);
       }
     }
+  }
+
+  /**
+   * An invalid ICEBERG_ADDED_FILES_AFTER hint is an error: ignoring it would make the
+   * scan read the whole table. Parsed before the other hints, which return early on
+   * some invalid input.
+   */
+  private void analyzeIcebergAddedFilesHint(Analyzer analyzer) throws AnalysisException {
+    PlanHint found = null;
+    for (PlanHint hint : tableHints_) {
+      if (!hint.is(ICEBERG_ADDED_FILES_AFTER_HINT)) continue;
+      if (found != null) throw icebergAddedFilesHintError();
+      found = hint;
+    }
+    if (found == null) return;
+    List<String> args = found.getArgs();
+    if (args == null || args.size() != 1 || !(this instanceof BaseTableRef)
+        || !(getResolvedPath().destTable() instanceof FeIcebergTable)) {
+      throw icebergAddedFilesHintError();
+    }
+    try {
+      icebergAddedFilesAfter_ = Long.parseLong(args.get(0));
+    } catch (NumberFormatException e) {
+      throw icebergAddedFilesHintError();
+    }
+    analyzer.setHasPlanHints();
+  }
+
+  private static AnalysisException icebergAddedFilesHintError() {
+    return new AnalysisException(ICEBERG_ADDED_FILES_AFTER_HINT
+        + " requires an Iceberg table and one snapshot id argument");
   }
 
   /**
@@ -812,6 +855,7 @@ public class TableRef extends StmtNode {
     desc_ = null;
     if (timeTravelSpec_ != null) timeTravelSpec_.reset();
     selectedDataFilesWithoutDeletesForOptimize_ = null;
+    icebergAddedFilesAfter_ = null;
   }
 
   public boolean isTableMaskingView() { return false; }
@@ -859,13 +903,28 @@ public class TableRef extends StmtNode {
     return selectedDataFilesWithoutDeletesForOptimize_;
   }
 
+  @Nullable
+  public Long getIcebergAddedFilesAfter() { return icebergAddedFilesAfter_; }
+
+  /**
+   * The ICEBERG_ADDED_FILES_AFTER hint stays on this table ref: only a scan of the
+   * Iceberg table can apply it, the masking view on top of it cannot.
+   */
   void migratePropertiesTo(TableRef other) {
     other.aliases_ = aliases_;
     other.onClause_ = onClause_;
     other.usingColNames_ = usingColNames_;
     other.joinOp_ = joinOp_;
     other.joinHints_ = joinHints_;
-    other.tableHints_ = tableHints_;
+    List<PlanHint> keptHints = new ArrayList<>();
+    other.tableHints_ = new ArrayList<>();
+    for (PlanHint hint : tableHints_) {
+      if (hint.is(ICEBERG_ADDED_FILES_AFTER_HINT)) {
+        keptHints.add(hint);
+      } else {
+        other.tableHints_.add(hint);
+      }
+    }
     other.timeTravelSpec_ = timeTravelSpec_;
     // Clear properties. Don't clear aliases_ since it's still used in resolving slots
     // in the query block of 'other'.
@@ -874,6 +933,6 @@ public class TableRef extends StmtNode {
     usingColNames_ = null;
     joinOp_ = null;
     joinHints_ = new ArrayList<>();
-    tableHints_ = new ArrayList<>();
+    tableHints_ = keptHints;
   }
 }

@@ -128,17 +128,21 @@ Status ChildQuery::ExecAndFetch() {
 
 void ChildQuery::SetQueryOptions(TExecuteStatementReq* exec_stmt_req) {
   map<string, string> conf;
-  TQueryOptionsToMap(parent_request_state_->exec_request().query_options, &conf);
-  // Ignore debug actions on child queries because they may cause deadlock.
-  map<string, string>::iterator it = conf.find("DEBUG_ACTION");
-  if (it != conf.end()) conf.erase(it);
-
-  if (parent_request_state_->exec_request().request_pool_set_by_frontend) {
-    // Remove REQUEST_POOL if this option was set by Frontend auto-scaling.
-    it = conf.find("REQUEST_POOL");
-    if (it != conf.end()) conf.erase(it);
-  }
+  BuildConfOverlay(parent_request_state_->exec_request().query_options,
+      parent_request_state_->exec_request().request_pool_set_by_frontend,
+      query_option_overrides_, &conf);
   exec_stmt_req->__set_confOverlay(conf);
+}
+
+void ChildQuery::BuildConfOverlay(const TQueryOptions& parent,
+    bool request_pool_set_by_frontend, const map<string, string>& overrides,
+    map<string, string>* conf) {
+  TQueryOptionsToMap(parent, conf);
+  // Ignore debug actions on child queries because they may cause deadlock.
+  conf->erase("DEBUG_ACTION");
+  // Remove REQUEST_POOL if this option was set by Frontend auto-scaling.
+  if (request_pool_set_by_frontend) conf->erase("REQUEST_POOL");
+  for (const auto& entry : overrides) (*conf)[entry.first] = entry.second;
 }
 
 void ChildQuery::Cancel() {

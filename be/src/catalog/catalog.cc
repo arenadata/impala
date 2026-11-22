@@ -48,6 +48,11 @@ DEFINE_int32(initial_hms_cnxn_timeout_s, 120,
     "before exiting.");
 DEFINE_bool(enable_reading_puffin_stats, false, "Impala will only read Iceberg Puffin "
     "stats files if this flag is set to true.");
+DEFINE_bool(enable_writing_puffin_stats, true, "If true, COMPUTE STATS on Iceberg "
+    "tables computes NDV with Iceberg-compatible theta sketches and registers them in "
+    "a Puffin statistics file; if false, NDV() is used and no Puffin file is written. "
+    "Set to false on coordinators while catalogd and coordinators run different "
+    "versions.");
 
 Catalog::Catalog() {
   JniMethodDescriptor methods[] = {

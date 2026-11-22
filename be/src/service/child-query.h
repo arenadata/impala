@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <map>
 #include <mutex>
 #include <string>
 
@@ -49,12 +50,14 @@ class ImpalaServer;
 class ChildQuery {
  public:
   ChildQuery(const std::string& query, ClientRequestState* parent_request_state,
-      ImpalaServer* parent_server, RuntimeProfile* profile, ObjectPool* profile_pool)
+      ImpalaServer* parent_server, RuntimeProfile* profile, ObjectPool* profile_pool,
+      std::map<std::string, std::string> query_option_overrides = {})
     : query_(query),
       parent_request_state_(parent_request_state),
       parent_server_(parent_server),
       profile_(profile),
       profile_pool_(profile_pool),
+      query_option_overrides_(std::move(query_option_overrides)),
       is_running_(false),
       is_cancelled_(false) {
     DCHECK(!query_.empty());
@@ -70,6 +73,7 @@ class ChildQuery {
       parent_server_(other.parent_server_),
       profile_(other.profile_),
       profile_pool_(other.profile_pool_),
+      query_option_overrides_(other.query_option_overrides_),
       is_running_(other.is_running_),
       is_cancelled_(other.is_cancelled_) {}
 
@@ -79,6 +83,7 @@ class ChildQuery {
     query_ = other.query_;
     parent_request_state_ = other.parent_request_state_;
     parent_server_ = other.parent_server_;
+    query_option_overrides_ = other.query_option_overrides_;
     is_running_ = other.is_running_;
     is_cancelled_ = other.is_cancelled_;
     return *this;
@@ -107,6 +112,14 @@ class ChildQuery {
   /// this query is a child query.
   static const string PARENT_QUERY_OPT;
 
+  /// Builds the HS2 conf overlay of a child query: the parent's query options without
+  /// DEBUG_ACTION (it may deadlock child queries) and without REQUEST_POOL if the
+  /// frontend chose it, then 'overrides' replace the options of the same name.
+  static void BuildConfOverlay(const TQueryOptions& parent,
+      bool request_pool_set_by_frontend,
+      const std::map<std::string, std::string>& overrides,
+      std::map<std::string, std::string>* conf);
+
  private:
   /// Sets the query options from the parent query in child's HS2 request.
   /// TODO: Consider moving this function into a more appropriate place.
@@ -130,6 +143,8 @@ class ChildQuery {
   /// The profile for the query is retrieved after Close() and added as a child.
   RuntimeProfile* profile_;
   ObjectPool* profile_pool_;
+
+  std::map<std::string, std::string> query_option_overrides_;
 
   /// Result metadata and result rows of query.
   apache::hive::service::cli::thrift::TGetResultSetMetadataResp meta_resp_;
