@@ -9,5 +9,8 @@ public interface TsqlProcedureStore {
   /** The stored batch, starting with TSQL or LPSQL, or null when absent. */
   String getSource(String database, String name);
 
+  /** Owner of a stored procedure, or null when the procedure is absent. */
+  String getOwner(String database, String name);
+
   java.util.List<String> list(String database);
 }

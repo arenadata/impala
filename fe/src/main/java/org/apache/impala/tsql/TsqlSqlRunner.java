@@ -10,6 +10,9 @@ import java.util.Map;
  * written back to the caller's session.
  */
 public interface TsqlSqlRunner {
+  /** How a value is written back into Impala SQL. */
+  enum ValueKind { TEXT, NUMBER, BOOLEAN }
+
   final class Cell {
     public final boolean isNull;
     public final String value;
@@ -33,12 +36,20 @@ public interface TsqlSqlRunner {
     public final List<List<Cell>> rows;
     public final int sqlcode;
     public final String error;
+    /** Parallel to {@link #columns}. Null means each cell's kind is inferred. */
+    public final List<ValueKind> columnKinds;
 
     public Result(List<String> columns, List<List<Cell>> rows, int sqlcode, String error) {
+      this(columns, rows, sqlcode, error, null);
+    }
+
+    public Result(List<String> columns, List<List<Cell>> rows, int sqlcode, String error,
+        List<ValueKind> columnKinds) {
       this.columns = columns;
       this.rows = rows;
       this.sqlcode = sqlcode;
       this.error = error;
+      this.columnKinds = columnKinds;
     }
 
     public boolean ok() {

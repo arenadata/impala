@@ -2,13 +2,14 @@
 #pragma once
 
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "common/status.h"
 #include "gen-cpp/TCLIService_types.h"
+#include "gen-cpp/Tsql_types.h"
 #include "gutil/macros.h"
-#include "util/spinlock.h"
 
 namespace impala {
 
@@ -28,6 +29,7 @@ class TsqlChildQuery {
   void Cancel();
 
   const std::vector<std::string>& columns() const { return columns_; }
+  const std::vector<TSqlValueKind::type>& column_kinds() const { return column_kinds_; }
   const std::vector<std::vector<std::string>>& values() const { return values_; }
   const std::vector<std::vector<bool>>& nulls() const { return nulls_; }
 
@@ -46,12 +48,14 @@ class TsqlChildQuery {
   ImpalaServer* server_;
   std::string sql_;
   std::string effective_user_;
-  SpinLock lock_;
+  // mutex, not a spinlock: Cancel() calls CancelOperation while holding it.
+  std::mutex lock_;
   bool cancelled_ = false;
   apache::hive::service::cli::thrift::TOperationHandle handle_;
   bool running_ = false;
   std::map<std::string, std::string> options_;
   std::vector<std::string> columns_;
+  std::vector<TSqlValueKind::type> column_kinds_;
   std::vector<std::vector<std::string>> values_;
   std::vector<std::vector<bool>> nulls_;
 

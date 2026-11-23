@@ -2593,7 +2593,7 @@ public class Frontend {
     TQueryCtx queryCtx = planCtx.getQueryContext();
     // ADH-TSQL. A procedure batch returns its own TExecRequest and does not go
     // through analysis. getPlannedExecRequest() only accepts query and DML.
-    TExecRequest tsqlRequest = org.apache.impala.tsql.TsqlFrontend.tryExecRequest(queryCtx);
+    TExecRequest tsqlRequest = org.apache.impala.tsql.TsqlFrontend.tryExecRequest(this, queryCtx);
     if (tsqlRequest != null) return tsqlRequest;
     // Parse stmt and collect/load metadata to populate a stmt-local table cache
     StatementBase stmt = Parser.parse(

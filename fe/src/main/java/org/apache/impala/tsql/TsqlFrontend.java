@@ -3,9 +3,12 @@ package org.apache.impala.tsql;
 import java.util.ArrayList;
 import java.util.Collections;
 
+import org.apache.impala.authorization.AuthorizationException;
 import org.apache.impala.catalog.PrimitiveType;
 import org.apache.impala.common.AnalysisException;
+import org.apache.impala.common.ImpalaException;
 import org.apache.impala.lpsql.LpsqlParser;
+import org.apache.impala.service.Frontend;
 import org.apache.impala.catalog.ScalarType;
 import org.apache.impala.thrift.TColumn;
 import org.apache.impala.thrift.TExecRequest;
@@ -22,21 +25,32 @@ import org.apache.impala.util.TSessionStateUtil;
 public final class TsqlFrontend {
   private TsqlFrontend() {}
 
-  public static TExecRequest tryExecRequest(TQueryCtx queryCtx) throws AnalysisException {
+  public static TExecRequest tryExecRequest(Frontend frontend, TQueryCtx queryCtx)
+      throws ImpalaException {
     if (queryCtx == null || queryCtx.client_request == null
         || queryCtx.client_request.stmt == null) {
       return null;
     }
     String sql = queryCtx.client_request.stmt;
+    TsqlAst.Script script;
     if (LpsqlParser.looksLikeLpsql(sql)) {
-      rejectUnlessParsed(sql, true);
+      script = rejectUnlessParsed(sql, true);
     } else if (TsqlParser.looksLikeTsql(sql)) {
-      rejectUnlessParsed(sql, false);
+      script = rejectUnlessParsed(sql, false);
     } else {
       return null;
     }
 
     String user = TSessionStateUtil.getEffectiveUser(queryCtx.session);
+    String database = queryCtx.session.database;
+    TsqlAccess access = frontend == null ? TsqlAccess.OWNER_ONLY : new TsqlImpalaAccess(frontend);
+    for (TsqlAst.Stmt stmt : script.statements) {
+      if (!(stmt instanceof TsqlAst.CreateProc)) continue;
+      if (access.canCreate(database, user)) continue;
+      throw new AuthorizationException(String.format(
+          "User '%s' does not have privileges to CREATE procedures in database '%s'",
+          user, database));
+    }
     TSqlRequest tsql = new TSqlRequest();
     tsql.setSource(sql);
     tsql.setDatabase(queryCtx.session.database);
@@ -60,12 +74,13 @@ public final class TsqlFrontend {
     return request;
   }
 
-  private static void rejectUnlessParsed(String sql, boolean lpsql) throws AnalysisException {
+  private static TsqlAst.Script rejectUnlessParsed(String sql, boolean lpsql)
+      throws AnalysisException {
     // Reject the batch here so a syntax error is a normal analysis failure
     // rather than a coordinator crash after the handle is returned.
     try {
-      if (lpsql) LpsqlParser.parse(sql);
-      else TsqlParser.parse(sql);
+      if (lpsql) return LpsqlParser.parse(sql);
+      return TsqlParser.parse(sql);
     } catch (TsqlParser.ParseException e) {
       throw new AnalysisException(e.getMessage());
     }

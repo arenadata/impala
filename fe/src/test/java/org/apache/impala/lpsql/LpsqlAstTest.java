@@ -21,7 +21,7 @@ public final class LpsqlAstTest {
         "CreateProc p lpsql\n  Param x INT in\n  Param y STRING out");
     expect("DECLARE n INT;", "DeclareVar n INT");
     expect("DECLARE n INT = 1;", "DeclareVar n INT = Literal 1");
-    expect("DECLARE s = 'a';", "DeclareVar s STRING = Literal 'a'");
+    expect("DECLARE s = 'a';", "DeclareVar s null = Literal 'a'");
     expect("n = 1;", "SetStmt n = Literal 1");
     expect("IF n > 0 THEN SET n = 1; ELSE SET n = 2; END IF;",
         "IfStmt (Literal n > Literal 0)\n"
@@ -35,7 +35,7 @@ public final class LpsqlAstTest {
         "WhileStmt Literal 1\n  BreakStmt");
     expect("FOR i IN 1..n LOOP LEAVE; END LOOP;",
         "SetStmt i = Literal 1\n"
-            + "DeclareVar lpsql_for_hi_1 STRING = Literal n\n"
+            + "DeclareVar lpsql_for_hi_1 BIGINT = Literal n\n"
             + "WhileStmt (Var i <= Var lpsql_for_hi_1)\n"
             + "  BreakStmt\n"
             + "  SetStmt i = (Var i + Literal 1)");

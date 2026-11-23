@@ -1,10 +1,12 @@
 package org.apache.impala.tsql;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import org.apache.impala.lpsql.LpsqlParser;
 
@@ -52,9 +54,22 @@ public final class TsqlRuntime {
 
   private static final class Cursor {
     List<String> columns = new ArrayList<String>();
+    List<TsqlSqlRunner.ValueKind> kinds = new ArrayList<TsqlSqlRunner.ValueKind>();
     List<List<TsqlSqlRunner.Cell>> rows = new ArrayList<List<TsqlSqlRunner.Cell>>();
     int index = -1;
     boolean open;
+  }
+
+  /** A procedure value. A null kind means the declared type, or the text, decides. */
+  static final class Value {
+    static final Value NULL = new Value(null, TsqlSqlRunner.ValueKind.TEXT);
+    final String text;
+    final TsqlSqlRunner.ValueKind kind;
+
+    Value(String text, TsqlSqlRunner.ValueKind kind) {
+      this.text = text;
+      this.kind = kind;
+    }
   }
 
   private static final class Frame {
@@ -73,9 +88,14 @@ public final class TsqlRuntime {
 
   private final TsqlProcedureStore store;
   private final String database;
-  private final String owner;
-  private final Map<String, String> vars = new HashMap<String, String>();
-  private final Map<String, Boolean> nulls = new HashMap<String, Boolean>();
+  private final String user;
+  private final TsqlAccess access;
+  private final Map<String, Value> vars = new HashMap<String, Value>();
+  /** Null value means the kind is inferred from the assigned text. */
+  private final Map<String, TsqlSqlRunner.ValueKind> declared =
+      new HashMap<String, TsqlSqlRunner.ValueKind>();
+  private static final Pattern SQL_NUMBER =
+      Pattern.compile("[+-]?(\\d+(\\.\\d*)?|\\.\\d+)([eE][+-]?\\d+)?");
   private final Map<String, String> procedureOptions = new HashMap<String, String>();
   private final Map<String, Cursor> cursors = new HashMap<String, Cursor>();
   private final List<Frame> stack = new ArrayList<Frame>();
@@ -93,17 +113,18 @@ public final class TsqlRuntime {
   private int lastError;
   private int sqlCode;
 
-  public TsqlRuntime(String source, String database, String owner, TsqlProcedureStore store) {
+  public TsqlRuntime(String source, String database, String user, TsqlProcedureStore store) {
+    this(source, database, user, store, TsqlAccess.OWNER_ONLY);
+  }
+
+  public TsqlRuntime(String source, String database, String user, TsqlProcedureStore store,
+      TsqlAccess access) {
     this.database = database == null ? "default" : database;
-    this.owner = owner == null ? "" : owner;
+    this.user = user == null ? "" : user;
+    this.access = access == null ? TsqlAccess.OWNER_ONLY : access;
     this.originalSource = source == null ? "" : source;
     this.store = store == null ? new MemoryStore() : store;
-    // A table created in this session has no stats yet. Impala then plans a
-    // distributed scan, and on a local filesystem every executor reads the same
-    // file. The second call is right because the catalog now knows the file
-    // size and uses one node. These options make the first call do that too.
-    procedureOptions.put("num_nodes", "1");
-    procedureOptions.put("sync_ddl", "1");
+    // Each child DDL must finish before the next step reads its result.
     procedureOptions.put("enable_async_ddl_execution", "0");
     TsqlAst.Script script = parseDialect(this.originalSource);
     stack.add(new Frame(script.statements, null, null));
@@ -163,13 +184,13 @@ public final class TsqlRuntime {
   private Step exec(TsqlAst.Stmt stmt, Frame frame) {
     if (stmt instanceof TsqlAst.DeclareVar) {
       TsqlAst.DeclareVar d = (TsqlAst.DeclareVar) stmt;
-      if (d.initializer == null) setVar(d.name, null);
-      else setVar(d.name, eval(d.initializer));
+      noteType(d.name, d.typeName);
+      setVar(d.name, d.initializer == null ? Value.NULL : evalValue(d.initializer));
       return null;
     }
     if (stmt instanceof TsqlAst.SetStmt) {
       TsqlAst.SetStmt s = (TsqlAst.SetStmt) stmt;
-      setVar(s.name, eval(s.value));
+      setVar(s.name, evalValue(s.value));
       return null;
     }
     if (stmt instanceof TsqlAst.SelectAssign) {
@@ -265,14 +286,11 @@ public final class TsqlRuntime {
       c.index++;
       if (c.index >= c.rows.size()) {
         fetchStatus = -1;
-        for (String target : f.targets) setVar(target, null);
+        for (String target : f.targets) setVar(target, Value.NULL);
       } else {
         fetchStatus = 0;
         List<TsqlSqlRunner.Cell> row = c.rows.get(c.index);
-        for (int i = 0; i < f.targets.size(); i++) {
-          if (i < row.size() && !row.get(i).isNull) setVar(f.targets.get(i), row.get(i).value);
-          else setVar(f.targets.get(i), null);
-        }
+        for (int i = 0; i < f.targets.size(); i++) setVar(f.targets.get(i), cellValue(c.kinds, row, i));
       }
       sqlCode = fetchStatus;
       return null;
@@ -282,10 +300,23 @@ public final class TsqlRuntime {
     }
     if (stmt instanceof TsqlAst.CreateProc) {
       TsqlAst.CreateProc proc = (TsqlAst.CreateProc) stmt;
+      if (!access.canCreate(database, user)) {
+        throw new TsqlParser.ParseException(String.format(
+            "User '%s' does not have privileges to CREATE procedures in database '%s'",
+            user, database));
+      }
+      String current = store.getOwner(database, proc.name);
+      if (current != null && !current.equals(user) && !access.canReplaceAny(database, user)) {
+        throw new TsqlParser.ParseException(String.format(
+            "Procedure %s.%s is owned by '%s'. Only the owner or a user with ALL on "
+                + "database %s may replace it",
+            database, proc.name, current, database));
+      }
       String stored = originalSource == null ? "" : originalSource;
       proc.source = stored;
       defined.put(proc.name.toLowerCase(Locale.ROOT), proc);
-      store.upsert(database, proc.name, owner, proc.executeAsOwner, stored);
+      store.upsert(database, proc.name, current != null ? current : user,
+          proc.executeAsOwner, stored);
       return null;
     }
     throw new TsqlParser.ParseException("Unsupported statement");
@@ -312,8 +343,10 @@ public final class TsqlRuntime {
           "Procedure " + call.name + " expects " + found.params.size() + " arguments");
     }
     for (int i = 0; i < found.params.size(); i++) {
-      TsqlAst.Arg arg = matchArg(call, found.params.get(i), i);
-      setVar(found.params.get(i).name, eval(arg.value));
+      TsqlAst.Param param = found.params.get(i);
+      TsqlAst.Arg arg = matchArg(call, param, i);
+      noteType(param.name, param.typeName);
+      setVar(param.name, evalValue(arg.value));
     }
     stack.add(new Frame(found.body, null, null));
   }
@@ -352,6 +385,8 @@ public final class TsqlRuntime {
       Cursor c = cursor(waitCursor);
       c.rows = previous == null ? new ArrayList<List<TsqlSqlRunner.Cell>>() : previous.rows;
       c.columns = previous == null ? new ArrayList<String>() : new ArrayList<String>(previous.columns);
+      c.kinds = previous == null || previous.columnKinds == null
+          ? new ArrayList<TsqlSqlRunner.ValueKind>() : new ArrayList<TsqlSqlRunner.ValueKind>(previous.columnKinds);
       c.index = -1;
       c.open = true;
       fetchStatus = c.rows.isEmpty() ? -1 : 0;
@@ -359,14 +394,11 @@ public final class TsqlRuntime {
       return;
     }
     if (waitAssign != null) {
-      if (previous == null || previous.rows.isEmpty()) {
-        for (String target : waitAssign) setVar(target, null);
-      } else {
-        List<TsqlSqlRunner.Cell> row = previous.rows.get(0);
-        for (int i = 0; i < waitAssign.size(); i++) {
-          if (i < row.size() && !row.get(i).isNull) setVar(waitAssign.get(i), row.get(i).value);
-          else setVar(waitAssign.get(i), null);
-        }
+      List<TsqlSqlRunner.Cell> row = previous == null || previous.rows.isEmpty()
+          ? null : previous.rows.get(0);
+      List<TsqlSqlRunner.ValueKind> kinds = previous == null ? null : previous.columnKinds;
+      for (int i = 0; i < waitAssign.size(); i++) {
+        setVar(waitAssign.get(i), row == null ? Value.NULL : cellValue(kinds, row, i));
       }
       waitAssign = null;
     }
@@ -380,7 +412,7 @@ public final class TsqlRuntime {
         frame.handling = true;
         frame.index = frame.body.size();
         stack.add(new Frame(frame.handler, null, null));
-        setVar("ERROR_MESSAGE", message);
+        setVar("ERROR_MESSAGE", new Value(message, TsqlSqlRunner.ValueKind.TEXT));
         return true;
       }
     }
@@ -407,118 +439,161 @@ public final class TsqlRuntime {
     return new HashMap<String, String>(procedureOptions);
   }
 
-  private void setVar(String name, String value) {
+  private void noteType(String name, String typeName) {
+    declared.put(name.toLowerCase(Locale.ROOT), kindOfType(typeName));
+  }
+
+  private void setVar(String name, Value value) {
+    if (value == null) value = Value.NULL;
     String key = name.toLowerCase(Locale.ROOT);
-    if (value == null) {
-      nulls.put(key, Boolean.TRUE);
-      vars.remove(key);
-    } else {
-      nulls.put(key, Boolean.FALSE);
-      vars.put(key, value);
+    TsqlSqlRunner.ValueKind kind = declared.containsKey(key) ? declared.get(key) : value.kind;
+    if (kind == null) kind = inferKind(value.text);
+    if (value.text != null && kind == TsqlSqlRunner.ValueKind.NUMBER && !isSqlNumber(value.text)) {
+      throw new TsqlParser.ParseException(
+          "Cannot assign '" + value.text + "' to numeric @" + name);
     }
+    String text = value.text;
+    if (text != null && kind == TsqlSqlRunner.ValueKind.NUMBER) text = text.trim();
+    vars.put(key, new Value(text, kind));
   }
 
   private String eval(TsqlAst.Expr expr) {
-    if (expr instanceof TsqlAst.Literal) {
-      TsqlAst.Literal lit = (TsqlAst.Literal) expr;
-      return lit.text;
-    }
-    if (expr instanceof TsqlAst.Var) {
-      String key = ((TsqlAst.Var) expr).name.toLowerCase(Locale.ROOT);
-      if (key.equals("fetch_status")) return Integer.toString(fetchStatus);
-      if (key.equals("error")) return Integer.toString(lastError);
-      if (key.equals("sqlcode")) return Integer.toString(sqlCode);
-      if (Boolean.TRUE.equals(nulls.get(key))) return null;
-      return vars.get(key);
-    }
-    if (expr instanceof TsqlAst.CursorField) {
-      TsqlAst.CursorField field = (TsqlAst.CursorField) expr;
-      Cursor c = cursor(field.cursor);
-      if (!c.open || c.index < 0 || c.index >= c.rows.size()) {
-        throw new TsqlParser.ParseException("Cursor " + field.cursor + " has no current row");
-      }
-      int col = -1;
-      for (int i = 0; i < c.columns.size(); i++) {
-        if (c.columns.get(i) != null && c.columns.get(i).equalsIgnoreCase(field.field)) {
-          col = i;
-          break;
-        }
-      }
-      if (col < 0) {
-        throw new TsqlParser.ParseException(
-            "Cursor " + field.cursor + " has no column " + field.field);
-      }
-      List<TsqlSqlRunner.Cell> row = c.rows.get(c.index);
-      if (col >= row.size() || row.get(col).isNull) return null;
-      return row.get(col).value;
-    }
+    Value value = evalValue(expr);
+    return value == null ? null : value.text;
+  }
+
+  private Value evalValue(TsqlAst.Expr expr) {
+    if (expr instanceof TsqlAst.Literal) return literalValue((TsqlAst.Literal) expr);
+    if (expr instanceof TsqlAst.Var) return varValue(((TsqlAst.Var) expr).name);
+    if (expr instanceof TsqlAst.CursorField) return cursorValue((TsqlAst.CursorField) expr);
     if (expr instanceof TsqlAst.IsNull) {
       TsqlAst.IsNull isNull = (TsqlAst.IsNull) expr;
       boolean nil = eval(isNull.inner) == null;
       boolean result = isNull.negated ? !nil : nil;
-      return result ? "1" : "0";
+      return flag(result);
     }
     if (expr instanceof TsqlAst.Unary) {
-      boolean v = truth(eval(((TsqlAst.Unary) expr).inner));
-      return v ? "0" : "1";
+      return flag(!truth(eval(((TsqlAst.Unary) expr).inner)));
     }
-    if (expr instanceof TsqlAst.Binary) {
-      TsqlAst.Binary b = (TsqlAst.Binary) expr;
-      if (b.op.equals("AND")) return truth(eval(b.left)) && truth(eval(b.right)) ? "1" : "0";
-      if (b.op.equals("OR")) return truth(eval(b.left)) || truth(eval(b.right)) ? "1" : "0";
-      if (b.op.equals("||")) {
-        String l = eval(b.left);
-        String r = eval(b.right);
-        if (l == null) l = "";
-        if (r == null) r = "";
-        return l + r;
+    if (expr instanceof TsqlAst.Binary) return binaryValue((TsqlAst.Binary) expr);
+    if (expr instanceof TsqlAst.Call) return callValue((TsqlAst.Call) expr);
+    return Value.NULL;
+  }
+
+  private static Value literalValue(TsqlAst.Literal lit) {
+    if (lit.text == null) return Value.NULL;
+    if (lit.string) return new Value(lit.text, TsqlSqlRunner.ValueKind.TEXT);
+    if (isSqlNumber(lit.text)) return new Value(lit.text, TsqlSqlRunner.ValueKind.NUMBER);
+    if (lit.text.equalsIgnoreCase("true") || lit.text.equalsIgnoreCase("false")) {
+      return new Value(lit.text, TsqlSqlRunner.ValueKind.BOOLEAN);
+    }
+    return new Value(lit.text, TsqlSqlRunner.ValueKind.TEXT);
+  }
+
+  private Value varValue(String name) {
+    String key = name.toLowerCase(Locale.ROOT);
+    if (key.equals("fetch_status")) return new Value(Integer.toString(fetchStatus), TsqlSqlRunner.ValueKind.NUMBER);
+    if (key.equals("error")) return new Value(Integer.toString(lastError), TsqlSqlRunner.ValueKind.NUMBER);
+    if (key.equals("sqlcode")) return new Value(Integer.toString(sqlCode), TsqlSqlRunner.ValueKind.NUMBER);
+    Value value = vars.get(key);
+    return value == null ? Value.NULL : value;
+  }
+
+  private Value cursorValue(TsqlAst.CursorField field) {
+    Cursor c = cursor(field.cursor);
+    if (!c.open || c.index < 0 || c.index >= c.rows.size()) {
+      throw new TsqlParser.ParseException("Cursor " + field.cursor + " has no current row");
+    }
+    int col = -1;
+    for (int i = 0; i < c.columns.size(); i++) {
+      if (c.columns.get(i) != null && c.columns.get(i).equalsIgnoreCase(field.field)) {
+        col = i;
+        break;
       }
-      if (b.op.equals("+")) {
-        String l = eval(b.left);
-        String r = eval(b.right);
-        if (l == null) l = "";
-        if (r == null) r = "";
-        if (isNumber(l) && isNumber(r)) return strip(Double.parseDouble(l) + Double.parseDouble(r));
-        return l + r;
-      }
-      if (b.op.equals("-")) {
-        return strip(number(eval(b.left)) - number(eval(b.right)));
-      }
+    }
+    if (col < 0) {
+      throw new TsqlParser.ParseException(
+          "Cursor " + field.cursor + " has no column " + field.field);
+    }
+    return cellValue(c.kinds, c.rows.get(c.index), col);
+  }
+
+  private Value binaryValue(TsqlAst.Binary b) {
+    if (b.op.equals("AND")) return flag(truth(eval(b.left)) && truth(eval(b.right)));
+    if (b.op.equals("OR")) return flag(truth(eval(b.left)) || truth(eval(b.right)));
+    if (b.op.equals("||")) {
       String l = eval(b.left);
       String r = eval(b.right);
-      int cmp = compare(l, r);
-      boolean ok;
-      if (b.op.equals("=")) ok = cmp == 0;
-      else if (b.op.equals("!=") || b.op.equals("<>")) ok = cmp != 0;
-      else if (b.op.equals("<")) ok = cmp < 0;
-      else if (b.op.equals(">")) ok = cmp > 0;
-      else if (b.op.equals("<=")) ok = cmp <= 0;
-      else if (b.op.equals(">=")) ok = cmp >= 0;
-      else ok = false;
-      return ok ? "1" : "0";
+      if (l == null) l = "";
+      if (r == null) r = "";
+      return new Value(l + r, TsqlSqlRunner.ValueKind.TEXT);
     }
-    if (expr instanceof TsqlAst.Call) {
-      TsqlAst.Call call = (TsqlAst.Call) expr;
-      String name = call.name.toUpperCase(Locale.ROOT);
-      if (name.equals("QUOTE_LITERAL")) {
-        return quoteLiteral(asString(eval(call.args.get(0))));
+    if (b.op.equals("+")) {
+      Value l = evalValue(b.left);
+      Value r = evalValue(b.right);
+      String lt = l.text == null ? "" : l.text;
+      String rt = r.text == null ? "" : r.text;
+      if (numericPair(l, r)) {
+        return new Value(decimalText(decimal(lt).add(decimal(rt))), TsqlSqlRunner.ValueKind.NUMBER);
       }
-      if (name.equals("CURRENT_DATABASE")) return database;
-      if (name.equals("CAST")) {
-        return asString(eval(call.args.get(0)));
-      }
-      if (name.equals("SPLIT_PART")) {
-        String text = asString(eval(call.args.get(0)));
-        String delim = asString(eval(call.args.get(1)));
-        int n = (int) number(eval(call.args.get(2)));
-        if (text == null) return "";
-        String[] parts = text.split(java.util.regex.Pattern.quote(delim), -1);
-        if (n < 1 || n > parts.length) return "";
-        return parts[n - 1].trim();
-      }
-      throw new TsqlParser.ParseException("Unknown function " + call.name);
+      return new Value(lt + rt, TsqlSqlRunner.ValueKind.TEXT);
     }
-    return null;
+    if (b.op.equals("-")) {
+      return new Value(decimalText(decimal(eval(b.left)).subtract(decimal(eval(b.right)))),
+          TsqlSqlRunner.ValueKind.NUMBER);
+    }
+    int cmp = compareValues(evalValue(b.left), evalValue(b.right));
+    boolean ok;
+    if (b.op.equals("=")) ok = cmp == 0;
+    else if (b.op.equals("!=") || b.op.equals("<>")) ok = cmp != 0;
+    else if (b.op.equals("<")) ok = cmp < 0;
+    else if (b.op.equals(">")) ok = cmp > 0;
+    else if (b.op.equals("<=")) ok = cmp <= 0;
+    else if (b.op.equals(">=")) ok = cmp >= 0;
+    else ok = false;
+    return flag(ok);
+  }
+
+  private Value callValue(TsqlAst.Call call) {
+    String name = call.name.toUpperCase(Locale.ROOT);
+    if (name.equals("QUOTE_LITERAL")) {
+      return new Value(quoteLiteral(asString(eval(call.args.get(0)))), TsqlSqlRunner.ValueKind.TEXT);
+    }
+    if (name.equals("CURRENT_DATABASE")) {
+      return new Value(database, TsqlSqlRunner.ValueKind.TEXT);
+    }
+    if (name.equals("CAST")) {
+      Value inner = evalValue(call.args.get(0));
+      TsqlSqlRunner.ValueKind kind = kindOfType(call.castType);
+      if (kind == null) kind = TsqlSqlRunner.ValueKind.TEXT;
+      if (inner.text != null && kind == TsqlSqlRunner.ValueKind.NUMBER && !isSqlNumber(inner.text)) {
+        throw new TsqlParser.ParseException("Cannot cast '" + inner.text + "' to " + call.castType);
+      }
+      String text = inner.text;
+      if (text != null && kind == TsqlSqlRunner.ValueKind.NUMBER) text = text.trim();
+      return new Value(text, kind);
+    }
+    if (name.equals("SPLIT_PART")) {
+      String text = asString(eval(call.args.get(0)));
+      String delim = asString(eval(call.args.get(1)));
+      int n = decimal(eval(call.args.get(2))).intValue();
+      if (text == null) return new Value("", TsqlSqlRunner.ValueKind.TEXT);
+      String[] parts = text.split(Pattern.quote(delim == null ? "" : delim), -1);
+      if (n < 1 || n > parts.length) return new Value("", TsqlSqlRunner.ValueKind.TEXT);
+      return new Value(parts[n - 1].trim(), TsqlSqlRunner.ValueKind.TEXT);
+    }
+    throw new TsqlParser.ParseException("Unknown function " + call.name);
+  }
+
+  private static Value cellValue(List<TsqlSqlRunner.ValueKind> kinds,
+      List<TsqlSqlRunner.Cell> row, int i) {
+    if (row == null || i >= row.size() || row.get(i).isNull) return Value.NULL;
+    TsqlSqlRunner.ValueKind kind = kinds != null && i < kinds.size() ? kinds.get(i) : null;
+    return new Value(row.get(i).value, kind);
+  }
+
+  private static Value flag(boolean value) {
+    return new Value(value ? "1" : "0", TsqlSqlRunner.ValueKind.NUMBER);
   }
 
   String rewriteVars(String sql) {
@@ -542,18 +617,17 @@ public final class TsqlRuntime {
         i = j;
         continue;
       }
-      if (c == '\'') {
-        int j = i + 1;
-        while (j < sql.length()) {
-          if (sql.charAt(j) == '\'' && j + 1 < sql.length() && sql.charAt(j + 1) == '\'') {
-            j += 2;
-            continue;
-          }
-          if (sql.charAt(j) == '\'') break;
-          j++;
-        }
-        out.append(sql, i, Math.min(sql.length(), j + 1));
-        i = j + 1;
+      if (c == '/' && i + 1 < sql.length() && sql.charAt(i + 1) == '*') {
+        int j = sql.indexOf("*/", i + 2);
+        j = j < 0 ? sql.length() : j + 2;
+        out.append(sql, i, j);
+        i = j;
+        continue;
+      }
+      if (c == '\'' || c == '"') {
+        int j = SqlText.skipQuoted(sql, i);
+        out.append(sql, i, j);
+        i = j;
         continue;
       }
       if (c == '`') {
@@ -570,11 +644,9 @@ public final class TsqlRuntime {
         while (j < sql.length() && (Character.isLetterOrDigit(sql.charAt(j)) || sql.charAt(j) == '_')) j++;
         String name = sql.substring(start, j);
         String key = name.toLowerCase(Locale.ROOT);
-        if (Boolean.TRUE.equals(nulls.get(key)) || !vars.containsKey(key)) {
-          out.append("NULL");
-        } else {
-          out.append(sqlLiteral(vars.get(key)));
-        }
+        Value current = vars.get(key);
+        if (current == null || current.text == null) out.append("NULL");
+        else out.append(sqlLiteral(current));
         i = j;
         continue;
       }
@@ -585,14 +657,75 @@ public final class TsqlRuntime {
   }
 
   static String quoteLiteral(String value) {
-    if (value == null) return "NULL";
-    return "'" + value.replace("\\", "\\\\").replace("'", "''") + "'";
+    return SqlText.quote(value);
   }
 
-  private static String sqlLiteral(String value) {
-    if (value == null) return "NULL";
-    if (isNumber(value)) return strip(Double.parseDouble(value));
-    return quoteLiteral(value);
+  private static String sqlLiteral(Value value) {
+    if (value == null || value.text == null) return "NULL";
+    if (value.kind == TsqlSqlRunner.ValueKind.NUMBER) return value.text;
+    if (value.kind == TsqlSqlRunner.ValueKind.BOOLEAN) return truth(value.text) ? "TRUE" : "FALSE";
+    return quoteLiteral(value.text);
+  }
+
+  static TsqlSqlRunner.ValueKind kindOfType(String type) {
+    if (type == null) return null;
+    switch (type.toUpperCase(Locale.ROOT)) {
+      case "TINYINT":
+      case "SMALLINT":
+      case "INT":
+      case "INTEGER":
+      case "BIGINT":
+      case "DECIMAL":
+      case "NUMERIC":
+      case "NUMBER":
+      case "FLOAT":
+      case "REAL":
+      case "DOUBLE":
+      case "MONEY":
+        return TsqlSqlRunner.ValueKind.NUMBER;
+      case "BOOLEAN":
+      case "BOOL":
+      case "BIT":
+        return TsqlSqlRunner.ValueKind.BOOLEAN;
+      default:
+        return TsqlSqlRunner.ValueKind.TEXT;
+    }
+  }
+
+  private static TsqlSqlRunner.ValueKind inferKind(String text) {
+    if (isSqlNumber(text)) return TsqlSqlRunner.ValueKind.NUMBER;
+    if (text != null && (text.equalsIgnoreCase("true") || text.equalsIgnoreCase("false"))) {
+      return TsqlSqlRunner.ValueKind.BOOLEAN;
+    }
+    return TsqlSqlRunner.ValueKind.TEXT;
+  }
+
+  private static boolean isSqlNumber(String value) {
+    return value != null && SQL_NUMBER.matcher(value.trim()).matches();
+  }
+
+  private static boolean numericPair(Value l, Value r) {
+    String lt = l.text == null ? "" : l.text;
+    String rt = r.text == null ? "" : r.text;
+    return (l.kind == TsqlSqlRunner.ValueKind.NUMBER || r.kind == TsqlSqlRunner.ValueKind.NUMBER)
+        && isSqlNumber(lt) && isSqlNumber(rt);
+  }
+
+  private static BigDecimal decimal(String value) {
+    if (!isSqlNumber(value)) return BigDecimal.ZERO;
+    return new BigDecimal(value.trim());
+  }
+
+  private static String decimalText(BigDecimal value) {
+    return value.stripTrailingZeros().toPlainString();
+  }
+
+  private static int compareValues(Value l, Value r) {
+    if (l.text == null && r.text == null) return 0;
+    if (l.text == null) return -1;
+    if (r.text == null) return 1;
+    if (numericPair(l, r)) return decimal(l.text).compareTo(decimal(r.text));
+    return l.text.compareTo(r.text);
   }
 
   private static boolean isSetOption(String sql) {
@@ -621,48 +754,29 @@ public final class TsqlRuntime {
     return value;
   }
 
-  private static boolean isNumber(String value) {
-    if (value == null || value.isEmpty()) return false;
-    try {
-      Double.parseDouble(value);
-      return true;
-    } catch (NumberFormatException e) {
-      return false;
-    }
-  }
-
-  private static double number(String value) {
-    if (value == null) return 0;
-    return Double.parseDouble(value);
-  }
-
-  private static String strip(double value) {
-    if (value == Math.rint(value)) return Long.toString((long) value);
-    return Double.toString(value);
-  }
-
-  private static int compare(String l, String r) {
-    if (l == null && r == null) return 0;
-    if (l == null) return -1;
-    if (r == null) return 1;
-    if (isNumber(l) && isNumber(r)) return Double.compare(Double.parseDouble(l), Double.parseDouble(r));
-    return l.compareTo(r);
-  }
-
   /** In-memory store used when the caller does not supply one. */
   public static final class MemoryStore implements TsqlProcedureStore {
     private final Map<String, String> sources = new HashMap<String, String>();
     private final Map<String, Boolean> owners = new HashMap<String, Boolean>();
+    private final Map<String, String> ownerNames = new HashMap<String, String>();
 
     public void upsert(String database, String name, String owner, boolean executeAsOwner,
         String source) {
       String key = key(database, name);
       sources.put(key, source == null ? "" : source);
       owners.put(key, executeAsOwner);
+      ownerNames.put(key, owner == null ? "" : owner);
     }
 
     public String getSource(String database, String name) {
       return sources.get(key(database, name));
+    }
+
+    public String getOwner(String database, String name) {
+      String key = key(database, name);
+      if (!sources.containsKey(key)) return null;
+      String owner = ownerNames.get(key);
+      return owner == null ? "" : owner;
     }
 
     public List<String> list(String database) {

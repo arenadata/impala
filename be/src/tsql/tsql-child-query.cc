@@ -2,6 +2,7 @@
 #include "tsql/tsql-child-query.h"
 
 #include <cstdint>
+#include <cstdio>
 
 #include "gen-cpp/TCLIService_types.h"
 #include "service/client-request-state.h"
@@ -17,15 +18,31 @@ namespace impala {
 
 namespace {
 
-bool IsNumNodesKey(const string& key) {
-  static const char* name = "num_nodes";
-  if (key.size() != 9) return false;
-  for (size_t i = 0; i < key.size(); ++i) {
-    char c = key[i];
-    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-    if (c != name[i]) return false;
+TSqlValueKind::type ValueKindOf(const TTypeDesc& desc) {
+  if (desc.types.empty() || !desc.types[0].__isset.primitiveEntry) {
+    return TSqlValueKind::TEXT;
   }
-  return true;
+  switch (desc.types[0].primitiveEntry.type) {
+    case TTypeId::TINYINT_TYPE:
+    case TTypeId::SMALLINT_TYPE:
+    case TTypeId::INT_TYPE:
+    case TTypeId::BIGINT_TYPE:
+    case TTypeId::FLOAT_TYPE:
+    case TTypeId::DOUBLE_TYPE:
+    case TTypeId::DECIMAL_TYPE:
+      return TSqlValueKind::NUMBER;
+    case TTypeId::BOOLEAN_TYPE:
+      return TSqlValueKind::BOOLEAN;
+    default:
+      return TSqlValueKind::TEXT;
+  }
+}
+
+// std::to_string(double) is snprintf %f and drops digits. %.17g round-trips.
+string DoubleText(double v) {
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%.17g", v);
+  return buf;
 }
 
 bool NullBit(const string& nulls, uint32_t row_idx) {
@@ -77,7 +94,7 @@ void AppendColumnar(
       } else if (col.__isset.doubleVal) {
         is_null = NullBit(col.doubleVal.nulls, r);
         if (!is_null && r < col.doubleVal.values.size()) {
-          text = std::to_string(col.doubleVal.values[r]);
+          text = DoubleText(col.doubleVal.values[r]);
         }
       } else if (col.__isset.boolVal) {
         is_null = NullBit(col.boolVal.nulls, r);
@@ -118,7 +135,7 @@ void TsqlChildQuery::Close() {
   close_req.operationHandle = handle_;
   TCloseOperationResp close_resp;
   server_->CloseOperation(close_resp, close_req);
-  lock_guard<SpinLock> l(lock_);
+  lock_guard<mutex> l(lock_);
   running_ = false;
 }
 
@@ -128,24 +145,12 @@ Status TsqlChildQuery::FetchInternal(int max_rows, bool* hit_cap) {
   ImpalaServer::TUniqueIdToTHandleIdentifier(
       session_id, parent_->session()->secret, &req.sessionHandle.sessionId);
   req.__set_statement(sql_);
-  // Newly created tables have no stats, so Impala skips the small-query path and
-  // plans a distributed fragment. That plan duplicated rows for filters, semi-joins,
-  // scalar subqueries, and partitioned CTAS. One node keeps a single writer and a
-  // single scan. A procedure SET NUM_NODES still wins.
-  map<string, string> overlay = options_;
-  bool procedure_set_num_nodes = false;
-  for (const auto& opt : overlay) {
-    if (IsNumNodesKey(opt.first)) {
-      procedure_set_num_nodes = true;
-      break;
-    }
-  }
-  if (!procedure_set_num_nodes) overlay["NUM_NODES"] = "1";
-  req.__set_confOverlay(overlay);
+  // Procedure options only. Session NUM_NODES and SYNC_DDL are left alone.
+  req.__set_confOverlay(options_);
 
   TExecuteStatementResp exec_resp;
   {
-    lock_guard<SpinLock> l(lock_);
+    lock_guard<mutex> l(lock_);
     if (cancelled_) return Status::CANCELLED;
   }
   // Friend call. effective_user_ is applied inside the server, not via a client overlay.
@@ -154,7 +159,7 @@ Status TsqlChildQuery::FetchInternal(int max_rows, bool* hit_cap) {
   RETURN_IF_ERROR(Status(exec_resp.status));
   handle_ = exec_resp.operationHandle;
   {
-    lock_guard<SpinLock> l(lock_);
+    lock_guard<mutex> l(lock_);
     running_ = true;
   }
 
@@ -165,6 +170,7 @@ Status TsqlChildQuery::FetchInternal(int max_rows, bool* hit_cap) {
   RETURN_IF_ERROR(Status(meta_resp.status));
   for (const TColumnDesc& col : meta_resp.schema.columns) {
     columns_.push_back(col.columnName);
+    column_kinds_.push_back(ValueKindOf(col.typeDesc));
   }
 
   TFetchResultsReq fetch_req;
@@ -173,7 +179,7 @@ Status TsqlChildQuery::FetchInternal(int max_rows, bool* hit_cap) {
   int fetched = 0;
   while (true) {
     {
-      lock_guard<SpinLock> l(lock_);
+      lock_guard<mutex> l(lock_);
       if (cancelled_) return Status::CANCELLED;
     }
     TFetchResultsResp fetch_resp;
@@ -198,7 +204,7 @@ Status TsqlChildQuery::FetchInternal(int max_rows, bool* hit_cap) {
           vals.push_back(std::to_string(cell.i32Val.value));
         } else if (cell.__isset.doubleVal && cell.doubleVal.__isset.value) {
           nils.push_back(false);
-          vals.push_back(std::to_string(cell.doubleVal.value));
+          vals.push_back(DoubleText(cell.doubleVal.value));
         } else if (cell.__isset.boolVal && cell.boolVal.__isset.value) {
           nils.push_back(false);
           vals.push_back(cell.boolVal.value ? "true" : "false");
@@ -226,7 +232,7 @@ Status TsqlChildQuery::FetchInternal(int max_rows, bool* hit_cap) {
 }
 
 void TsqlChildQuery::Cancel() {
-  lock_guard<SpinLock> l(lock_);
+  lock_guard<mutex> l(lock_);
   cancelled_ = true;
   if (!running_) return;
   TCancelOperationReq req;

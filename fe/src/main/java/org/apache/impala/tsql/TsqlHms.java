@@ -51,13 +51,24 @@ public final class TsqlHms implements TsqlProcedureStore {
 
   @Override
   public String getSource(String database, String name) {
+    StoredProcedure proc = fetch(database, name);
+    return proc == null ? null : proc.getSource();
+  }
+
+  @Override
+  public String getOwner(String database, String name) {
+    StoredProcedure proc = fetch(database, name);
+    if (proc == null) return null;
+    return proc.getOwnerName() == null ? "" : proc.getOwnerName();
+  }
+
+  private StoredProcedure fetch(String database, String name) {
     if (pool == null) return null;
     StoredProcedureRequest request =
         new StoredProcedureRequest(CATALOG, database, name.toLowerCase(Locale.ROOT));
     try (MetaStoreClient client = pool.getClient()) {
-      StoredProcedure proc = client.getHiveClient().getThriftClient().getClient()
+      return client.getHiveClient().getThriftClient().getClient()
           .get_stored_procedure(request);
-      return proc == null ? null : proc.getSource();
     } catch (NoSuchObjectException e) {
       return null;
     } catch (MetaException e) {

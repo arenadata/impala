@@ -19,6 +19,8 @@ public final class TsqlRuntimeTest {
     rejectsUse();
     quoteLiteralEscapesQuoteAndBackslash();
     substitutionSkipsStringLiterals();
+    inlineLiteralUsesImpalaEscapes();
+    escapedQuoteIsNotSubstituted();
     tryCatchSwallowsChildFailure();
     uncaughtChildFailureFailsTheScript();
     failedOpenDoesNotConsumeNextStatement();
@@ -29,10 +31,17 @@ public final class TsqlRuntimeTest {
     materializeAmountIsFourStatements();
     showColumnStatsUsesDistinctCount();
     procedureSetNumNodesIsVisible();
-    firstStatementUsesOneNode();
+    sessionOptionsAreNotForced();
     castAsTypeConcatenates();
     createRuntimeDictParses();
     negativeArgumentSubstitutes();
+    digitStringKeepsLeadingZeros();
+    bigintDoesNotLosePrecision();
+    infinityStaysQuoted();
+    rejectsTextAssignedToInt();
+    stringCompareDoesNotCoerce();
+    stringPlusConcatenatesDigits();
+    ownerCanReplaceAndStrangerCannot();
     if (failed > 0) {
       System.err.println(failed + " test(s) failed");
       System.exit(1);
@@ -96,10 +105,22 @@ public final class TsqlRuntimeTest {
   }
 
   private static void quoteLiteralEscapesQuoteAndBackslash() {
-    check("'a''b'".equals(TsqlRuntime.quoteLiteral("a'b"))
-        || TsqlRuntime.quoteLiteral("a'b").equals("'a''b'"), "quote");
+    check("'a\\'b'".equals(TsqlRuntime.quoteLiteral("a'b")), "quote");
     String quoted = TsqlRuntime.quoteLiteral("a\\b");
     check(quoted.contains("\\\\"), "backslash escaped: " + quoted);
+  }
+
+  private static void inlineLiteralUsesImpalaEscapes() {
+    RecordingRunner runner = new RecordingRunner();
+    runUntilClient("INSERT INTO t VALUES ('O''Brien');\nSELECT 1 AS result;\n", runner);
+    check(runner.sql.get(0).contains("'O\\'Brien'"), "inline literal: " + runner.sql);
+  }
+
+  private static void escapedQuoteIsNotSubstituted() {
+    RecordingRunner runner = new RecordingRunner();
+    runUntilClient("DECLARE @x STRING = 'zz';\n"
+        + "INSERT INTO t VALUES ('it\\'s @x');\nSELECT 1 AS r;\n", runner);
+    check(!String.join("\n", runner.sql).contains("zz"), "substituted inside literal: " + runner.sql);
   }
 
   private static void substitutionSkipsStringLiterals() {
@@ -279,13 +300,15 @@ public final class TsqlRuntimeTest {
     check(step.kind == TsqlRuntime.Kind.CLIENT_RESULT, "dict did not finish");
   }
 
-  private static void firstStatementUsesOneNode() {
+  private static void sessionOptionsAreNotForced() {
     RecordingRunner runner = new RecordingRunner();
     TsqlRuntime.Step step = runUntilClient("SELECT 1 AS result;\n", runner);
-    check("1".equals(step.procedureOptions.get("num_nodes")),
+    check(!step.procedureOptions.containsKey("num_nodes"),
         "default num_nodes was " + step.procedureOptions);
-    check("1".equals(step.procedureOptions.get("sync_ddl")),
+    check(!step.procedureOptions.containsKey("sync_ddl"),
         "default sync_ddl was " + step.procedureOptions);
+    check("0".equals(step.procedureOptions.get("enable_async_ddl_execution")),
+        "async ddl was " + step.procedureOptions);
   }
 
   private static void procedureSetNumNodesIsVisible() {
@@ -394,6 +417,91 @@ public final class TsqlRuntimeTest {
         + "  DEALLOCATE c1;\n"
         + "END\n";
     TsqlParser.parse(src);
+  }
+
+  private static void digitStringKeepsLeadingZeros() {
+    RecordingRunner runner = new RecordingRunner();
+    TsqlRuntime.Step step = runUntilClient(
+        "DECLARE @acct STRING = '00123';\nSELECT @acct AS acct;\n", runner);
+    check(step.sql.contains("'00123'"), "acct was " + step.sql);
+  }
+
+  private static void bigintDoesNotLosePrecision() {
+    RecordingRunner runner = new RecordingRunner();
+    TsqlRuntime.Step step = runUntilClient(
+        "DECLARE @id BIGINT = 9007199254740993;\nSELECT @id AS id;\n", runner);
+    check(step.sql.contains("9007199254740993"), "id was " + step.sql);
+  }
+
+  private static void infinityStaysQuoted() {
+    RecordingRunner runner = new RecordingRunner();
+    TsqlRuntime.Step step = runUntilClient(
+        "DECLARE @s STRING = 'Infinity';\nSELECT @s AS s;\n", runner);
+    check(step.sql.contains("'Infinity'"), "infinity was " + step.sql);
+  }
+
+  private static void rejectsTextAssignedToInt() {
+    RecordingRunner runner = new RecordingRunner();
+    try {
+      runUntilClient("DECLARE @n INT = 'abc';\nSELECT @n AS n;\n", runner);
+      fail("assigned text to int");
+    } catch (AssertionError e) {
+      check(String.valueOf(e.getMessage()).contains("numeric"), "message was " + e.getMessage());
+    }
+  }
+
+  private static void stringCompareDoesNotCoerce() {
+    RecordingRunner runner = new RecordingRunner();
+    TsqlRuntime.Step step = runUntilClient(
+        "DECLARE @r STRING = 'diff';\n"
+        + "IF '00123' = '123' SET @r = 'same';\n"
+        + "SELECT @r AS result;\n", runner);
+    check(step.sql.contains("'diff'"), "compare was " + step.sql);
+  }
+
+  private static void stringPlusConcatenatesDigits() {
+    RecordingRunner runner = new RecordingRunner();
+    TsqlRuntime.Step step = runUntilClient(
+        "DECLARE @a STRING = '00123';\n"
+        + "DECLARE @b STRING = '1';\n"
+        + "SET @a = @a + @b;\n"
+        + "SELECT @a AS result;\n", runner);
+    check(step.sql.contains("'001231'"), "concat was " + step.sql);
+  }
+
+  private static void ownerCanReplaceAndStrangerCannot() {
+    TsqlRuntime.MemoryStore store = new TsqlRuntime.MemoryStore();
+    String create = "CREATE PROCEDURE p AS BEGIN SELECT 1 AS result; END\n";
+    TsqlRuntime.Step step = new TsqlRuntime(batch(create), "default", "alice", store).next(null);
+    check(step.kind == TsqlRuntime.Kind.FINISHED, "alice create: " + step.errorMessage);
+
+    TsqlAccess noReplace = new TsqlAccess() {
+      public boolean canCreate(String database, String user) { return true; }
+      public boolean canReplaceAny(String database, String user) { return false; }
+    };
+    step = new TsqlRuntime(batch(create), "default", "bob", store, noReplace).next(null);
+    check(step.kind == TsqlRuntime.Kind.FAILED, "bob should fail");
+    check(step.errorMessage.contains("owned by 'alice'"), "bob message was " + step.errorMessage);
+    check("alice".equals(store.getOwner("default", "p")), "owner changed to " + store.getOwner("default", "p"));
+
+    TsqlAccess admin = new TsqlAccess() {
+      public boolean canCreate(String database, String user) { return true; }
+      public boolean canReplaceAny(String database, String user) { return true; }
+    };
+    String replace = "CREATE OR ALTER PROCEDURE p AS BEGIN SELECT 2 AS result; END\n";
+    step = new TsqlRuntime(batch(replace), "default", "carol", store, admin).next(null);
+    check(step.kind == TsqlRuntime.Kind.FINISHED, "admin replace: " + step.errorMessage);
+    check("alice".equals(store.getOwner("default", "p")),
+        "owner stayed " + store.getOwner("default", "p"));
+
+    TsqlAccess noCreate = new TsqlAccess() {
+      public boolean canCreate(String database, String user) { return false; }
+      public boolean canReplaceAny(String database, String user) { return false; }
+    };
+    step = new TsqlRuntime(batch("CREATE PROCEDURE q AS BEGIN SELECT 1 AS result; END\n"),
+        "default", "dave", store, noCreate).next(null);
+    check(step.kind == TsqlRuntime.Kind.FAILED, "create should fail");
+    check(step.errorMessage.contains("CREATE"), "dave message was " + step.errorMessage);
   }
 
   private static void negativeArgumentSubstitutes() {

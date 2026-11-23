@@ -32,9 +32,7 @@ public abstract class Authorizable {
     COLUMN,
     FUNCTION,
     URI,
-    STORAGEHANDLER_URI,
-    // ADH-TSQL
-    PROCEDURE
+    STORAGEHANDLER_URI
   }
 
   // Returns the name of the object.

@@ -453,7 +453,7 @@ public final class TsqlParser {
       return e;
     }
     if (checkString()) {
-      return new TsqlAst.Literal(unescape(bump().text), true);
+      return new TsqlAst.Literal(SqlText.value(bump().text), true);
     }
     if (checkNumber()) {
       return new TsqlAst.Literal(bump().text, false);
@@ -478,7 +478,10 @@ public final class TsqlParser {
             call.args.add(parseExpr());
             if (check("AS")) {
               bump();
-              ident();
+              String typeName = ident();
+              if (call.name != null && call.name.equalsIgnoreCase("CAST")) {
+                call.castType = typeName;
+              }
               if (check("(")) {
                 bump();
                 readRawBalanced();
@@ -639,10 +642,6 @@ public final class TsqlParser {
     return raw;
   }
 
-  private static String unescape(String quotedBody) {
-    return quotedBody.replace("''", "'");
-  }
-
   private enum Kind { IDENT, AT, STRING, NUMBER, SYMBOL, EOF }
 
   private static final class Tok {
@@ -681,21 +680,10 @@ public final class TsqlParser {
         continue;
       }
       if (c == '\'') {
-        int j = i + 1;
-        StringBuilder sb = new StringBuilder();
-        while (j < sql.length()) {
-          if (sql.charAt(j) == '\'' && j + 1 < sql.length() && sql.charAt(j + 1) == '\'') {
-            sb.append("''");
-            j += 2;
-            continue;
-          }
-          if (sql.charAt(j) == '\'') break;
-          sb.append(sql.charAt(j));
-          j++;
-        }
-        out.add(new Tok(Kind.STRING, sb.toString(), space));
+        int j = SqlText.skipQuoted(sql, i);
+        out.add(new Tok(Kind.STRING, SqlText.impalaBody(sql, i, j), space));
         space = false;
-        i = j + 1;
+        i = j;
         continue;
       }
       if (c == '@') {

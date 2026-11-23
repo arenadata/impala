@@ -213,6 +213,8 @@ public final class TsqlAst {
   public static final class Call extends Expr {
     public String name;
     public final List<Expr> args = new ArrayList<Expr>();
+    /** Target type of CAST, or null for every other call. */
+    public String castType;
   }
 
   public static final class IsNull extends Expr {

@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.apache.impala.service.Frontend;
 import org.apache.impala.thrift.TSqlCell;
 import org.apache.impala.thrift.TSqlFeed;
+import org.apache.impala.thrift.TSqlValueKind;
 import org.apache.impala.thrift.TSqlNextRequest;
 import org.apache.impala.thrift.TSqlRequest;
 import org.apache.impala.thrift.TSqlStartResponse;
@@ -46,8 +47,10 @@ public final class TsqlBridge {
       TsqlProcedureStore store = frontend == null || frontend.getMetaStoreClientPool() == null
           ? new TsqlRuntime.MemoryStore()
           : new TsqlHms(frontend.getMetaStoreClientPool());
+      TsqlAccess access = frontend == null
+          ? TsqlAccess.OWNER_ONLY : new TsqlImpalaAccess(frontend);
       TsqlRuntime runtime = new TsqlRuntime(request.source, request.database, request.owner,
-          store);
+          store, access);
       long id = IDS.getAndIncrement();
       RUNTIMES.put(id, runtime);
       response.setHandle(id);
@@ -99,7 +102,14 @@ public final class TsqlBridge {
       }
     }
     int code = feed.isSetSqlcode() ? feed.sqlcode : 0;
-    return new TsqlSqlRunner.Result(columns, rows, code, feed.error_message);
+    List<TsqlSqlRunner.ValueKind> kinds = null;
+    if (feed.isSetColumn_kinds()) {
+      kinds = new ArrayList<TsqlSqlRunner.ValueKind>();
+      for (TSqlValueKind kind : feed.column_kinds) {
+        kinds.add(TsqlSqlRunner.ValueKind.valueOf(kind.name()));
+      }
+    }
+    return new TsqlSqlRunner.Result(columns, rows, code, feed.error_message, kinds);
   }
 
   private static byte[] serialize(TsqlRuntime.Step step) {

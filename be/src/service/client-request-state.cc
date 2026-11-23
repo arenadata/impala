@@ -379,7 +379,11 @@ Status ClientRequestState::Exec() {
       if (!FLAGS_enable_tsql) {
         return Status("T-SQL procedures are disabled (--enable_tsql=false)");
       }
-      tsql_executor_.reset(new TsqlExecutor(this, parent_server_));
+      {
+        lock_guard<mutex> l(lock_);
+        if (is_cancelled_) return Status::CANCELLED;
+        tsql_executor_.reset(new TsqlExecutor(this, parent_server_));
+      }
       UpdateNonErrorExecState(ExecState::PENDING);
       RETURN_IF_ERROR(Thread::Create("query-exec-state", "async-exec-thread",
           &TsqlExecutor::Run, tsql_executor_.get(), &async_exec_thread_, true));
@@ -1573,6 +1577,7 @@ Status ClientRequestState::FetchRowsInternal(const int32_t max_rows,
 }
 
 void ClientRequestState::Cancel(const Status* cause, bool wait_until_finalized) {
+  TsqlExecutor* tsql_executor = nullptr; // ADH-TSQL
   {
     lock_guard<mutex> lock(lock_);
     // If the query has reached a terminal state, no need to update the state.
@@ -1591,14 +1596,15 @@ void ClientRequestState::Cancel(const Status* cause, bool wait_until_finalized) 
       admission_control_client_->CancelAdmission();
       is_cancelled_ = true;
     }
+    tsql_executor = tsql_executor_.get(); // ADH-TSQL
   } // Release lock_ before doing cancellation work.
 
   // Cancel and close child queries before cancelling parent. 'lock_' should not be held
   // because a) ChildQuery::Cancel() calls back into ImpalaServer and b) cancellation
   // involves RPCs and can take quite some time.
   child_query_executor_->Cancel();
-  // ADH-TSQL
-  if (tsql_executor_ != nullptr) tsql_executor_->Cancel();
+  // ADH-TSQL. Pointer taken under lock_ so it is not read while Exec() assigns it.
+  if (tsql_executor != nullptr) tsql_executor->Cancel();
 
   // Ensure the parent query is cancelled if execution has started (if the query was not
   // started, cancellation is handled by the 'async-exec-thread' thread). 'lock_' should

@@ -2,11 +2,11 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 
 #include "common/status.h"
 #include "gen-cpp/Tsql_types.h"
 #include "gutil/macros.h"
-#include "util/spinlock.h"
 
 namespace impala {
 
@@ -32,7 +32,10 @@ class TsqlExecutor {
   ImpalaServer* server_;
   int64_t handle_ = 0;
   TsqlChildQuery* active_ = nullptr;
-  SpinLock lock_;
+  // Stays set once Cancel() runs, including between child statements.
+  bool cancelled_ = false;
+  // mutex, not a spinlock: Cancel() calls CancelOperation while holding it.
+  std::mutex lock_;
 
   DISALLOW_COPY_AND_ASSIGN(TsqlExecutor);
 };

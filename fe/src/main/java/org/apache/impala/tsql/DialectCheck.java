@@ -65,7 +65,7 @@ public final class DialectCheck {
         continue;
       }
       if (c == '\'' || c == '"') {
-        i = skipQuoted(sql, i, c);
+        i = SqlText.skipQuoted(sql, i);
         statementStart = false;
         continue;
       }
@@ -239,34 +239,11 @@ public final class DialectCheck {
     return Character.isLetterOrDigit(c) || c == '_';
   }
 
-  private static int skipQuoted(String sql, int i, char q) {
-    int j = i + 1;
-    while (j < sql.length()) {
-      if (sql.charAt(j) == q && j + 1 < sql.length() && sql.charAt(j + 1) == q) {
-        j += 2;
-        continue;
-      }
-      if (sql.charAt(j) == q) return j + 1;
-      j++;
-    }
-    return sql.length();
-  }
-
   private static String readQuoted(String sql, int i, char q) {
-    StringBuilder sb = new StringBuilder();
-    int j = i + 1;
-    while (j < sql.length()) {
-      if (sql.charAt(j) == q) {
-        if (j + 1 < sql.length() && sql.charAt(j + 1) == q) {
-          sb.append(q);
-          j += 2;
-          continue;
-        }
-        return sb.toString();
-      }
-      sb.append(sql.charAt(j));
-      j++;
-    }
-    throw new TsqlParser.ParseException("Unclosed string after " + q);
+    int end = SqlText.skipQuoted(sql, i);
+    boolean closed = end > i && end <= sql.length() && sql.charAt(end - 1) == q
+        && !SqlText.escaped(sql, i, end - 1);
+    if (!closed) throw new TsqlParser.ParseException("Unclosed string after " + q);
+    return SqlText.value(SqlText.impalaBody(sql, i, end));
   }
 }

@@ -7,6 +7,7 @@ import java.util.Locale;
 import java.util.Set;
 
 import org.apache.impala.tsql.DialectCheck;
+import org.apache.impala.tsql.SqlText;
 import org.apache.impala.tsql.TsqlAst;
 import org.apache.impala.tsql.TsqlParser;
 
@@ -192,7 +193,8 @@ public final class LpsqlParser {
     scope.add(name.toLowerCase(Locale.ROOT));
     if (check("=")) {
       bump();
-      return new TsqlAst.DeclareVar(name, "STRING", parseExpr());
+      // No declared type: the runtime infers from the value.
+      return new TsqlAst.DeclareVar(name, null, parseExpr());
     }
     if (check("%")) rejectTypeAttribute();
     String type = ident();
@@ -315,7 +317,7 @@ public final class LpsqlParser {
     scope.add(hiName);
     List<TsqlAst.Stmt> out = new ArrayList<TsqlAst.Stmt>();
     out.add(new TsqlAst.SetStmt(name, lo));
-    out.add(new TsqlAst.DeclareVar(hiName, "STRING", hi));
+    out.add(new TsqlAst.DeclareVar(hiName, "BIGINT", hi));
     TsqlAst.WhileStmt loop = new TsqlAst.WhileStmt();
     loop.condition = new TsqlAst.Binary("<=", new TsqlAst.Var(name), new TsqlAst.Var(hiName));
     loop.body.addAll(body);
@@ -508,7 +510,7 @@ public final class LpsqlParser {
       expect(")");
       return e;
     }
-    if (checkString()) return new TsqlAst.Literal(unescape(bump().text), true);
+    if (checkString()) return new TsqlAst.Literal(SqlText.value(bump().text), true);
     if (checkNumber()) return new TsqlAst.Literal(bump().text, false);
     if (check("NULL")) {
       bump();
@@ -530,7 +532,10 @@ public final class LpsqlParser {
             call.args.add(parseExpr());
             if (check("AS")) {
               bump();
-              ident();
+              String typeName = ident();
+              if (call.name != null && call.name.equalsIgnoreCase("CAST")) {
+                call.castType = typeName;
+              }
               if (check("(")) {
                 bump();
                 readRawBalanced();
@@ -801,10 +806,6 @@ public final class LpsqlParser {
     return bump().text;
   }
 
-  private static String unescape(String quotedBody) {
-    return quotedBody.replace("''", "'");
-  }
-
   private enum Kind { IDENT, STRING, NUMBER, SYMBOL, EOF }
 
   private static final class Tok {
@@ -843,21 +844,10 @@ public final class LpsqlParser {
         continue;
       }
       if (c == '\'' || c == '"') {
-        int j = i + 1;
-        StringBuilder sb = new StringBuilder();
-        while (j < sql.length()) {
-          if (sql.charAt(j) == c && j + 1 < sql.length() && sql.charAt(j + 1) == c) {
-            sb.append(c).append(c);
-            j += 2;
-            continue;
-          }
-          if (sql.charAt(j) == c) break;
-          sb.append(sql.charAt(j));
-          j++;
-        }
-        out.add(new Tok(Kind.STRING, sb.toString(), space));
+        int j = SqlText.skipQuoted(sql, i);
+        out.add(new Tok(Kind.STRING, SqlText.impalaBody(sql, i, j), space));
         space = false;
-        i = j + 1;
+        i = j;
         continue;
       }
       if (Character.isDigit(c)) {
@@ -906,16 +896,8 @@ public final class LpsqlParser {
   }
 
   private static int skipQuoted(String sql, int i, char q) {
-    int j = i + 1;
-    while (j < sql.length()) {
-      if (sql.charAt(j) == q && j + 1 < sql.length() && sql.charAt(j + 1) == q) {
-        j += 2;
-        continue;
-      }
-      if (sql.charAt(j) == q) return j + 1;
-      j++;
-    }
-    return sql.length();
+    if (sql.charAt(i) != q) return sql.length();
+    return SqlText.skipQuoted(sql, i);
   }
 
 }

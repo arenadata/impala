@@ -73,7 +73,8 @@ TsqlExecutor::~TsqlExecutor() {
 }
 
 void TsqlExecutor::Cancel() {
-  lock_guard<SpinLock> l(lock_);
+  lock_guard<mutex> l(lock_);
+  cancelled_ = true;
   if (active_ != nullptr) active_->Cancel();
 }
 
@@ -144,6 +145,10 @@ Status TsqlExecutor::RunInternal() {
 
   TSqlFeed feed;
   while (true) {
+    {
+      lock_guard<mutex> l(lock_);
+      if (cancelled_) return Status::CANCELLED;
+    }
     TSqlNextRequest next_req;
     next_req.__set_handle(handle_);
     next_req.__set_feed(feed);
@@ -183,18 +188,22 @@ Status TsqlExecutor::RunInternal() {
           parent_, server_, step.sql, user));
       if (step.__isset.procedure_options) child->set_procedure_options(step.procedure_options);
       {
-        lock_guard<SpinLock> l(lock_);
+        lock_guard<mutex> l(lock_);
+        if (cancelled_) return Status::CANCELLED;
         active_ = child.get();
       }
       bool hit_cap = false;
       Status child_status = child->Fetch(cap, &hit_cap);
+      bool cancelled;
       {
-        lock_guard<SpinLock> l(lock_);
+        lock_guard<mutex> l(lock_);
         active_ = nullptr;
+        cancelled = cancelled_;
       }
+      // HS2 reports a cancelled child as a general error, so the flag decides.
+      // TRY/CATCH must not swallow a cancellation.
+      if (cancelled || child_status.IsCancelled()) return Status::CANCELLED;
       if (!child_status.ok()) {
-        // Cancellation is not a T-SQL error. TRY/CATCH must not swallow it.
-        if (child_status.IsCancelled()) return child_status;
         feed = TSqlFeed();
         feed.__set_sqlcode(-1);
         string detail = child_status.GetDetail();
@@ -209,6 +218,7 @@ Status TsqlExecutor::RunInternal() {
       feed = TSqlFeed();
       feed.__set_sqlcode(0);
       feed.__set_column_names(child->columns());
+      feed.__set_column_kinds(child->column_kinds());
       vector<vector<TSqlCell>> rows;
       for (size_t r = 0; r < child->values().size(); ++r) {
         vector<TSqlCell> cells;

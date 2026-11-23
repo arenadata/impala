@@ -11,6 +11,14 @@ enum TSqlStepKind {
   FAILED = 3
 }
 
+// How a child-query cell should be substituted back into Impala SQL.
+// TEXT is quoted. NUMBER is copied exactly, never through a double.
+enum TSqlValueKind {
+  TEXT = 0
+  NUMBER = 1
+  BOOLEAN = 2
+}
+
 struct TSqlRequest {
   1: required string source
   2: required string database
@@ -30,6 +38,8 @@ struct TSqlFeed {
   2: optional string error_message
   3: optional list<string> column_names
   4: optional list<list<TSqlCell>> rows
+  // Parallel to column_names. Absent means the runtime infers from the text.
+  5: optional list<TSqlValueKind> column_kinds
 }
 
 struct TSqlStep {
