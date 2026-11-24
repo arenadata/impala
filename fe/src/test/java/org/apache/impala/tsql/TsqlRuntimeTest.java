@@ -1,4 +1,23 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package org.apache.impala.tsql;
+
+import org.junit.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -10,6 +29,11 @@ import java.util.Map;
 /** Runs on a JDK with no Impala or Thrift jars. */
 public final class TsqlRuntimeTest {
   private static int failed;
+
+  @Test
+  public void all() {
+    main(new String[0]);
+  }
 
   public static void main(String[] args) {
     demoProcRewritesCountAndKeepsId();
@@ -44,7 +68,7 @@ public final class TsqlRuntimeTest {
     ownerCanReplaceAndStrangerCannot();
     if (failed > 0) {
       System.err.println(failed + " test(s) failed");
-      System.exit(1);
+      throw new AssertionError(failed + " test(s) failed");
     }
     System.out.println("TsqlRuntimeTest OK");
   }
@@ -119,8 +143,12 @@ public final class TsqlRuntimeTest {
   private static void escapedQuoteIsNotSubstituted() {
     RecordingRunner runner = new RecordingRunner();
     runUntilClient("DECLARE @x STRING = 'zz';\n"
-        + "INSERT INTO t VALUES ('it\\'s @x');\nSELECT 1 AS r;\n", runner);
+        + "INSERT INTO t VALUES ('it''s @x');\nSELECT 1 AS r;\n", runner);
+    check(runner.sql.get(0).contains("'it\\'s @x'"), "quoted: " + runner.sql);
     check(!String.join("\n", runner.sql).contains("zz"), "substituted inside literal: " + runner.sql);
+    RecordingRunner path = new RecordingRunner();
+    runUntilClient("INSERT INTO t VALUES ('C:\\data\\');\nSELECT 1 AS r;\n", path);
+    check(path.sql.get(0).contains("'C:\\\\data\\\\'"), "backslash literal: " + path.sql);
   }
 
   private static void substitutionSkipsStringLiterals() {
@@ -307,7 +335,7 @@ public final class TsqlRuntimeTest {
         "default num_nodes was " + step.procedureOptions);
     check(!step.procedureOptions.containsKey("sync_ddl"),
         "default sync_ddl was " + step.procedureOptions);
-    check("0".equals(step.procedureOptions.get("enable_async_ddl_execution")),
+    check(!step.procedureOptions.containsKey("enable_async_ddl_execution"),
         "async ddl was " + step.procedureOptions);
   }
 
@@ -519,12 +547,24 @@ public final class TsqlRuntimeTest {
   }
 
   private static TsqlRuntime.Step runUntilClient(String src, RecordingRunner runner) {
-    TsqlRuntime rt = new TsqlRuntime(batch(src), "default", "tester", new TsqlRuntime.MemoryStore());
+    TsqlRuntime.MemoryStore store = new TsqlRuntime.MemoryStore();
+    String text = src;
+    int split = text.lastIndexOf("\nEXEC ");
+    if (split < 0) split = text.lastIndexOf("\nCALL ");
+    if (split > 0 && (text.contains("PROCEDURE") || text.contains("procedure"))) {
+      String create = text.substring(0, split);
+      TsqlRuntime.Step created = new TsqlRuntime(batch(create), "default", "tester", store).next(null);
+      if (created.kind == TsqlRuntime.Kind.FAILED) throw new AssertionError(created.errorMessage);
+      text = text.substring(split + 1);
+    }
+    TsqlRuntime rt = new TsqlRuntime(batch(text), "default", "tester", store);
     TsqlSqlRunner.Result prev = null;
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 100000; i++) {
       TsqlRuntime.Step step = rt.next(prev);
-      if (step.kind == TsqlRuntime.Kind.FAILED) {
-        throw new AssertionError(step.errorMessage);
+      if (step.kind == TsqlRuntime.Kind.FAILED) throw new AssertionError(step.errorMessage);
+      if (step.kind == TsqlRuntime.Kind.YIELD) {
+        prev = null;
+        continue;
       }
       if (step.kind != TsqlRuntime.Kind.SQL) return step;
       prev = runner.execute(step.sql, step.procedureOptions);

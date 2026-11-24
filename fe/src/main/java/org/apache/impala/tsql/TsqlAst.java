@@ -1,3 +1,20 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package org.apache.impala.tsql;
 
 import java.util.ArrayList;
@@ -68,7 +85,10 @@ public final class TsqlAst {
   }
 
   public static final class ExecProc extends Stmt {
+    public String database;
     public String name;
+    /** Variable that receives the procedure return code, or null. */
+    public String returnTarget;
     public final List<Arg> args = new ArrayList<Arg>();
   }
 
@@ -100,7 +120,29 @@ public final class TsqlAst {
     public final List<Stmt> handler = new ArrayList<Stmt>();
   }
 
-  public static final class ReturnStmt extends Stmt {}
+  /** BEGIN...END. Not an error handler. */
+  public static final class Block extends Stmt {
+    public final List<Stmt> body = new ArrayList<Stmt>();
+  }
+
+  public static final class ReturnStmt extends Stmt {
+    public Expr value;
+  }
+
+  public static final class ThrowStmt extends Stmt {
+    public Expr number;
+    public Expr message;
+    public Expr state;
+  }
+
+  public static final class DropProc extends Stmt {
+    public String database;
+    public String name;
+    public boolean ifExists;
+  }
+
+  /** SET NOCOUNT and the other session toggles this build ignores. */
+  public static final class Noop extends Stmt {}
 
   public static final class BreakStmt extends Stmt {}
 
@@ -149,10 +191,10 @@ public final class TsqlAst {
   }
 
   public static final class CreateProc extends Stmt {
+    public String database;
     public String name;
     public final List<Param> params = new ArrayList<Param>();
     public final List<Stmt> body = new ArrayList<Stmt>();
-    public boolean executeAsOwner;
     public String source = "tsql\n";
   }
 
@@ -161,10 +203,17 @@ public final class TsqlAst {
     public final String typeName;
     public final boolean output;
 
+    public final Expr defaultValue;
+
     public Param(String name, String typeName, boolean output) {
+      this(name, typeName, output, null);
+    }
+
+    public Param(String name, String typeName, boolean output, Expr defaultValue) {
       this.name = name;
       this.typeName = typeName;
       this.output = output;
+      this.defaultValue = defaultValue;
     }
   }
 
@@ -296,7 +345,20 @@ public final class TsqlAst {
       line(sb, indent + 1, "handler");
       for (Stmt child : s.handler) appendStmt(sb, child, indent + 2);
     } else if (stmt instanceof ReturnStmt) {
-      line(sb, indent, "ReturnStmt");
+      ReturnStmt r = (ReturnStmt) stmt;
+      line(sb, indent, "ReturnStmt" + (r.value == null ? "" : " " + expr(r.value)));
+    } else if (stmt instanceof Block) {
+      line(sb, indent, "Block");
+      for (Stmt child : ((Block) stmt).body) appendStmt(sb, child, indent + 1);
+    } else if (stmt instanceof ThrowStmt) {
+      ThrowStmt t = (ThrowStmt) stmt;
+      line(sb, indent, "ThrowStmt" + (t.number == null ? "" : " " + expr(t.number)));
+    } else if (stmt instanceof DropProc) {
+      DropProc d = (DropProc) stmt;
+      line(sb, indent, "DropProc " + (d.database == null ? "" : d.database + ".") + d.name
+          + (d.ifExists ? " ifexists" : ""));
+    } else if (stmt instanceof Noop) {
+      line(sb, indent, "Noop");
     } else if (stmt instanceof BreakStmt) {
       line(sb, indent, "BreakStmt");
     } else if (stmt instanceof ContinueStmt) {
@@ -322,7 +384,8 @@ public final class TsqlAst {
     } else if (stmt instanceof CreateProc) {
       CreateProc proc = (CreateProc) stmt;
       String dialect = proc.source != null && proc.source.startsWith("lpsql") ? "lpsql" : "tsql";
-      line(sb, indent, "CreateProc " + proc.name + " " + dialect + (proc.executeAsOwner ? " owner" : ""));
+      String db = proc.database == null ? "" : proc.database + ".";
+      line(sb, indent, "CreateProc " + db + proc.name + " " + dialect);
       for (Param param : proc.params) {
         line(sb, indent + 1, "Param " + param.name + " " + param.typeName + (param.output ? " out" : " in"));
       }
@@ -372,6 +435,42 @@ public final class TsqlAst {
   private static void line(StringBuilder sb, int indent, String text) {
     for (int i = 0; i < indent; i++) sb.append("  ");
     sb.append(text).append('\n');
+  }
+
+  /** SQL text Impala can parse without running the batch. Dynamic SQL is omitted. */
+  public static List<String> staticSql(Script script) {
+    List<String> out = new ArrayList<String>();
+    if (script != null) collectSql(script.statements, out);
+    return out;
+  }
+
+  private static void collectSql(List<Stmt> stmts, List<String> out) {
+    if (stmts == null) return;
+    for (Stmt s : stmts) {
+      if (s instanceof RawSql) addSql(out, ((RawSql) s).sql);
+      else if (s instanceof BareSelect) addSql(out, ((BareSelect) s).sql);
+      else if (s instanceof SelectAssign) addSql(out, ((SelectAssign) s).sql);
+      else if (s instanceof DeclareCursor) {
+        DeclareCursor c = (DeclareCursor) s;
+        if (c.dynamicSql == null) addSql(out, c.sql);
+      } else if (s instanceof IfStmt) {
+        collectSql(((IfStmt) s).thenBody, out);
+        collectSql(((IfStmt) s).elseBody, out);
+      } else if (s instanceof WhileStmt) {
+        collectSql(((WhileStmt) s).body, out);
+      } else if (s instanceof TryStmt) {
+        collectSql(((TryStmt) s).body, out);
+        collectSql(((TryStmt) s).handler, out);
+      } else if (s instanceof Block) {
+        collectSql(((Block) s).body, out);
+      } else if (s instanceof CreateProc) {
+        collectSql(((CreateProc) s).body, out);
+      }
+    }
+  }
+
+  private static void addSql(List<String> out, String sql) {
+    if (sql != null && !sql.trim().isEmpty()) out.add(sql);
   }
 
   private static String join(List<String> parts) {

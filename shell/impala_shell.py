@@ -506,17 +506,11 @@ class ImpalaShell(cmd.Cmd, object):
     return strip_comments(line).strip().upper() == 'GO'
 
   def _batch_is_tsql(self, text):
-    """True when this batch must be sent whole, not cut at the first semicolon."""
-    stripped = strip_comments(text).strip()
+    """True when the batch starts with TSQL or LPSQL and must not be split on ';'."""
+    stripped = strip_comments(text).lstrip(u'\ufeff').strip()
     if not stripped:
       return False
-    head = stripped.split(None, 1)[0].upper()
-    if head in ('DECLARE', 'BEGIN', 'EXEC', 'EXECUTE', 'CALL'):
-      return True
-    if head != 'CREATE':
-      return False
-    rest = stripped[len('CREATE'):].lstrip().upper()
-    return rest.startswith('PROC') or rest.startswith('OR ALTER PROC')
+    return stripped.split(None, 1)[0].upper() in ('TSQL', 'LPSQL')
 
   def _strip_trailing_go(self, cmd):
     lines = cmd.splitlines()
@@ -727,7 +721,14 @@ class ImpalaShell(cmd.Cmd, object):
 
   def _signal_handler(self, signal, frame):
     """Handles query cancellation on a Ctrl+C event"""
-    if self.last_query_handle is None or self.last_query_handle.is_closed:
+    handle = self.last_query_handle
+    if handle is None or handle.is_closed:
+      # ADH-TSQL. ExecuteStatement has returned a handle, but the shell is still
+      # waiting for the procedure schema, so last_query_handle is not set yet.
+      current = self.imp_client.current_query_handle()
+      if current is not None and not current.is_closed:
+        handle = current
+    if handle is None or handle.is_closed:
       if self.partial_cmd:
         # Revert the prompt to its earlier state
         self.prompt = self.cached_prompt
@@ -745,8 +746,8 @@ class ImpalaShell(cmd.Cmd, object):
         new_imp_client = self._new_impala_client()
         new_imp_client.connect()
         try:
-          new_imp_client.cancel_query(self.last_query_handle)
-          new_imp_client.close_query(self.last_query_handle)
+          new_imp_client.cancel_query(handle)
+          new_imp_client.close_query(handle)
         finally:
           new_imp_client.close_connection()
         break
@@ -777,6 +778,9 @@ class ImpalaShell(cmd.Cmd, object):
     else:
       args = self.sanitise_input(args)  # python3
     if not args: return args
+    # ADH-TSQL. A prefixed batch contains semicolons. Send it whole; GO ends it.
+    if self._batch_is_tsql(args):
+      return args
     # Split args using sqlparse. If there are multiple queries present in user input,
     # the length of the returned query list will be greater than one.
     parsed_cmds = sqlparse.split(args)

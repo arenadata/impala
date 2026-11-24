@@ -1,17 +1,40 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package org.apache.impala.tsql;
+
+import org.junit.Test;
 
 /** Keyword to AST. One case per T-SQL form this parser accepts. */
 public final class TsqlAstTest {
   private static int failed;
 
+  @Test
+  public void all() {
+    main(new String[0]);
+  }
+
   public static void main(String[] args) {
-    String ret = "CreateProc p tsql\n  Param p INT in\n  ReturnStmt";
+    String ret = "CreateProc p tsql\n  Param p INT in\n  Block\n    ReturnStmt";
     expect("TSQL\nCREATE PROCEDURE p @p INT AS BEGIN RETURN; END", ret);
     expect("CREATE PROCEDURE p @p INT AS BEGIN RETURN; END", ret);
     expect("CREATE PROC p @p INT AS BEGIN RETURN; END", ret);
     expect("CREATE OR ALTER PROCEDURE p @p INT AS BEGIN RETURN; END", ret);
-    expect("CREATE PROCEDURE p @p INT OUTPUT WITH EXECUTE AS OWNER AS BEGIN RETURN; END",
-        "CreateProc p tsql owner\n  Param p INT out\n  ReturnStmt");
+    expectFail("CREATE PROCEDURE p @p INT OUTPUT WITH EXECUTE AS OWNER AS BEGIN RETURN; END");
     expect("DECLARE @n INT = 1;", "DeclareVar n INT = Literal 1");
     expect("DECLARE c CURSOR FOR SELECT 1;", "DeclareCursor c sql=SELECT 1");
     expect("SET @n = 1;", "SetStmt n = Literal 1");
@@ -38,8 +61,8 @@ public final class TsqlAstTest {
     expect("CLOSE c;", "CloseCursor c");
     expect("DEALLOCATE c;", "DeallocateCursor c");
     expect("RETURN;", "ReturnStmt");
-    expect("SET @n = @@FETCH_STATUS;", "SetStmt n = Var FETCH_STATUS");
-    expect("SET @n = @@ERROR;", "SetStmt n = Var ERROR");
+    expect("SET @n = @@FETCH_STATUS;", "SetStmt n = Var @@fetch_status");
+    expect("SET @n = @@ERROR;", "SetStmt n = Var @@error");
     expect("SET @n = @a + @b;", "SetStmt n = (Var a + Var b)");
     expect("SET @n = QUOTE_LITERAL(@s);", "SetStmt n = Call QUOTE_LITERAL(Var s)");
     expect("IF @a = 1 AND NOT @b = 0 OR @c = 1 BEGIN SET @n = 1; END",
@@ -61,7 +84,7 @@ public final class TsqlAstTest {
     check(!TsqlParser.looksLikeTsql("CALL p(1);"), "CALL is not an entry point");
     if (failed > 0) {
       System.err.println(failed + " test(s) failed");
-      System.exit(1);
+      throw new AssertionError(failed + " test(s) failed");
     }
     System.out.println("TsqlAstTest OK");
   }

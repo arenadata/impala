@@ -1,3 +1,20 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package org.apache.impala.tsql;
 
 import java.nio.ByteBuffer;
@@ -22,7 +39,7 @@ import org.apache.thrift.TSerializer;
 import org.apache.thrift.protocol.TBinaryProtocol;
 
 /**
- * ADH-TSQL. JNI entry points. The parser and runtime stay free of Thrift;
+ * JNI entry points. The parser and runtime stay free of Thrift;
  * this class is the boundary the coordinator calls.
  */
 public final class TsqlBridge {
@@ -49,8 +66,10 @@ public final class TsqlBridge {
           : new TsqlHms(frontend.getMetaStoreClientPool());
       TsqlAccess access = frontend == null
           ? TsqlAccess.OWNER_ONLY : new TsqlImpalaAccess(frontend);
+      long maxSteps = request.isSetMax_steps() ? request.max_steps : 1000000L;
+      int maxNesting = request.isSetMax_nesting() ? request.max_nesting : 32;
       TsqlRuntime runtime = new TsqlRuntime(request.source, request.database, request.owner,
-          store, access);
+          store, access, maxSteps, maxNesting);
       long id = IDS.getAndIncrement();
       RUNTIMES.put(id, runtime);
       response.setHandle(id);
@@ -119,6 +138,7 @@ public final class TsqlBridge {
       case CLIENT_RESULT: out.setKind(TSqlStepKind.CLIENT_RESULT); break;
       case FINISHED: out.setKind(TSqlStepKind.FINISHED); break;
       case FAILED: out.setKind(TSqlStepKind.FAILED); break;
+      case YIELD: out.setKind(TSqlStepKind.YIELD); break;
       default: out.setKind(TSqlStepKind.FAILED); break;
     }
     if (step.sql != null) out.setSql(step.sql);

@@ -1,3 +1,20 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package org.apache.impala.tsql;
 
 import java.math.BigDecimal;
@@ -17,7 +34,7 @@ import org.apache.impala.lpsql.LpsqlParser;
  * the script returns.
  */
 public final class TsqlRuntime {
-  public enum Kind { SQL, CLIENT_RESULT, FINISHED, FAILED }
+  public enum Kind { SQL, CLIENT_RESULT, FINISHED, FAILED, YIELD }
 
   public static final class Step {
     public final Kind kind;
@@ -50,6 +67,22 @@ public final class TsqlRuntime {
     public static Step failed(String message) {
       return new Step(Kind.FAILED, null, message, -1, new HashMap<String, String>());
     }
+
+    public static Step yield() {
+      return new Step(Kind.YIELD, null, null, 0, new HashMap<String, String>());
+    }
+  }
+
+  /** A catchable procedure error. Parse failures stay fatal. */
+  public static final class TsqlError extends RuntimeException {
+    public final int number;
+
+    public TsqlError(String message) { this(message, 50000); }
+
+    public TsqlError(String message, int number) {
+      super(message);
+      this.number = number;
+    }
   }
 
   private static final class Cursor {
@@ -72,17 +105,41 @@ public final class TsqlRuntime {
     }
   }
 
+  /** Variables, cursors and errors belonging to one batch or one procedure call. */
+  private static final class Scope {
+    final Map<String, Value> vars = new HashMap<String, Value>();
+    final Map<String, TsqlSqlRunner.ValueKind> declared =
+        new HashMap<String, TsqlSqlRunner.ValueKind>();
+    final Map<String, Cursor> cursors = new HashMap<String, Cursor>();
+    final boolean tsql;
+    final List<String[]> outputs = new ArrayList<String[]>();
+    String returnTarget;
+    Value returnValue = new Value("0", TsqlSqlRunner.ValueKind.NUMBER);
+    String caughtMessage;
+    int caughtNumber;
+    int fetchStatus = -1;
+    int lastError;
+    int sqlCode;
+
+    Scope(boolean tsql) { this.tsql = tsql; }
+  }
+
   private static final class Frame {
     final List<TsqlAst.Stmt> body;
     int index;
     final TsqlAst.Expr whileCond;
     final List<TsqlAst.Stmt> handler;
     boolean handling;
+    final Scope scope;
+    final boolean procBody;
 
-    Frame(List<TsqlAst.Stmt> body, TsqlAst.Expr whileCond, List<TsqlAst.Stmt> handler) {
+    Frame(List<TsqlAst.Stmt> body, TsqlAst.Expr whileCond, List<TsqlAst.Stmt> handler,
+        Scope scope, boolean procBody) {
       this.body = body;
       this.whileCond = whileCond;
       this.handler = handler;
+      this.scope = scope;
+      this.procBody = procBody;
     }
   }
 
@@ -90,44 +147,47 @@ public final class TsqlRuntime {
   private final String database;
   private final String user;
   private final TsqlAccess access;
-  private final Map<String, Value> vars = new HashMap<String, Value>();
-  /** Null value means the kind is inferred from the assigned text. */
-  private final Map<String, TsqlSqlRunner.ValueKind> declared =
-      new HashMap<String, TsqlSqlRunner.ValueKind>();
   private static final Pattern SQL_NUMBER =
       Pattern.compile("[+-]?(\\d+(\\.\\d*)?|\\.\\d+)([eE][+-]?\\d+)?");
+  private static final Pattern SQL_INT = Pattern.compile("[+-]?\\d+");
+  private static final int YIELD_EVERY = 256;
   private final Map<String, String> procedureOptions = new HashMap<String, String>();
-  private final Map<String, Cursor> cursors = new HashMap<String, Cursor>();
   private final List<Frame> stack = new ArrayList<Frame>();
   private final String originalSource;
   private final Map<String, TsqlAst.CreateProc> defined =
       new HashMap<String, TsqlAst.CreateProc>();
-  private final Map<String, String> outputs = new HashMap<String, String>();
+  private final long maxSteps;
+  private final int maxNesting;
+  private long steps;
+  private int burst;
   private String waitSql;
   private List<String> waitAssign;
   private String waitCursor;
   private boolean waitClient;
   private boolean stop;
   private String failMessage;
-  private int fetchStatus = -1;
-  private int lastError;
-  private int sqlCode;
 
   public TsqlRuntime(String source, String database, String user, TsqlProcedureStore store) {
-    this(source, database, user, store, TsqlAccess.OWNER_ONLY);
+    this(source, database, user, store, TsqlAccess.OWNER_ONLY, 1000000L, 32);
   }
 
   public TsqlRuntime(String source, String database, String user, TsqlProcedureStore store,
       TsqlAccess access) {
+    this(source, database, user, store, access, 1000000L, 32);
+  }
+
+  public TsqlRuntime(String source, String database, String user, TsqlProcedureStore store,
+      TsqlAccess access, long maxSteps, int maxNesting) {
     this.database = database == null ? "default" : database;
     this.user = user == null ? "" : user;
     this.access = access == null ? TsqlAccess.OWNER_ONLY : access;
     this.originalSource = source == null ? "" : source;
     this.store = store == null ? new MemoryStore() : store;
-    // Each child DDL must finish before the next step reads its result.
-    procedureOptions.put("enable_async_ddl_execution", "0");
+    this.maxSteps = maxSteps;
+    this.maxNesting = maxNesting;
     TsqlAst.Script script = parseDialect(this.originalSource);
-    stack.add(new Frame(script.statements, null, null));
+    boolean tsql = !LpsqlParser.looksLikeLpsql(this.originalSource);
+    stack.add(new Frame(script.statements, null, null, new Scope(tsql), false));
   }
 
   static TsqlAst.Script parseDialect(String source) {
@@ -139,16 +199,28 @@ public final class TsqlRuntime {
 
   public Step next(TsqlSqlRunner.Result previous) {
     if (failMessage != null) return Step.failed(failMessage);
-    if (stop) return Step.finished(summary());
+    if (stop) return Step.finished("OK");
     try {
       if (waitSql != null) {
         applyResult(previous);
         waitSql = null;
       }
       while (true) {
+        if (maxSteps > 0 && ++steps > maxSteps) {
+          throw new TsqlError("T-SQL batch exceeded " + maxSteps
+              + " statements (--tsql_max_steps)");
+        }
+        if (++burst >= YIELD_EVERY) {
+          burst = 0;
+          return Step.yield();
+        }
         Step yielded = advance();
         if (yielded != null) return yielded;
       }
+    } catch (TsqlError e) {
+      if (handleError(e.getMessage(), e.number)) return next(null);
+      failMessage = e.getMessage();
+      return Step.failed(failMessage);
     } catch (TsqlParser.ParseException e) {
       failMessage = e.getMessage();
       return Step.failed(failMessage);
@@ -165,7 +237,7 @@ public final class TsqlRuntime {
   private Step advance() {
     if (stack.isEmpty()) {
       stop = true;
-      return Step.finished(summary());
+      return Step.finished("OK");
     }
     Frame frame = stack.get(stack.size() - 1);
     if (frame.whileCond != null && frame.index >= frame.body.size()) {
@@ -174,6 +246,7 @@ public final class TsqlRuntime {
       return null;
     }
     if (frame.index >= frame.body.size()) {
+      if (frame.procBody) copyOutputs(frame.scope);
       stack.remove(stack.size() - 1);
       return null;
     }
@@ -230,44 +303,80 @@ public final class TsqlRuntime {
     if (stmt instanceof TsqlAst.IfStmt) {
       TsqlAst.IfStmt s = (TsqlAst.IfStmt) stmt;
       List<TsqlAst.Stmt> branch = truth(eval(s.condition)) ? s.thenBody : s.elseBody;
-      stack.add(new Frame(branch, null, null));
+      stack.add(new Frame(branch, null, null, scope(), false));
       return null;
     }
     if (stmt instanceof TsqlAst.WhileStmt) {
       TsqlAst.WhileStmt s = (TsqlAst.WhileStmt) stmt;
       if (truth(eval(s.condition))) {
-        stack.add(new Frame(s.body, s.condition, null));
+        stack.add(new Frame(s.body, s.condition, null, scope(), false));
       }
       return null;
     }
     if (stmt instanceof TsqlAst.TryStmt) {
       TsqlAst.TryStmt s = (TsqlAst.TryStmt) stmt;
-      stack.add(new Frame(s.body, null, s.handler));
+      stack.add(new Frame(s.body, null, s.handler, scope(), false));
+      return null;
+    }
+    if (stmt instanceof TsqlAst.Block) {
+      stack.add(new Frame(((TsqlAst.Block) stmt).body, null, null, scope(), false));
       return null;
     }
     if (stmt instanceof TsqlAst.BreakStmt) {
-      while (!stack.isEmpty() && stack.get(stack.size() - 1).whileCond == null) {
+      while (!stack.isEmpty() && !stack.get(stack.size() - 1).procBody
+          && stack.get(stack.size() - 1).whileCond == null) {
         stack.remove(stack.size() - 1);
       }
-      if (!stack.isEmpty()) stack.remove(stack.size() - 1);
+      if (!stack.isEmpty() && stack.get(stack.size() - 1).whileCond != null) {
+        stack.remove(stack.size() - 1);
+      }
       return null;
     }
     if (stmt instanceof TsqlAst.ContinueStmt) {
-      while (!stack.isEmpty() && stack.get(stack.size() - 1).whileCond == null) {
+      while (!stack.isEmpty() && !stack.get(stack.size() - 1).procBody
+          && stack.get(stack.size() - 1).whileCond == null) {
         stack.remove(stack.size() - 1);
       }
-      if (!stack.isEmpty()) stack.get(stack.size() - 1).index = stack.get(stack.size() - 1).body.size();
+      if (!stack.isEmpty() && stack.get(stack.size() - 1).whileCond != null) {
+        Frame loop = stack.get(stack.size() - 1);
+        loop.index = loop.body.size();
+      }
       return null;
     }
     if (stmt instanceof TsqlAst.ReturnStmt) {
-      stack.clear();
+      TsqlAst.ReturnStmt ret = (TsqlAst.ReturnStmt) stmt;
+      Value value = ret.value == null
+          ? new Value("0", TsqlSqlRunner.ValueKind.NUMBER) : evalValue(ret.value);
+      while (!stack.isEmpty()) {
+        Frame top = stack.remove(stack.size() - 1);
+        if (top.procBody) {
+          top.scope.returnValue = value;
+          copyOutputs(top.scope);
+          return null;
+        }
+      }
       stop = true;
-      return Step.finished(summary());
+      return Step.finished("OK");
+    }
+    if (stmt instanceof TsqlAst.ThrowStmt) {
+      TsqlAst.ThrowStmt t = (TsqlAst.ThrowStmt) stmt;
+      if (t.number == null) {
+        String message = scope().caughtMessage == null ? "THROW" : scope().caughtMessage;
+        int number = scope().caughtNumber == 0 ? 50000 : scope().caughtNumber;
+        throw new TsqlError(message, number);
+      }
+      int number = decimal(eval(t.number)).intValue();
+      String message = eval(t.message);
+      throw new TsqlError(message == null ? "THROW" : message, number);
+    }
+    if (stmt instanceof TsqlAst.DropProc) {
+      dropProc((TsqlAst.DropProc) stmt);
+      return null;
     }
     if (stmt instanceof TsqlAst.DeclareCursor) {
       TsqlAst.DeclareCursor d = (TsqlAst.DeclareCursor) stmt;
       Cursor c = new Cursor();
-      cursors.put(d.name.toLowerCase(Locale.ROOT), c);
+      scope().cursors.put(d.name.toLowerCase(Locale.ROOT), c);
       c.columns.add(d.dynamicSql == null ? d.sql : asString(eval(d.dynamicSql)));
       return null;
     }
@@ -285,47 +394,64 @@ public final class TsqlRuntime {
       Cursor c = cursor(f.name);
       c.index++;
       if (c.index >= c.rows.size()) {
-        fetchStatus = -1;
+        scope().fetchStatus = -1;
         for (String target : f.targets) setVar(target, Value.NULL);
       } else {
-        fetchStatus = 0;
+        scope().fetchStatus = 0;
         List<TsqlSqlRunner.Cell> row = c.rows.get(c.index);
         for (int i = 0; i < f.targets.size(); i++) setVar(f.targets.get(i), cellValue(c.kinds, row, i));
       }
-      sqlCode = fetchStatus;
+      scope().sqlCode = scope().fetchStatus;
       return null;
     }
-    if (stmt instanceof TsqlAst.CloseCursor || stmt instanceof TsqlAst.DeallocateCursor) {
+    if (stmt instanceof TsqlAst.CloseCursor) {
+      Cursor c = cursor(((TsqlAst.CloseCursor) stmt).name);
+      c.rows = new ArrayList<List<TsqlSqlRunner.Cell>>();
+      c.open = false;
+      c.index = -1;
+      return null;
+    }
+    if (stmt instanceof TsqlAst.DeallocateCursor) {
+      scope().cursors.remove(((TsqlAst.DeallocateCursor) stmt).name.toLowerCase(Locale.ROOT));
       return null;
     }
     if (stmt instanceof TsqlAst.CreateProc) {
       TsqlAst.CreateProc proc = (TsqlAst.CreateProc) stmt;
-      if (!access.canCreate(database, user)) {
+      if (!access.canCreate(proc.database == null ? database : proc.database, user)) {
         throw new TsqlParser.ParseException(String.format(
             "User '%s' does not have privileges to CREATE procedures in database '%s'",
-            user, database));
+            user, proc.database == null ? database : proc.database));
       }
-      String current = store.getOwner(database, proc.name);
-      if (current != null && !current.equals(user) && !access.canReplaceAny(database, user)) {
+      String dbName = proc.database == null ? database : proc.database;
+      String current = store.getOwner(dbName, proc.name);
+      if (current != null && !current.equals(user) && !access.canReplaceAny(dbName, user)) {
         throw new TsqlParser.ParseException(String.format(
             "Procedure %s.%s is owned by '%s'. Only the owner or a user with ALL on "
                 + "database %s may replace it",
-            database, proc.name, current, database));
+            dbName, proc.name, current, dbName));
       }
       String stored = originalSource == null ? "" : originalSource;
       proc.source = stored;
-      defined.put(proc.name.toLowerCase(Locale.ROOT), proc);
-      store.upsert(database, proc.name, current != null ? current : user,
-          proc.executeAsOwner, stored);
+      String db = proc.database == null ? database : proc.database;
+      defined.put((db + "." + proc.name).toLowerCase(Locale.ROOT), proc);
+      store.upsert(db, proc.name, current != null ? current : user, stored);
       return null;
     }
     throw new TsqlParser.ParseException("Unsupported statement");
   }
 
   private void pushProc(TsqlAst.ExecProc call) {
-    TsqlAst.CreateProc found = defined.get(call.name.toLowerCase(Locale.ROOT));
+    int depth = 0;
+    for (Frame frame : stack) if (frame.procBody) depth++;
+    if (maxNesting > 0 && depth + 1 > maxNesting) {
+      throw new TsqlError("Procedure nesting exceeded " + maxNesting + " (--tsql_max_nesting)");
+    }
+    String db = call.database == null ? database : call.database;
+    String key = (db + "." + call.name).toLowerCase(Locale.ROOT);
+    TsqlAst.CreateProc found = defined.get(key);
+    String source = null;
     if (found == null) {
-      String source = store.getSource(database, call.name);
+      source = store.getSource(db, call.name);
       if (source == null) throw new TsqlParser.ParseException("Unknown procedure " + call.name);
       TsqlAst.Script script = parseDialect(source);
       for (TsqlAst.Stmt s : script.statements) {
@@ -335,26 +461,36 @@ public final class TsqlRuntime {
         }
       }
     }
-    if (found == null) {
-      throw new TsqlParser.ParseException("Unknown procedure " + call.name);
-    }
-    if (call.args.size() != found.params.size()) {
+    if (found == null) throw new TsqlParser.ParseException("Unknown procedure " + call.name);
+    if (call.args.size() > found.params.size()) {
       throw new TsqlParser.ParseException(
           "Procedure " + call.name + " expects " + found.params.size() + " arguments");
     }
+    boolean tsql = source == null ? scope().tsql : !LpsqlParser.looksLikeLpsql(source);
+    Scope child = new Scope(tsql);
+    child.returnTarget = call.returnTarget;
     for (int i = 0; i < found.params.size(); i++) {
       TsqlAst.Param param = found.params.get(i);
       TsqlAst.Arg arg = matchArg(call, param, i);
-      noteType(param.name, param.typeName);
-      setVar(param.name, evalValue(arg.value));
+      noteType(child, param.name, param.typeName);
+      Value value;
+      if (arg != null) value = evalValue(arg.value);
+      else if (param.defaultValue != null) value = evalValue(param.defaultValue);
+      else throw new TsqlParser.ParseException(
+          "Procedure " + call.name + " expects parameter @" + param.name);
+      setVar(child, param.name, value);
+      if (arg != null && arg.output && arg.value instanceof TsqlAst.Var) {
+        child.outputs.add(new String[] {param.name, ((TsqlAst.Var) arg.value).name});
+      }
     }
-    stack.add(new Frame(found.body, null, null));
+    stack.add(new Frame(found.body, null, null, child, true));
   }
 
   private static TsqlAst.Arg matchArg(TsqlAst.ExecProc call, TsqlAst.Param param, int index) {
     for (TsqlAst.Arg arg : call.args) {
       if (arg.paramName != null && arg.paramName.equalsIgnoreCase(param.name)) return arg;
     }
+    if (index >= call.args.size()) return null;
     TsqlAst.Arg positional = call.args.get(index);
     if (positional.paramName != null) {
       throw new TsqlParser.ParseException("Argument " + positional.paramName + " does not match");
@@ -363,19 +499,20 @@ public final class TsqlRuntime {
   }
 
   private void applyResult(TsqlSqlRunner.Result previous) {
-    lastError = 0;
+    Scope here = scope();
+    here.lastError = 0;
     if (previous != null && !previous.ok()) {
-      lastError = previous.sqlcode == 0 ? -1 : previous.sqlcode;
-      sqlCode = lastError;
+      here.lastError = previous.sqlcode == 0 ? -1 : previous.sqlcode;
+      here.sqlCode = here.lastError;
       // The failed statement must not consume the next successful result.
       waitCursor = null;
       waitAssign = null;
       waitClient = false;
       String message = previous.error == null ? "SQL failed" : previous.error;
-      if (handleError(message)) return;
+      if (handleError(message, here.lastError)) return;
       throw new TsqlParser.ParseException(message);
     }
-    sqlCode = 0;
+    here.sqlCode = 0;
     if (waitClient) {
       waitClient = false;
       stop = true;
@@ -389,7 +526,7 @@ public final class TsqlRuntime {
           ? new ArrayList<TsqlSqlRunner.ValueKind>() : new ArrayList<TsqlSqlRunner.ValueKind>(previous.columnKinds);
       c.index = -1;
       c.open = true;
-      fetchStatus = c.rows.isEmpty() ? -1 : 0;
+      scope().fetchStatus = c.rows.isEmpty() ? -1 : 0;
       waitCursor = null;
       return;
     }
@@ -404,35 +541,55 @@ public final class TsqlRuntime {
     }
   }
 
-  private boolean handleError(String message) {
+  private boolean handleError(String message, int number) {
     for (int i = stack.size() - 1; i >= 0; i--) {
       Frame frame = stack.get(i);
       if (frame.handler != null && !frame.handling) {
         while (stack.size() > i + 1) stack.remove(stack.size() - 1);
         frame.handling = true;
         frame.index = frame.body.size();
-        stack.add(new Frame(frame.handler, null, null));
-        setVar("ERROR_MESSAGE", new Value(message, TsqlSqlRunner.ValueKind.TEXT));
+        frame.scope.caughtMessage = message;
+        frame.scope.caughtNumber = number;
+        stack.add(new Frame(frame.handler, null, null, frame.scope, false));
+        setVar(frame.scope, "ERROR_MESSAGE", new Value(message, TsqlSqlRunner.ValueKind.TEXT));
         return true;
       }
     }
     return false;
   }
 
-  private Cursor cursor(String name) {
-    Cursor c = cursors.get(name.toLowerCase(Locale.ROOT));
-    if (c == null) throw new TsqlParser.ParseException("Unknown cursor " + name);
-    return c;
+  private Scope scope() {
+    return stack.get(stack.size() - 1).scope;
   }
 
-  private String summary() {
-    if (outputs.isEmpty()) return "OK";
-    StringBuilder sb = new StringBuilder();
-    for (Map.Entry<String, String> e : outputs.entrySet()) {
-      if (sb.length() > 0) sb.append(',');
-      sb.append(e.getKey()).append('=').append(e.getValue());
+  private void copyOutputs(Scope child) {
+    if (stack.isEmpty()) return;
+    Scope parent = stack.get(stack.size() - 1).scope;
+    for (String[] binding : child.outputs) {
+      Value value = child.vars.get(binding[0].toLowerCase(Locale.ROOT));
+      setVar(parent, binding[1], value == null ? Value.NULL : value);
     }
-    return sb.toString();
+    if (child.returnTarget != null) setVar(parent, child.returnTarget, child.returnValue);
+  }
+
+  private void dropProc(TsqlAst.DropProc drop) {
+    String db = drop.database == null ? database : drop.database;
+    String owner = store.getOwner(db, drop.name);
+    if (owner == null) {
+      if (drop.ifExists) return;
+      throw new TsqlError("Unknown procedure " + drop.name);
+    }
+    if (!owner.equals(user) && !access.canReplaceAny(db, user)) {
+      throw new TsqlError("Procedure " + db + "." + drop.name + " is owned by '" + owner + "'");
+    }
+    store.drop(db, drop.name);
+    defined.remove((db + "." + drop.name).toLowerCase(Locale.ROOT));
+  }
+
+  private Cursor cursor(String name) {
+    Cursor c = scope().cursors.get(name.toLowerCase(Locale.ROOT));
+    if (c == null) throw new TsqlParser.ParseException("Unknown cursor " + name);
+    return c;
   }
 
   private Map<String, String> copyOptions() {
@@ -440,21 +597,35 @@ public final class TsqlRuntime {
   }
 
   private void noteType(String name, String typeName) {
-    declared.put(name.toLowerCase(Locale.ROOT), kindOfType(typeName));
+    noteType(scope(), name, typeName);
+  }
+
+  private void noteType(Scope owner, String name, String typeName) {
+    owner.declared.put(name.toLowerCase(Locale.ROOT), kindOfType(typeName));
   }
 
   private void setVar(String name, Value value) {
+    setVar(scope(), name, value);
+  }
+
+  private void setVar(Scope owner, String name, Value value) {
     if (value == null) value = Value.NULL;
     String key = name.toLowerCase(Locale.ROOT);
-    TsqlSqlRunner.ValueKind kind = declared.containsKey(key) ? declared.get(key) : value.kind;
+    if (!owner.declared.containsKey(key) && key.equals("error_message")) {
+      owner.declared.put(key, TsqlSqlRunner.ValueKind.TEXT);
+    }
+    if (owner.tsql && !owner.declared.containsKey(key)) {
+      throw new TsqlError("Must declare the scalar variable @" + name);
+    }
+    TsqlSqlRunner.ValueKind kind = owner.declared.containsKey(key)
+        ? owner.declared.get(key) : value.kind;
     if (kind == null) kind = inferKind(value.text);
     if (value.text != null && kind == TsqlSqlRunner.ValueKind.NUMBER && !isSqlNumber(value.text)) {
-      throw new TsqlParser.ParseException(
-          "Cannot assign '" + value.text + "' to numeric @" + name);
+      throw new TsqlError("Cannot assign '" + value.text + "' to numeric @" + name, 245);
     }
     String text = value.text;
     if (text != null && kind == TsqlSqlRunner.ValueKind.NUMBER) text = text.trim();
-    vars.put(key, new Value(text, kind));
+    owner.vars.put(key, new Value(text, kind));
   }
 
   private String eval(TsqlAst.Expr expr) {
@@ -473,7 +644,9 @@ public final class TsqlRuntime {
       return flag(result);
     }
     if (expr instanceof TsqlAst.Unary) {
-      return flag(!truth(eval(((TsqlAst.Unary) expr).inner)));
+      Value inner = evalValue(((TsqlAst.Unary) expr).inner);
+      if (inner.text == null) return Value.NULL;
+      return flag(!truth(inner.text));
     }
     if (expr instanceof TsqlAst.Binary) return binaryValue((TsqlAst.Binary) expr);
     if (expr instanceof TsqlAst.Call) return callValue((TsqlAst.Call) expr);
@@ -492,10 +665,25 @@ public final class TsqlRuntime {
 
   private Value varValue(String name) {
     String key = name.toLowerCase(Locale.ROOT);
-    if (key.equals("fetch_status")) return new Value(Integer.toString(fetchStatus), TsqlSqlRunner.ValueKind.NUMBER);
-    if (key.equals("error")) return new Value(Integer.toString(lastError), TsqlSqlRunner.ValueKind.NUMBER);
-    if (key.equals("sqlcode")) return new Value(Integer.toString(sqlCode), TsqlSqlRunner.ValueKind.NUMBER);
-    Value value = vars.get(key);
+    Scope here = scope();
+    if (key.startsWith("@@")) {
+      if (key.equals("@@fetch_status")) {
+        return new Value(Integer.toString(here.fetchStatus), TsqlSqlRunner.ValueKind.NUMBER);
+      }
+      if (key.equals("@@error") || key.equals("@@error_number")) {
+        return new Value(Integer.toString(here.caughtNumber == 0 ? here.lastError : here.caughtNumber),
+            TsqlSqlRunner.ValueKind.NUMBER);
+      }
+      if (key.equals("@@sqlcode")) {
+        return new Value(Integer.toString(here.sqlCode), TsqlSqlRunner.ValueKind.NUMBER);
+      }
+      throw new TsqlError("Unknown system variable " + key);
+    }
+    if (!here.declared.containsKey(key)) {
+      if (here.tsql) throw new TsqlError("Must declare the scalar variable @" + name);
+      return Value.NULL;
+    }
+    Value value = here.vars.get(key);
     return value == null ? Value.NULL : value;
   }
 
@@ -519,8 +707,8 @@ public final class TsqlRuntime {
   }
 
   private Value binaryValue(TsqlAst.Binary b) {
-    if (b.op.equals("AND")) return flag(truth(eval(b.left)) && truth(eval(b.right)));
-    if (b.op.equals("OR")) return flag(truth(eval(b.left)) || truth(eval(b.right)));
+    if (b.op.equals("AND")) return and(evalValue(b.left), evalValue(b.right));
+    if (b.op.equals("OR")) return or(evalValue(b.left), evalValue(b.right));
     if (b.op.equals("||")) {
       String l = eval(b.left);
       String r = eval(b.right);
@@ -538,18 +726,62 @@ public final class TsqlRuntime {
       }
       return new Value(lt + rt, TsqlSqlRunner.ValueKind.TEXT);
     }
-    if (b.op.equals("-")) {
-      return new Value(decimalText(decimal(eval(b.left)).subtract(decimal(eval(b.right)))),
+    if (b.op.equals("-") || b.op.equals("*") || b.op.equals("/") || b.op.equals("%")) {
+      return arithmetic(b.op, evalValue(b.left), evalValue(b.right));
+    }
+    return comparison(b.op, evalValue(b.left), evalValue(b.right));
+  }
+
+  private Value and(Value l, Value r) {
+    if (isFalse(l) || isFalse(r)) return flag(false);
+    if (l.text == null || r.text == null) return Value.NULL;
+    return flag(true);
+  }
+
+  private Value or(Value l, Value r) {
+    if (isTrue(l) || isTrue(r)) return flag(true);
+    if (l.text == null || r.text == null) return Value.NULL;
+    return flag(false);
+  }
+
+  private static boolean isFalse(Value value) {
+    return value.text != null && (value.text.equals("0") || value.text.equalsIgnoreCase("false"));
+  }
+
+  private static boolean isTrue(Value value) {
+    return value.text != null && !isFalse(value);
+  }
+
+  private Value arithmetic(String op, Value l, Value r) {
+    if (l.text == null || r.text == null) return Value.NULL;
+    if (!isSqlNumber(l.text) || !isSqlNumber(r.text)) {
+      throw new TsqlError("Cannot apply " + op + " to '" + l.text + "' and '" + r.text + "'");
+    }
+    java.math.BigDecimal ld = decimal(l.text);
+    java.math.BigDecimal rd = decimal(r.text);
+    if (op.equals("-")) return new Value(decimalText(ld.subtract(rd)), TsqlSqlRunner.ValueKind.NUMBER);
+    if (op.equals("*")) return new Value(decimalText(ld.multiply(rd)), TsqlSqlRunner.ValueKind.NUMBER);
+    if (rd.signum() == 0) throw new TsqlError("Divide by zero", 8134);
+    boolean integral = SQL_INT.matcher(l.text.trim()).matches() && SQL_INT.matcher(r.text.trim()).matches();
+    if (op.equals("/")) {
+      if (integral) return new Value(Long.toString(ld.longValue() / rd.longValue()), TsqlSqlRunner.ValueKind.NUMBER);
+      return new Value(decimalText(ld.divide(rd, 16, java.math.RoundingMode.HALF_UP)),
           TsqlSqlRunner.ValueKind.NUMBER);
     }
-    int cmp = compareValues(evalValue(b.left), evalValue(b.right));
+    if (integral) return new Value(Long.toString(ld.longValue() % rd.longValue()), TsqlSqlRunner.ValueKind.NUMBER);
+    return new Value(decimalText(ld.remainder(rd)), TsqlSqlRunner.ValueKind.NUMBER);
+  }
+
+  private Value comparison(String op, Value l, Value r) {
+    if (l.text == null || r.text == null) return Value.NULL;
+    int cmp = compareValues(l, r);
     boolean ok;
-    if (b.op.equals("=")) ok = cmp == 0;
-    else if (b.op.equals("!=") || b.op.equals("<>")) ok = cmp != 0;
-    else if (b.op.equals("<")) ok = cmp < 0;
-    else if (b.op.equals(">")) ok = cmp > 0;
-    else if (b.op.equals("<=")) ok = cmp <= 0;
-    else if (b.op.equals(">=")) ok = cmp >= 0;
+    if (op.equals("=")) ok = cmp == 0;
+    else if (op.equals("!=") || op.equals("<>")) ok = cmp != 0;
+    else if (op.equals("<")) ok = cmp < 0;
+    else if (op.equals(">")) ok = cmp > 0;
+    else if (op.equals("<=")) ok = cmp <= 0;
+    else if (op.equals(">=")) ok = cmp >= 0;
     else ok = false;
     return flag(ok);
   }
@@ -573,6 +805,13 @@ public final class TsqlRuntime {
       if (text != null && kind == TsqlSqlRunner.ValueKind.NUMBER) text = text.trim();
       return new Value(text, kind);
     }
+    if (name.equals("ERROR_MESSAGE")) {
+      String message = scope().caughtMessage;
+      return new Value(message == null ? "" : message, TsqlSqlRunner.ValueKind.TEXT);
+    }
+    if (name.equals("ERROR_NUMBER")) {
+      return new Value(Integer.toString(scope().caughtNumber), TsqlSqlRunner.ValueKind.NUMBER);
+    }
     if (name.equals("SPLIT_PART")) {
       String text = asString(eval(call.args.get(0)));
       String delim = asString(eval(call.args.get(1)));
@@ -594,10 +833,6 @@ public final class TsqlRuntime {
 
   private static Value flag(boolean value) {
     return new Value(value ? "1" : "0", TsqlSqlRunner.ValueKind.NUMBER);
-  }
-
-  String rewriteVars(String sql) {
-    return substitute(sql);
   }
 
   private String rewrite(String sql) {
@@ -625,7 +860,7 @@ public final class TsqlRuntime {
         continue;
       }
       if (c == '\'' || c == '"') {
-        int j = SqlText.skipQuoted(sql, i);
+        int j = SqlText.skipImpalaLiteral(sql, i);
         out.append(sql, i, j);
         i = j;
         continue;
@@ -639,14 +874,25 @@ public final class TsqlRuntime {
       }
       if (c == '@') {
         int j = i + 1;
-        if (j < sql.length() && sql.charAt(j) == '@') j++;
+        boolean system = j < sql.length() && sql.charAt(j) == '@';
+        if (system) j++;
         int start = j;
         while (j < sql.length() && (Character.isLetterOrDigit(sql.charAt(j)) || sql.charAt(j) == '_')) j++;
-        String name = sql.substring(start, j);
+        String name = (system ? "@@" : "") + sql.substring(start, j);
         String key = name.toLowerCase(Locale.ROOT);
-        Value current = vars.get(key);
-        if (current == null || current.text == null) out.append("NULL");
-        else out.append(sqlLiteral(current));
+        if (key.startsWith("@@")) {
+          out.append(sqlLiteral(varValue(key)));
+        } else {
+          Scope here = scope();
+          if (!here.declared.containsKey(key)) {
+            if (here.tsql) throw new TsqlError("Must declare the scalar variable @" + name);
+            out.append("NULL");
+          } else {
+            Value current = here.vars.get(key);
+            if (current == null || current.text == null) out.append("NULL");
+            else out.append(sqlLiteral(current));
+          }
+        }
         i = j;
         continue;
       }
@@ -720,15 +966,16 @@ public final class TsqlRuntime {
     return value.stripTrailingZeros().toPlainString();
   }
 
-  private static int compareValues(Value l, Value r) {
+  private int compareValues(Value l, Value r) {
     if (l.text == null && r.text == null) return 0;
     if (l.text == null) return -1;
     if (r.text == null) return 1;
     if (numericPair(l, r)) return decimal(l.text).compareTo(decimal(r.text));
+    if (scope().tsql) return l.text.compareToIgnoreCase(r.text);
     return l.text.compareTo(r.text);
   }
 
-  private static boolean isSetOption(String sql) {
+  public static boolean isSetOption(String sql) {
     String t = sql.trim();
     return t.length() > 4 && t.substring(0, 3).equalsIgnoreCase("SET")
         && Character.isWhitespace(t.charAt(3));
@@ -757,15 +1004,18 @@ public final class TsqlRuntime {
   /** In-memory store used when the caller does not supply one. */
   public static final class MemoryStore implements TsqlProcedureStore {
     private final Map<String, String> sources = new HashMap<String, String>();
-    private final Map<String, Boolean> owners = new HashMap<String, Boolean>();
     private final Map<String, String> ownerNames = new HashMap<String, String>();
 
-    public void upsert(String database, String name, String owner, boolean executeAsOwner,
-        String source) {
+    public void upsert(String database, String name, String owner, String source) {
       String key = key(database, name);
       sources.put(key, source == null ? "" : source);
-      owners.put(key, executeAsOwner);
       ownerNames.put(key, owner == null ? "" : owner);
+    }
+
+    public void drop(String database, String name) {
+      String key = key(database, name);
+      sources.remove(key);
+      ownerNames.remove(key);
     }
 
     public String getSource(String database, String name) {
@@ -777,15 +1027,6 @@ public final class TsqlRuntime {
       if (!sources.containsKey(key)) return null;
       String owner = ownerNames.get(key);
       return owner == null ? "" : owner;
-    }
-
-    public List<String> list(String database) {
-      String prefix = database.toLowerCase(Locale.ROOT) + ".";
-      List<String> names = new ArrayList<String>();
-      for (String key : sources.keySet()) {
-        if (key.startsWith(prefix)) names.add(key.substring(prefix.length()));
-      }
-      return names;
     }
 
     private static String key(String database, String name) {

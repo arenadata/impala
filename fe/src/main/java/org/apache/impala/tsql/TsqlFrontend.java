@@ -1,8 +1,26 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package org.apache.impala.tsql;
 
 import java.util.ArrayList;
 import java.util.Collections;
 
+import org.apache.impala.analysis.Parser;
 import org.apache.impala.authorization.AuthorizationException;
 import org.apache.impala.catalog.PrimitiveType;
 import org.apache.impala.common.AnalysisException;
@@ -19,7 +37,7 @@ import org.apache.impala.thrift.TStmtType;
 import org.apache.impala.util.TSessionStateUtil;
 
 /**
- * ADH-TSQL. The only class {@code Frontend} names. Returns a finished
+ * The only class {@code Frontend} names. Returns a finished
  * {@link TExecRequest} for a T-SQL or LPSQL batch and null for ordinary SQL.
  */
 public final class TsqlFrontend {
@@ -43,6 +61,10 @@ public final class TsqlFrontend {
 
     String user = TSessionStateUtil.getEffectiveUser(queryCtx.session);
     String database = queryCtx.session.database;
+    for (String statement : TsqlAst.staticSql(script)) {
+      if (TsqlRuntime.isSetOption(statement)) continue;
+      Parser.parse(SqlText.withPlaceholders(statement), queryCtx.client_request.query_options);
+    }
     TsqlAccess access = frontend == null ? TsqlAccess.OWNER_ONLY : new TsqlImpalaAccess(frontend);
     for (TsqlAst.Stmt stmt : script.statements) {
       if (!(stmt instanceof TsqlAst.CreateProc)) continue;
@@ -55,7 +77,6 @@ public final class TsqlFrontend {
     tsql.setSource(sql);
     tsql.setDatabase(queryCtx.session.database);
     tsql.setOwner(user);
-    tsql.setInvoker(user);
     tsql.setArg_literals(Collections.<String>emptyList());
 
     TColumn placeholder = new TColumn();
@@ -70,6 +91,7 @@ public final class TsqlFrontend {
     request.setQuery_options(queryCtx.client_request.query_options);
     request.setAnalysis_warnings(new ArrayList<String>());
     request.setResult_set_metadata(metadata);
+    request.setUser_has_profile_access(true);
     request.setTsql_request(tsql);
     return request;
   }

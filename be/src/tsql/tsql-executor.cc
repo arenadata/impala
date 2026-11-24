@@ -1,10 +1,31 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 // ADH-TSQL
 #include "tsql/tsql-executor.h"
 
 #include "tsql/tsql-child-query.h"
 #include "tsql/tsql-flags.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <exception>
+#include <mutex>
 
 #include "gen-cpp/Tsql_types.h"
 #include "rpc/thrift-util.h"
@@ -12,6 +33,8 @@
 #include "runtime/types.h"
 #include "service/client-request-state.h"
 #include "service/impala-server.h"
+#include "service/query-options.h"
+#include "util/debug-util.h"
 #include "util/jni-util.h"
 #include "util/string-util.h"
 
@@ -23,20 +46,41 @@ static jclass bridge_class = nullptr;
 static jmethodID start_method = nullptr;
 static jmethodID next_method = nullptr;
 static jmethodID close_method = nullptr;
+static std::once_flag bridge_once;
+static Status bridge_status;
+static std::atomic<int> batches_running{0};
+
+static void InitBridgeOnce() {
+  JNIEnv* env = JniUtil::GetJNIEnv();
+  if (env == nullptr) {
+    bridge_status = Status("No JNIEnv for T-SQL");
+    return;
+  }
+  jclass local = nullptr;
+  bridge_status = JniUtil::GetGlobalClassRef(
+      env, "org/apache/impala/tsql/TsqlBridge", &local);
+  if (!bridge_status.ok()) return;
+  jmethodID start = nullptr;
+  jmethodID next = nullptr;
+  jmethodID close = nullptr;
+  JniMethodDescriptor start_desc = {"start", "([B)[B", &start};
+  JniMethodDescriptor next_desc = {"next", "([B)[B", &next};
+  JniMethodDescriptor close_desc = {"close", "(J)V", &close};
+  bridge_status = JniUtil::LoadStaticJniMethod(env, local, &start_desc);
+  if (!bridge_status.ok()) return;
+  bridge_status = JniUtil::LoadStaticJniMethod(env, local, &next_desc);
+  if (!bridge_status.ok()) return;
+  bridge_status = JniUtil::LoadStaticJniMethod(env, local, &close_desc);
+  if (!bridge_status.ok()) return;
+  start_method = start;
+  next_method = next;
+  close_method = close;
+  bridge_class = local;
+}
 
 static Status InitBridge() {
-  if (bridge_class != nullptr) return Status::OK();
-  JNIEnv* env = JniUtil::GetJNIEnv();
-  if (env == nullptr) return Status("No JNIEnv for T-SQL");
-  RETURN_IF_ERROR(JniUtil::GetGlobalClassRef(
-      env, "org/apache/impala/tsql/TsqlBridge", &bridge_class));
-  JniMethodDescriptor start_desc = {"start", "([B)[B", &start_method};
-  JniMethodDescriptor next_desc = {"next", "([B)[B", &next_method};
-  JniMethodDescriptor close_desc = {"close", "(J)V", &close_method};
-  RETURN_IF_ERROR(JniUtil::LoadStaticJniMethod(env, bridge_class, &start_desc));
-  RETURN_IF_ERROR(JniUtil::LoadStaticJniMethod(env, bridge_class, &next_desc));
-  RETURN_IF_ERROR(JniUtil::LoadStaticJniMethod(env, bridge_class, &close_desc));
-  return Status::OK();
+  std::call_once(bridge_once, InitBridgeOnce);
+  return bridge_status;
 }
 
 static Status CallBytes(jmethodID method, const uint8_t* data, uint32_t len,
@@ -63,13 +107,36 @@ TsqlExecutor::TsqlExecutor(ClientRequestState* parent, ImpalaServer* server)
   : parent_(parent), server_(server) {}
 
 TsqlExecutor::~TsqlExecutor() {
+  Release();
   if (handle_ != 0 && close_method != nullptr) {
     JNIEnv* env = JniUtil::GetJNIEnv();
     if (env != nullptr) {
       env->CallStaticVoidMethod(bridge_class, close_method, static_cast<jlong>(handle_));
     }
   }
-  delete active_;
+}
+
+Status TsqlExecutor::Admit() {
+  int limit = FLAGS_tsql_max_concurrent_batches;
+  if (limit <= 0) {
+    admitted_ = true;
+    return Status::OK();
+  }
+  int current = batches_running.load();
+  while (current < limit) {
+    if (batches_running.compare_exchange_weak(current, current + 1)) {
+      admitted_ = true;
+      return Status::OK();
+    }
+  }
+  return Status(Substitute(
+      "T-SQL batch limit of $0 is reached (--tsql_max_concurrent_batches)", limit));
+}
+
+void TsqlExecutor::Release() {
+  if (!admitted_) return;
+  admitted_ = false;
+  if (FLAGS_tsql_max_concurrent_batches > 0) batches_running.fetch_sub(1);
 }
 
 void TsqlExecutor::Cancel() {
@@ -86,7 +153,10 @@ void TsqlExecutor::Run() {
     const char* what = e.what();
     status = Status(what == nullptr ? "T-SQL execution failed" : what);
   }
+  Release();
   if (!status.ok()) {
+    LOG(INFO) << "T-SQL batch failed, query_id=" << PrintId(parent_->query_id())
+              << ": " << status.GetDetail();
     lock_guard<mutex> guard(*parent_->lock());
     discard_result(parent_->UpdateQueryStatus(status));
   }
@@ -128,7 +198,9 @@ void TsqlExecutor::PublishClientResult(const TsqlChildQuery& child) {
 
 Status TsqlExecutor::RunInternal() {
   RETURN_IF_ERROR(InitBridge());
-  const TSqlRequest& request = parent_->exec_request().tsql_request;
+  TSqlRequest request = parent_->exec_request().tsql_request;
+  if (FLAGS_tsql_max_steps > 0) request.__set_max_steps(FLAGS_tsql_max_steps);
+  request.__set_max_nesting(FLAGS_tsql_max_nesting);
   ThriftSerializer serializer(false);
   vector<uint8_t> bytes;
   RETURN_IF_ERROR(serializer.SerializeToVector(&request, &bytes));
@@ -160,6 +232,10 @@ Status TsqlExecutor::RunInternal() {
     TSqlStep step;
     RETURN_IF_ERROR(DeserializeThriftMsg(reinterpret_cast<const uint8_t*>(step_raw.data()),
         &step_len, false, &step));
+    if (step.kind == TSqlStepKind::YIELD) {
+      feed = TSqlFeed();
+      continue;
+    }
     if (step.kind == TSqlStepKind::FAILED) {
       return Status(step.error_message);
     }
@@ -181,12 +257,20 @@ Status TsqlExecutor::RunInternal() {
         || step.kind == TSqlStepKind::FINISHED) {
       int cap = step.kind == TSqlStepKind::SQL
           ? FLAGS_tsql_max_cursor_rows : FLAGS_tsql_max_result_rows;
-      string user;
-      const TSqlRequest& tsql = parent_->exec_request().tsql_request;
-      if (tsql.owner != tsql.invoker) user = tsql.owner;
       std::unique_ptr<TsqlChildQuery> child(new TsqlChildQuery(
-          parent_, server_, step.sql, user));
-      if (step.__isset.procedure_options) child->set_procedure_options(step.procedure_options);
+          parent_, server_, step.sql));
+      map<string, string> overlay;
+      TQueryOptionsToMap(parent_->exec_request().query_options, &overlay);
+      overlay.erase("DEBUG_ACTION");
+      if (parent_->exec_request().request_pool_set_by_frontend) overlay.erase("REQUEST_POOL");
+      if (step.__isset.procedure_options) {
+        for (const auto& kv : step.procedure_options) {
+          string key = kv.first;
+          std::transform(key.begin(), key.end(), key.begin(), ::toupper);
+          overlay[key] = kv.second;
+        }
+      }
+      child->set_procedure_options(overlay);
       {
         lock_guard<mutex> l(lock_);
         if (cancelled_) return Status::CANCELLED;

@@ -1,3 +1,20 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package org.apache.impala.lpsql;
 
 import java.util.ArrayList;
@@ -43,6 +60,7 @@ public final class LpsqlParser {
       parser.skipSemi();
     }
     TsqlParser.validateBareSelect(script.statements, true);
+    TsqlParser.validateSingleCreate(script);
     return script;
   }
 
@@ -64,6 +82,9 @@ public final class LpsqlParser {
         || isEofAfter(1))) {
       bump();
       return one(new TsqlAst.RawSql(""));
+    }
+    if (check("DROP") && (lookaheadIs(1, "PROCEDURE") || lookaheadIs(1, "PROC"))) {
+      return one(parseDropProc());
     }
     if (check("CREATE")) return parseCreateOrSql();
     if (check("DECLARE")) return one(parseDeclare());
@@ -98,15 +119,28 @@ public final class LpsqlParser {
       return one(new TsqlAst.DeallocateCursor(ident()));
     }
     if (checkIdent() && lookaheadIs(1, "=")) return one(parseAssign());
-    return one(new TsqlAst.RawSql(rewriteSql(readRawSql())));
+    return one(new TsqlAst.RawSql(readRawSql()));
   }
 
   private List<TsqlAst.Stmt> parseCreateOrSql() {
     if (lookaheadIs(1, "PACKAGE") || (lookaheadIs(1, "OR") && lookaheadIs(3, "PACKAGE"))) {
       throw new TsqlParser.ParseException("Packages are not supported");
     }
-    if (!isCreateProcedure()) return one(new TsqlAst.RawSql(rewriteSql(readRawSql())));
+    if (!isCreateProcedure()) return one(new TsqlAst.RawSql(readRawSql()));
     return one(parseCreate());
+  }
+
+  private TsqlAst.Stmt parseDropProc() {
+    bump();
+    bump();
+    TsqlAst.DropProc drop = new TsqlAst.DropProc();
+    if (check("IF") && lookaheadIs(1, "EXISTS")) {
+      bump();
+      bump();
+      drop.ifExists = true;
+    }
+    drop.name = ident();
+    return drop;
   }
 
   private TsqlAst.Stmt parseCreate() {
@@ -127,6 +161,10 @@ public final class LpsqlParser {
         throw new TsqlParser.ParseException("Only CREATE PROCEDURE is an LPSQL statement");
       }
       bump();
+      if (check("SECURITY")) {
+        throw new TsqlParser.ParseException(
+            "SECURITY DEFINER is not supported; procedures run with the caller's privileges");
+      }
       TsqlAst.CreateProc proc = new TsqlAst.CreateProc();
       proc.name = ident();
       proc.source = MARKER;
@@ -188,7 +226,7 @@ public final class LpsqlParser {
       if (!check("FOR")) return new TsqlAst.DeclareCursor(name, "", null);
       bump();
       if (dynamicQuery()) return new TsqlAst.DeclareCursor(name, null, parseExpr());
-      return new TsqlAst.DeclareCursor(name, rewriteSql(readRawSql()), null);
+      return new TsqlAst.DeclareCursor(name, readRawSql(), null);
     }
     scope.add(name.toLowerCase(Locale.ROOT));
     if (check("=")) {
@@ -248,7 +286,7 @@ public final class LpsqlParser {
     }
     if (intoAt < 0) {
       p = start;
-      return new TsqlAst.BareSelect(rewriteSql(readRawSql()));
+      return new TsqlAst.BareSelect(readRawSql());
     }
     String list = joinTokens(p, intoAt);
     p = intoAt + 1;
@@ -259,7 +297,7 @@ public final class LpsqlParser {
     } while (check(","));
     String rest = "";
     if (!isEof() && !check(";") && !check("GO") && !isBoundary(peek())) rest = readRawSql();
-    assign.sql = rewriteSql("SELECT " + list + (rest.isEmpty() ? "" : " " + rest));
+    assign.sql = "SELECT " + list + (rest.isEmpty() ? "" : " " + rest);
     for (String target : assign.targets) scope.add(target.toLowerCase(Locale.ROOT));
     return assign;
   }
@@ -344,13 +382,13 @@ public final class LpsqlParser {
     expect("LOOP");
     List<TsqlAst.Stmt> out = new ArrayList<TsqlAst.Stmt>();
     if (dynamic != null) out.add(new TsqlAst.DeclareCursor(name, null, dynamic));
-    else out.add(new TsqlAst.DeclareCursor(name, rewriteSql(sql), null));
+    else out.add(new TsqlAst.DeclareCursor(name, sql, null));
     out.add(new TsqlAst.OpenCursor(name));
     TsqlAst.FetchCursor first = new TsqlAst.FetchCursor();
     first.name = name;
     out.add(first);
     TsqlAst.WhileStmt loop = new TsqlAst.WhileStmt();
-    loop.condition = new TsqlAst.Binary("=", new TsqlAst.Var("fetch_status"),
+    loop.condition = new TsqlAst.Binary("=", new TsqlAst.Var("@@fetch_status"),
         new TsqlAst.Literal("0", false));
     loop.body.addAll(body);
     TsqlAst.FetchCursor again = new TsqlAst.FetchCursor();
@@ -490,8 +528,17 @@ public final class LpsqlParser {
   }
 
   private TsqlAst.Expr parseAdd() {
-    TsqlAst.Expr e = parsePrimary();
+    TsqlAst.Expr e = parseMul();
     while (check("+") || check("-") || check("||")) {
+      String op = bump().text;
+      e = new TsqlAst.Binary(op, e, parseMul());
+    }
+    return e;
+  }
+
+  private TsqlAst.Expr parseMul() {
+    TsqlAst.Expr e = parsePrimary();
+    while (check("*") || check("/") || check("%")) {
       String op = bump().text;
       e = new TsqlAst.Binary(op, e, parsePrimary());
     }
@@ -509,6 +556,14 @@ public final class LpsqlParser {
       TsqlAst.Expr e = parseExpr();
       expect(")");
       return e;
+    }
+    if (!isEof() && peek().kind == Kind.AT) {
+      String raw = bump().text;
+      String name = raw.startsWith("@") ? raw.substring(1) : raw;
+      if (!scope.contains(name.toLowerCase(Locale.ROOT))) {
+        throw new TsqlParser.ParseException("Unknown variable :" + name);
+      }
+      return new TsqlAst.Var(name);
     }
     if (checkString()) return new TsqlAst.Literal(SqlText.value(bump().text), true);
     if (checkNumber()) return new TsqlAst.Literal(bump().text, false);
@@ -546,116 +601,26 @@ public final class LpsqlParser {
         expect(")");
         return call;
       }
-      if (name.equalsIgnoreCase("SQLCODE")) return new TsqlAst.Var("sqlcode");
+      if (name.equalsIgnoreCase("SQLCODE")) return new TsqlAst.Var("@@sqlcode");
       if (scope.contains(name.toLowerCase(Locale.ROOT))) return new TsqlAst.Var(name);
       return new TsqlAst.Literal(name, false);
     }
     throw new TsqlParser.ParseException("Expected expression at " + peekText());
   }
 
-  private String rewriteSql(String sql) {
-    if (sql == null || sql.isEmpty() || scope.isEmpty()) return sql;
-    StringBuilder out = new StringBuilder();
-    int i = 0;
-    while (i < sql.length()) {
-      char c = sql.charAt(i);
-      if (c == '-' && i + 1 < sql.length() && sql.charAt(i + 1) == '-') {
-        int j = sql.indexOf('\n', i);
-        if (j < 0) j = sql.length();
-        out.append(sql, i, j);
-        i = j;
-        continue;
-      }
-      if (c == '/' && i + 1 < sql.length() && sql.charAt(i + 1) == '*') {
-        int j = sql.indexOf("*/", i + 2);
-        j = j < 0 ? sql.length() : j + 2;
-        out.append(sql, i, j);
-        i = j;
-        continue;
-      }
-      if (c == '\'' || c == '"') {
-        int j = skipQuoted(sql, i, c);
-        out.append(sql, i, j);
-        i = j;
-        continue;
-      }
-      if (c == '`') {
-        int j = sql.indexOf('`', i + 1);
-        j = j < 0 ? sql.length() : j + 1;
-        out.append(sql, i, j);
-        i = j;
-        continue;
-      }
-      if (c == '@') {
-        int j = i + 1;
-        while (j < sql.length() && isNameChar(sql.charAt(j))) j++;
-        out.append(sql, i, j);
-        i = j;
-        continue;
-      }
-      if (Character.isLetter(c) || c == '_') {
-        int j = i + 1;
-        while (j < sql.length() && isNameChar(sql.charAt(j))) j++;
-        String ident = sql.substring(i, j);
-        if (scope.contains(ident.toLowerCase(Locale.ROOT)) && !sqlKeyword(ident)
-            && !precededByDot(out) && !precededByWord(out, "AS")) {
-          out.append('@').append(ident);
-        } else {
-          out.append(ident);
-        }
-        i = j;
-        continue;
-      }
-      out.append(c);
-      i++;
-    }
-    return out.toString();
-  }
-
-  private static boolean precededByDot(StringBuilder out) {
-    int k = out.length() - 1;
-    while (k >= 0 && Character.isWhitespace(out.charAt(k))) k--;
-    return k >= 0 && out.charAt(k) == '.';
-  }
-
-  /** An identifier after AS is a column alias, not a variable value. */
-  private static boolean precededByWord(StringBuilder out, String word) {
-    int k = out.length() - 1;
-    while (k >= 0 && Character.isWhitespace(out.charAt(k))) k--;
-    int end = k + 1;
-    while (k >= 0 && isNameChar(out.charAt(k))) k--;
-    int start = k + 1;
-    if (end - start != word.length()) return false;
-    for (int i = 0; i < word.length(); i++) {
-      char c = out.charAt(start + i);
-      if (c >= 'A' && c <= 'Z') c = (char) (c - 'A' + 'a');
-      char expected = word.charAt(i);
-      if (expected >= 'A' && expected <= 'Z') expected = (char) (expected - 'A' + 'a');
-      if (c != expected) return false;
-    }
-    return true;
-  }
-
-  private static boolean sqlKeyword(String name) {
-    String upper = name.toUpperCase(Locale.ROOT);
-    return upper.equals("AS") || upper.equals("FROM") || upper.equals("WHERE")
-        || upper.equals("SELECT") || upper.equals("AND") || upper.equals("OR")
-        || upper.equals("ON") || upper.equals("JOIN") || upper.equals("INTO")
-        || upper.equals("SET") || upper.equals("IN") || upper.equals("IS")
-        || upper.equals("NULL") || upper.equals("NOT") || upper.equals("BY")
-        || upper.equals("ORDER") || upper.equals("GROUP") || upper.equals("LIMIT")
-        || upper.equals("INSERT") || upper.equals("VALUES") || upper.equals("TABLE");
-  }
 
   private String readRawSql() {
     StringBuilder sb = new StringBuilder();
     int depth = 0;
     while (!isEof()) {
       Tok t = peek();
-      if (depth == 0 && (t.text.equals(";") || t.text.equalsIgnoreCase("GO"))) break;
-      if (depth == 0 && isBoundary(t) && sb.length() > 0 && !isIfExists(t)) break;
-      if (t.text.equals("(")) depth++;
-      if (t.text.equals(")")) depth--;
+      if (t.kind != Kind.STRING && depth == 0
+          && (t.text.equals(";") || t.text.equalsIgnoreCase("GO"))) break;
+      if (t.kind != Kind.STRING && depth == 0 && isBoundary(t) && sb.length() > 0 && !isIfExists(t)) {
+        throw new TsqlParser.ParseException("Missing ';' after SQL statement");
+      }
+      if (t.kind != Kind.STRING && t.text.equals("(")) depth++;
+      if (t.kind != Kind.STRING && t.text.equals(")")) depth--;
       appendTok(sb, t);
       bump();
     }
@@ -687,7 +652,13 @@ public final class LpsqlParser {
     }
   }
 
-  private static void appendTok(StringBuilder sb, Tok t) {
+  private void appendTok(StringBuilder sb, Tok t) {
+    if (t.kind == Kind.AT) {
+      String name = t.text.startsWith("@") ? t.text.substring(1) : t.text;
+      if (!scope.contains(name.toLowerCase(Locale.ROOT))) {
+        throw new TsqlParser.ParseException("Unknown variable :" + name);
+      }
+    }
     if (sb.length() > 0 && t.leadingSpace) sb.append(' ');
     if (t.kind == Kind.STRING) sb.append('\'').append(t.text).append('\'');
     else sb.append(t.text);
@@ -772,7 +743,8 @@ public final class LpsqlParser {
   }
 
   private boolean check(String text) {
-    return !isEof() && toks.get(p).text.equalsIgnoreCase(text);
+    return !isEof() && toks.get(p).kind != Kind.STRING
+        && toks.get(p).text.equalsIgnoreCase(text);
   }
 
   private boolean lookaheadIs(int n, String text) {
@@ -806,7 +778,7 @@ public final class LpsqlParser {
     return bump().text;
   }
 
-  private enum Kind { IDENT, STRING, NUMBER, SYMBOL, EOF }
+  private enum Kind { IDENT, AT, STRING, NUMBER, SYMBOL, EOF }
 
   private static final class Tok {
     final Kind kind;
@@ -843,8 +815,16 @@ public final class LpsqlParser {
         space = true;
         continue;
       }
+      if (c == ':' && i + 1 < sql.length() && isNameChar(sql.charAt(i + 1))) {
+        int j = i + 1;
+        while (j < sql.length() && isNameChar(sql.charAt(j))) j++;
+        out.add(new Tok(Kind.AT, "@" + sql.substring(i + 1, j), space));
+        space = false;
+        i = j;
+        continue;
+      }
       if (c == '\'' || c == '"') {
-        int j = SqlText.skipQuoted(sql, i);
+        int j = SqlText.skipSourceLiteral(sql, i);
         out.add(new Tok(Kind.STRING, SqlText.impalaBody(sql, i, j), space));
         space = false;
         i = j;
@@ -893,11 +873,6 @@ public final class LpsqlParser {
 
   private static boolean isNameChar(char c) {
     return Character.isLetterOrDigit(c) || c == '_';
-  }
-
-  private static int skipQuoted(String sql, int i, char q) {
-    if (sql.charAt(i) != q) return sql.length();
-    return SqlText.skipQuoted(sql, i);
   }
 
 }

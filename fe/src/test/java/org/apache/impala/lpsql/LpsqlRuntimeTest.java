@@ -1,3 +1,20 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package org.apache.impala.lpsql;
 
 import java.util.ArrayList;
@@ -10,10 +27,16 @@ import java.util.Map;
 import org.apache.impala.tsql.TsqlParser;
 import org.apache.impala.tsql.TsqlRuntime;
 import org.apache.impala.tsql.TsqlSqlRunner;
+import org.junit.Test;
 
 /** Behavior of LPSQL lowered onto the shared runtime. */
 public final class LpsqlRuntimeTest {
   private static int failed;
+
+  @Test
+  public void all() {
+    main(new String[0]);
+  }
 
   public static void main(String[] args) {
     rejectedByTsqlAcceptedByLpsql();
@@ -29,7 +52,7 @@ public final class LpsqlRuntimeTest {
     cursorLoopSumsEachRowOnce();
     if (failed > 0) {
       System.err.println(failed + " test(s) failed");
-      System.exit(1);
+      throw new AssertionError(failed + " test(s) failed");
     }
     System.out.println("LpsqlRuntimeTest OK");
   }
@@ -69,7 +92,7 @@ public final class LpsqlRuntimeTest {
         + "  SET i = i + 1;\n"
         + "END LOOP;\n"
         + "SELECT COUNT(*) INTO row_nums FROM default.temp_table;\n"
-        + "SELECT row_nums AS result;\n");
+        + "SELECT :row_nums AS result;\n");
     RecordingRunner runner = new RecordingRunner();
     TsqlRuntime.Step step = runUntilClient(src, runner);
     check(step.kind == TsqlRuntime.Kind.CLIENT_RESULT, "client result");
@@ -145,7 +168,7 @@ public final class LpsqlRuntimeTest {
         + "  END;\n"
         + "  SET i = i + 1;\n"
         + "END LOOP;\n"
-        + "SELECT n AS result;\n");
+        + "SELECT :n AS result;\n");
     RecordingRunner runner = new RecordingRunner();
     runner.failSqlContaining = "boom";
     TsqlRuntime.Step step = runUntilClient(src, runner);
@@ -158,7 +181,7 @@ public final class LpsqlRuntimeTest {
         + "LPSQL\n"
         + "CREATE OR REPLACE PROCEDURE p (IN x INT)\n"
         + "BEGIN\n"
-        + "  SELECT x AS result;\n"
+        + "  SELECT :x AS result;\n"
         + "END";
     TsqlRuntime.MemoryStore store = new TsqlRuntime.MemoryStore();
     TsqlRuntime create = new TsqlRuntime(src, "default", "owner", store);
@@ -175,7 +198,7 @@ public final class LpsqlRuntimeTest {
 
   private static void storedTsqlStaysOnTsqlParser() {
     TsqlRuntime.MemoryStore store = new TsqlRuntime.MemoryStore();
-    store.upsert("default", "q", "owner", false,
+    store.upsert("default", "q", "owner",
         "TSQL\nCREATE PROCEDURE q @x INT AS BEGIN SELECT @x AS n; END");
     RecordingRunner runner = new RecordingRunner();
     TsqlRuntime.Step step = runUntilClient("TSQL\nEXEC q @x = 4;", runner, store);
@@ -187,7 +210,7 @@ public final class LpsqlRuntimeTest {
     String src = lpsql(""
         + "DECLARE bucket STRING = 'pos';\n"
         + "DECLARE n INT = 4;\n"
-        + "SELECT bucket AS bucket, n AS n;\n");
+        + "SELECT :bucket AS bucket, :n AS n;\n");
     RecordingRunner runner = new RecordingRunner();
     TsqlRuntime.Step step = runUntilClient(src, runner);
     check("SELECT 'pos' AS bucket, 4 AS n".equals(step.sql), "alias sql was " + step.sql);
@@ -205,7 +228,7 @@ public final class LpsqlRuntimeTest {
         + "  SET s = s + num;\n"
         + "END LOOP;\n"
         + "CLOSE c;\n"
-        + "SELECT s AS total;\n");
+        + "SELECT :s AS total;\n");
     RecordingRunner runner = new RecordingRunner();
     runner.cursorRows = Arrays.asList("2", "3", "4");
     TsqlRuntime.Step step = runUntilClient(src, runner);

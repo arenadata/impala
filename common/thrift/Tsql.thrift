@@ -1,4 +1,21 @@
-// ADH-TSQL. Step protocol between the coordinator and the T-SQL runtime.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+// Step protocol between the coordinator and the T-SQL runtime.
 // Field ids in this file are independent of Frontend.thrift.
 
 namespace cpp impala
@@ -9,6 +26,8 @@ enum TSqlStepKind {
   CLIENT_RESULT = 1
   FINISHED = 2
   FAILED = 3
+  // The runtime paused so the coordinator can observe cancellation.
+  YIELD = 4
 }
 
 // How a child-query cell should be substituted back into Impala SQL.
@@ -24,8 +43,10 @@ struct TSqlRequest {
   2: required string database
   3: optional string procedure_name
   4: required string owner
-  5: required string invoker
   6: required list<string> arg_literals
+  // 0 means unlimited. Filled by the coordinator from --tsql_max_steps.
+  7: optional i64 max_steps
+  8: optional i32 max_nesting
 }
 
 struct TSqlCell {

@@ -1,26 +1,37 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package org.apache.impala.tsql;
 
 /**
- * ADH-TSQL. Impala string literals use backslash escapes, not doubled quotes.
- * Procedure text is lexed once into that form so later substitution and the
- * statement sent to Impala agree.
+ * Procedure source follows its dialect: a doubled quote is one quote and a
+ * backslash is an ordinary character. Impala SQL uses backslash escapes, so a
+ * literal is translated only when it is emitted.
  */
 public final class SqlText {
   private SqlText() {}
 
-  /** Index just past the literal that starts at {@code sql[start]}. */
-  public static int skipQuoted(String sql, int start) {
+  /** Source literal. A backslash does not escape the closing quote. */
+  public static int skipSourceLiteral(String sql, int start) {
     char q = sql.charAt(start);
     int n = sql.length();
     int j = start + 1;
     while (j < n) {
-      char c = sql.charAt(j);
-      if (c == '\\') {
-        // A trailing backslash stays inside an unclosed literal.
-        j += 2;
-        continue;
-      }
-      if (c == q) {
+      if (sql.charAt(j) == q) {
         if (j + 1 < n && sql.charAt(j + 1) == q) {
           j += 2;
           continue;
@@ -32,24 +43,45 @@ public final class SqlText {
     return n;
   }
 
+  /** Impala literal. A backslash escapes the next character, including a quote. */
+  public static int skipImpalaLiteral(String sql, int start) {
+    char q = sql.charAt(start);
+    int n = sql.length();
+    int j = start + 1;
+    while (j < n) {
+      char c = sql.charAt(j);
+      if (c == '\\') {
+        j += 2;
+        continue;
+      }
+      if (c == q) return j + 1;
+      j++;
+    }
+    return n;
+  }
+
+  /** Kept for callers that already hold Impala SQL. */
+  public static int skipQuoted(String sql, int start) {
+    return skipImpalaLiteral(sql, start);
+  }
+
   /**
-   * Body of {@code sql[start, end)} as it must appear between single quotes in
-   * Impala SQL. Doubled quotes become {@code \'} ; a backslash escape is kept.
+   * Body of a source literal {@code sql[start, end)} as it must appear between
+   * single quotes in Impala SQL.
    */
   public static String impalaBody(String sql, int start, int end) {
     char q = sql.charAt(start);
-    int stop = end - 1 > start && sql.charAt(end - 1) == q && !escaped(sql, start, end - 1)
+    int stop = end - 1 > start && end <= sql.length() && sql.charAt(end - 1) == q
         ? end - 1 : end;
     StringBuilder sb = new StringBuilder();
     for (int j = start + 1; j < stop; j++) {
       char c = sql.charAt(j);
-      if (c == '\\' && j + 1 < stop) {
-        sb.append(c).append(sql.charAt(++j));
+      if (c == '\\') {
+        sb.append("\\\\");
       } else if (c == q && j + 1 < stop && sql.charAt(j + 1) == q) {
         sb.append(q == '\'' ? "\\'" : String.valueOf(q));
         j++;
       } else if (c == '\'') {
-        // A single quote inside an LPSQL double-quoted string.
         sb.append("\\'");
       } else {
         sb.append(c);
@@ -58,7 +90,7 @@ public final class SqlText {
     return sb.toString();
   }
 
-  /** Value of a procedure-level literal. Only {@code \'} {@code \"} and {@code \\} are decoded. */
+  /** Value of an Impala literal body. Only {@code \'} {@code \"} and {@code \\} are decoded. */
   public static String value(String impalaBody) {
     if (impalaBody == null) return null;
     StringBuilder sb = new StringBuilder();
@@ -83,13 +115,32 @@ public final class SqlText {
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'";
   }
 
-  /** True when the quote at {@code pos} is escaped by a backslash. */
-  public static boolean escaped(String sql, int start, int pos) {
-    int slashes = 0;
-    for (int k = pos - 1; k > start; k--) {
-      if (sql.charAt(k) != '\\') break;
-      slashes++;
+  /** Replaces {@code @name} outside Impala literals with NULL so the SQL parser can check shape. */
+  public static String withPlaceholders(String sql) {
+    if (sql == null) return null;
+    StringBuilder out = new StringBuilder();
+    int i = 0;
+    while (i < sql.length()) {
+      char c = sql.charAt(i);
+      if (c == '\'' || c == '"') {
+        int j = skipImpalaLiteral(sql, i);
+        out.append(sql, i, j);
+        i = j;
+        continue;
+      }
+      if (c == '@') {
+        int j = i + 1;
+        if (j < sql.length() && sql.charAt(j) == '@') j++;
+        while (j < sql.length() && (Character.isLetterOrDigit(sql.charAt(j)) || sql.charAt(j) == '_')) {
+          j++;
+        }
+        out.append("NULL");
+        i = j;
+        continue;
+      }
+      out.append(c);
+      i++;
     }
-    return (slashes % 2) == 1;
+    return out.toString();
   }
 }

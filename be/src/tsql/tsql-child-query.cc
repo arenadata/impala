@@ -1,13 +1,30 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 // ADH-TSQL
 #include "tsql/tsql-child-query.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 #include "gen-cpp/TCLIService_types.h"
 #include "service/client-request-state.h"
 #include "service/impala-server.h"
-#include "service/impala-server.inline.h"
 #include "util/debug-util.h"
 
 #include "common/names.h"
@@ -17,6 +34,17 @@ using namespace apache::hive::service::cli::thrift;
 namespace impala {
 
 namespace {
+
+// Same 16-byte guid/secret layout ImpalaServer::THandleIdentifierToTUniqueId reads.
+void SessionHandle(const TUniqueId& id, const TUniqueId& secret, THandleIdentifier* handle) {
+  char bytes[16];
+  memcpy(bytes, &id.hi, 8);
+  memcpy(bytes + 8, &id.lo, 8);
+  handle->guid.assign(bytes, 16);
+  memcpy(bytes, &secret.hi, 8);
+  memcpy(bytes + 8, &secret.lo, 8);
+  handle->secret.assign(bytes, 16);
+}
 
 TSqlValueKind::type ValueKindOf(const TTypeDesc& desc) {
   if (desc.types.empty() || !desc.types[0].__isset.primitiveEntry) {
@@ -119,8 +147,8 @@ void AppendColumnar(
 } // namespace
 
 TsqlChildQuery::TsqlChildQuery(ClientRequestState* parent, ImpalaServer* server,
-    const std::string& sql, const std::string& effective_user)
-  : parent_(parent), server_(server), sql_(sql), effective_user_(effective_user) {}
+    const std::string& sql)
+  : parent_(parent), server_(server), sql_(sql) {}
 
 Status TsqlChildQuery::Fetch(int max_rows, bool* hit_cap) {
   DCHECK(hit_cap != nullptr);
@@ -142,8 +170,7 @@ void TsqlChildQuery::Close() {
 Status TsqlChildQuery::FetchInternal(int max_rows, bool* hit_cap) {
   const TUniqueId& session_id = parent_->session_id();
   TExecuteStatementReq req;
-  ImpalaServer::TUniqueIdToTHandleIdentifier(
-      session_id, parent_->session()->secret, &req.sessionHandle.sessionId);
+  SessionHandle(session_id, parent_->session()->secret, &req.sessionHandle.sessionId);
   req.__set_statement(sql_);
   // Procedure options only. Session NUM_NODES and SYNC_DDL are left alone.
   req.__set_confOverlay(options_);
@@ -153,9 +180,7 @@ Status TsqlChildQuery::FetchInternal(int max_rows, bool* hit_cap) {
     lock_guard<mutex> l(lock_);
     if (cancelled_) return Status::CANCELLED;
   }
-  // Friend call. effective_user_ is applied inside the server, not via a client overlay.
-  server_->ExecuteStatementCommon(exec_resp, req, nullptr,
-      effective_user_.empty() ? nullptr : &effective_user_);
+  server_->ExecuteStatement(exec_resp, req);
   RETURN_IF_ERROR(Status(exec_resp.status));
   handle_ = exec_resp.operationHandle;
   {
@@ -202,6 +227,12 @@ Status TsqlChildQuery::FetchInternal(int max_rows, bool* hit_cap) {
         } else if (cell.__isset.i32Val && cell.i32Val.__isset.value) {
           nils.push_back(false);
           vals.push_back(std::to_string(cell.i32Val.value));
+        } else if (cell.__isset.i16Val && cell.i16Val.__isset.value) {
+          nils.push_back(false);
+          vals.push_back(std::to_string(cell.i16Val.value));
+        } else if (cell.__isset.byteVal && cell.byteVal.__isset.value) {
+          nils.push_back(false);
+          vals.push_back(std::to_string(cell.byteVal.value));
         } else if (cell.__isset.doubleVal && cell.doubleVal.__isset.value) {
           nils.push_back(false);
           vals.push_back(DoubleText(cell.doubleVal.value));

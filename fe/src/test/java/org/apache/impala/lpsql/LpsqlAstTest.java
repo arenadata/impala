@@ -1,3 +1,20 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package org.apache.impala.lpsql;
 
 import java.io.File;
@@ -6,10 +23,16 @@ import java.nio.file.Files;
 
 import org.apache.impala.tsql.TsqlAst;
 import org.apache.impala.tsql.TsqlParser;
+import org.junit.Test;
 
 /** Keyword to AST. One case per LPSQL form. */
 public final class LpsqlAstTest {
   private static int failed;
+
+  @Test
+  public void all() {
+    main(new String[0]);
+  }
 
   public static void main(String[] args) {
     expect("LPSQL $$ BEGIN NULL; END $$", "RawSql");
@@ -54,7 +77,7 @@ public final class LpsqlAstTest {
         "DeclareCursor c dynamic=Literal 'SHOW TABLES'\n"
             + "OpenCursor c\n"
             + "FetchCursor c\n"
-            + "WhileStmt (Var fetch_status = Literal 0)\n"
+            + "WhileStmt (Var @@fetch_status = Literal 0)\n"
             + "  ExecString CursorField c.name\n"
             + "  FetchCursor c\n"
             + "CloseCursor c");
@@ -68,11 +91,11 @@ public final class LpsqlAstTest {
         "ExecProc p\n  Arg Literal 1\n  Arg Literal 2");
     expect("RETURN;", "ReturnStmt");
     expect("IF SQLCODE <> 0 THEN LEAVE; END IF;",
-        "IfStmt (Var sqlcode <> Literal 0)\n  then\n    BreakStmt");
+        "IfStmt (Var @@sqlcode <> Literal 0)\n  then\n    BreakStmt");
     expect("n = QUOTE_LITERAL(s);", "SetStmt n = Call QUOTE_LITERAL(Literal s)");
     expect("DECLARE n INT; SELECT n AS result;",
-        "DeclareVar n INT\nBareSelect SELECT @n AS result");
-    expect("DECLARE n INT; SELECT n AS n;",
+        "DeclareVar n INT\nBareSelect SELECT n AS result");
+    expect("DECLARE n INT; SELECT :n AS n;",
         "DeclareVar n INT\nBareSelect SELECT @n AS n");
     expectFail("USE other;");
     expectFail("GOTO x;");
@@ -91,7 +114,7 @@ public final class LpsqlAstTest {
     examplesParse();
     if (failed > 0) {
       System.err.println(failed + " test(s) failed");
-      System.exit(1);
+      throw new AssertionError(failed + " test(s) failed");
     }
     System.out.println("LpsqlAstTest OK");
   }
@@ -106,21 +129,43 @@ public final class LpsqlAstTest {
       "lpsql_stats_missing_proc.sql"
     };
     for (String name : names) {
-      File file = new File("lpsql-dev/examples/" + name);
-      if (!file.isFile()) file = new File("examples/" + name);
-      if (!file.isFile()) {
-        fail("missing example " + name);
-        continue;
-      }
       try {
-        String text = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
-        LpsqlParser.parse(text);
+        String text = readExample(name);
+        if (text == null) {
+          fail("missing example " + name);
+          continue;
+        }
+        for (String batch : text.split("(?m)^GO\\s*$")) {
+          String body = batch.trim();
+          if (body.isEmpty() || body.startsWith("--")) continue;
+          if (org.apache.impala.tsql.DialectCheck.leadingIs(body, "TSQL")) TsqlParser.parse(body);
+          else if (org.apache.impala.tsql.DialectCheck.leadingIs(body, "LPSQL")) LpsqlParser.parse(body);
+        }
       } catch (TsqlParser.ParseException e) {
         fail(name + ": " + e.getMessage());
       } catch (java.io.IOException e) {
         fail(name + ": " + e.getMessage());
       }
     }
+  }
+
+  private static String readExample(String name) throws java.io.IOException {
+    java.io.InputStream in = LpsqlAstTest.class.getResourceAsStream("/tsql/examples/" + name);
+    if (in != null) {
+      try {
+        java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+        byte[] chunk = new byte[4096];
+        int n;
+        while ((n = in.read(chunk)) >= 0) buf.write(chunk, 0, n);
+        return new String(buf.toByteArray(), StandardCharsets.UTF_8);
+      } finally {
+        in.close();
+      }
+    }
+    File file = new File("lpsql-dev/examples/" + name);
+    if (!file.isFile()) file = new File("impala/fe/src/test/resources/tsql/examples/" + name);
+    if (!file.isFile()) return null;
+    return new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
   }
 
   private static void expect(String src, String dump) {

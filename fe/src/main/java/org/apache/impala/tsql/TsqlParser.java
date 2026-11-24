@@ -1,3 +1,20 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package org.apache.impala.tsql;
 
 import java.util.ArrayList;
@@ -16,11 +33,36 @@ public final class TsqlParser {
     }
   }
 
+  private final String source;
   private final List<Tok> toks;
   private int p;
+  private int loopDepth;
 
-  private TsqlParser(List<Tok> toks) {
+  private TsqlParser(String source, List<Tok> toks) {
+    this.source = source == null ? "" : source;
     this.toks = toks;
+  }
+
+  private ParseException error(String message) {
+    return new ParseException(locate() + message);
+  }
+
+  private String locate() {
+    if (isEof()) return "at end: ";
+    int offset = peek().offset;
+    if (offset < 0) return "";
+    int line = 1;
+    int column = 1;
+    int limit = Math.min(offset, source.length());
+    for (int i = 0; i < limit; i++) {
+      if (source.charAt(i) == '\n') {
+        line++;
+        column = 1;
+      } else {
+        column++;
+      }
+    }
+    return "line " + line + ", column " + column + ": ";
   }
 
   public static boolean looksLikeTsql(String sql) {
@@ -31,7 +73,7 @@ public final class TsqlParser {
     String body = DialectCheck.stripLeading(sql, "TSQL");
     DialectCheck.verifyTsql(body);
     List<Tok> toks = lex(body);
-    TsqlParser parser = new TsqlParser(toks);
+    TsqlParser parser = new TsqlParser(body, toks);
     TsqlAst.Script script = new TsqlAst.Script();
     parser.skipSemi();
     while (!parser.isEof()) {
@@ -39,7 +81,18 @@ public final class TsqlParser {
       parser.skipSemi();
     }
     validateBareSelect(script.statements, true);
+    validateSingleCreate(script);
     return script;
+  }
+
+  public static void validateSingleCreate(TsqlAst.Script script) {
+    boolean create = false;
+    for (TsqlAst.Stmt s : script.statements) {
+      if (s instanceof TsqlAst.CreateProc) create = true;
+    }
+    if (create && script.statements.size() != 1) {
+      throw new ParseException("CREATE PROCEDURE must be the only statement in its batch");
+    }
   }
 
   public static void validateBareSelect(List<TsqlAst.Stmt> stmts, boolean outermost) {
@@ -68,29 +121,48 @@ public final class TsqlParser {
 
   private TsqlAst.Stmt parseStmt() {
     if (check("USE")) {
-      throw new ParseException("USE is not allowed inside a procedure or batch");
+      throw error("USE is not allowed inside a procedure or batch");
     }
     if (check("CREATE")) {
       if (isCreateProcedure()) return parseCreate();
       return new TsqlAst.RawSql(readRawSql());
     }
+    if (check("DROP") && (lookaheadIs(1, "PROCEDURE") || lookaheadIs(1, "PROC"))) {
+      return parseDropProc();
+    }
+    if (check("PRINT") || check("RAISERROR") || check("GOTO") || check("WAITFOR")) {
+      throw error(peekText() + " is not supported");
+    }
+    if (check("COMMIT") || check("ROLLBACK") || check("SAVE")) {
+      throw error(peekText() + " is not supported");
+    }
+    if (check("THROW")) return parseThrow();
     if (check("DECLARE")) return parseDeclare();
     if (check("SET")) return parseSet();
     if (check("SELECT")) return parseSelect();
     if (check("IF")) return parseIf();
     if (check("WHILE")) return parseWhile();
-    if (check("BEGIN")) return parseBegin();
+    if (check("BEGIN")) {
+      if (lookaheadIs(1, "TRAN") || lookaheadIs(1, "TRANSACTION")) {
+        throw error("BEGIN TRAN is not supported");
+      }
+      return parseBegin();
+    }
     if (check("EXEC") || check("EXECUTE")) return parseExec();
     if (check("CALL")) return parseCall();
     if (check("RETURN")) {
       bump();
-      return new TsqlAst.ReturnStmt();
+      TsqlAst.ReturnStmt ret = new TsqlAst.ReturnStmt();
+      if (!isEof() && !check(";") && !check("GO") && !boundaryKeyword()) ret.value = parseExpr();
+      return ret;
     }
     if (check("BREAK")) {
+      if (loopDepth == 0) throw error("BREAK is not inside a WHILE loop");
       bump();
       return new TsqlAst.BreakStmt();
     }
     if (check("CONTINUE")) {
+      if (loopDepth == 0) throw error("CONTINUE is not inside a WHILE loop");
       bump();
       return new TsqlAst.ContinueStmt();
     }
@@ -108,7 +180,7 @@ public final class TsqlParser {
       return new TsqlAst.DeallocateCursor(plainName());
     }
     if (check("FOR")) {
-      throw new ParseException("FOR loops are not T-SQL");
+      throw error("FOR loops are not T-SQL");
     }
     if (check("SHOW")) return new TsqlAst.RawSql(readRawSql());
     return new TsqlAst.RawSql(readRawSql());
@@ -116,19 +188,18 @@ public final class TsqlParser {
 
   private TsqlAst.Stmt parseCreate() {
     bump(); // CREATE
-    boolean alter = false;
     if (check("OR")) {
       bump();
       expect("ALTER");
-      alter = true;
     }
     if (!(check("PROCEDURE") || check("PROC"))) {
-      // CREATE TABLE and the rest of Impala DDL are not T-SQL batches.
-      throw new ParseException("Only CREATE PROCEDURE is accepted as a T-SQL statement");
+      throw error("Only CREATE PROCEDURE is accepted as a T-SQL statement");
     }
     bump();
     TsqlAst.CreateProc proc = new TsqlAst.CreateProc();
-    proc.name = ident();
+    String[] name = qualifiedName();
+    proc.database = name[0];
+    proc.name = name[1];
     if (check("(")) {
       bump();
       if (!check(")")) parseParams(proc);
@@ -136,21 +207,60 @@ public final class TsqlParser {
     } else if (checkAt()) {
       parseParams(proc);
     }
-    if (check("AS")) bump();
     if (check("WITH")) {
-      bump();
-      expect("EXECUTE");
-      expect("AS");
-      expect("OWNER");
-      proc.executeAsOwner = true;
+      throw error(
+          "WITH EXECUTE AS is not supported; procedures run with the caller's privileges");
     }
-    if (check("AS")) bump();
-    proc.body.addAll(parseBody());
+    expect("AS");
+    int saved = loopDepth;
+    loopDepth = 0;
+    try {
+      while (!isEof()) {
+        proc.body.add(parseStmt());
+        skipSemi();
+      }
+    } finally {
+      loopDepth = saved;
+    }
     proc.source = "tsql\n";
-    if (!alter) {
-      // source text is attached by the caller when it has the original string
-    }
     return proc;
+  }
+
+  private TsqlAst.Stmt parseDropProc() {
+    bump(); // DROP
+    bump(); // PROCEDURE or PROC
+    TsqlAst.DropProc drop = new TsqlAst.DropProc();
+    if (check("IF") && lookaheadIs(1, "EXISTS")) {
+      bump();
+      bump();
+      drop.ifExists = true;
+    }
+    String[] name = qualifiedName();
+    drop.database = name[0];
+    drop.name = name[1];
+    return drop;
+  }
+
+  private TsqlAst.Stmt parseThrow() {
+    bump();
+    TsqlAst.ThrowStmt t = new TsqlAst.ThrowStmt();
+    if (isEof() || check(";") || check("GO") || boundaryKeyword()) return t;
+    t.number = parseExpr();
+    expect(",");
+    t.message = parseExpr();
+    expect(",");
+    t.state = parseExpr();
+    return t;
+  }
+
+  /** {@code [database.]name}. The database is null when the name is unqualified. */
+  private String[] qualifiedName() {
+    String first = ident();
+    if (check(".") && lookaheadIdent(1)) {
+      bump();
+      return new String[] {first, ident()};
+    }
+    return new String[] {null, first};
   }
 
   private void parseParams(TsqlAst.CreateProc proc) {
@@ -162,12 +272,17 @@ public final class TsqlParser {
         bump();
         readRawBalanced();
       }
+      TsqlAst.Expr def = null;
+      if (check("=")) {
+        bump();
+        def = parseExpr();
+      }
       boolean output = false;
       if (check("OUTPUT") || check("OUT")) {
         bump();
         output = true;
       }
-      proc.params.add(new TsqlAst.Param(name, type, output));
+      proc.params.add(new TsqlAst.Param(name, type, output, def));
     } while (check(",") || checkAt());
   }
 
@@ -176,7 +291,7 @@ public final class TsqlParser {
     if (checkAt()) {
       String name = atName();
       if (check("CURSOR")) {
-        throw new ParseException("Declare the cursor name before CURSOR: DECLARE c CURSOR FOR ...");
+        throw error("Declare the cursor name before CURSOR: DECLARE c CURSOR FOR ...");
       }
       String type = ident();
       if (check("(")) {
@@ -201,6 +316,15 @@ public final class TsqlParser {
 
   private TsqlAst.Stmt parseSet() {
     bump();
+    if (!checkAt()) {
+      String option = ident().toUpperCase(Locale.ROOT);
+      if (option.equals("NOCOUNT") || option.equals("XACT_ABORT") || option.equals("ANSI_NULLS")
+          || option.equals("QUOTED_IDENTIFIER")) {
+        if (check("ON") || check("OFF")) bump();
+        return new TsqlAst.Noop();
+      }
+      throw error("Unsupported SET " + option);
+    }
     String name = atName();
     expect("=");
     return new TsqlAst.SetStmt(name, parseExpr());
@@ -233,7 +357,7 @@ public final class TsqlParser {
     String sql = readRawSql();
     String upper = sql.toUpperCase(Locale.ROOT);
     if (upper.contains(" INTO ")) {
-      throw new ParseException("SELECT INTO is not T-SQL. Use SELECT @var = ...");
+      throw error("SELECT INTO is not T-SQL. Use SELECT @var = ...");
     }
     return new TsqlAst.BareSelect(sql);
   }
@@ -254,7 +378,12 @@ public final class TsqlParser {
     bump();
     TsqlAst.WhileStmt w = new TsqlAst.WhileStmt();
     w.condition = parseExpr();
-    w.body.addAll(parseBody());
+    loopDepth++;
+    try {
+      w.body.addAll(parseBody());
+    } finally {
+      loopDepth--;
+    }
     return w;
   }
 
@@ -275,8 +404,7 @@ public final class TsqlParser {
     }
     List<TsqlAst.Stmt> body = parseStmtsUntil("END");
     expect("END");
-    if (body.size() == 1) return body.get(0);
-    TsqlAst.TryStmt block = new TsqlAst.TryStmt();
+    TsqlAst.Block block = new TsqlAst.Block();
     block.body.addAll(body);
     return block;
   }
@@ -284,9 +412,7 @@ public final class TsqlParser {
   private List<TsqlAst.Stmt> parseBody() {
     if (check("BEGIN")) {
       TsqlAst.Stmt s = parseBegin();
-      if (s instanceof TsqlAst.TryStmt && ((TsqlAst.TryStmt) s).handler.isEmpty()) {
-        return ((TsqlAst.TryStmt) s).body;
-      }
+      if (s instanceof TsqlAst.Block) return ((TsqlAst.Block) s).body;
       List<TsqlAst.Stmt> one = new ArrayList<TsqlAst.Stmt>();
       one.add(s);
       return one;
@@ -310,22 +436,36 @@ public final class TsqlParser {
   private TsqlAst.Stmt parseExec() {
     String kw = bump().text;
     if (check("IMMEDIATE")) {
-      throw new ParseException("EXECUTE IMMEDIATE is not T-SQL. Use EXEC(@sql)");
+      throw error("EXECUTE IMMEDIATE is not T-SQL. Use EXEC(@sql)");
     }
-    if (check("(") || checkString() || checkAt()) {
+    if (check("(") || checkString()) {
       if (check("(")) bump();
       TsqlAst.Expr text = parseExpr();
       if (check(")")) bump();
       return new TsqlAst.ExecString(text);
     }
-    return finishExecProc(ident());
+    if (checkAt() && !lookaheadIs(1, "=")) {
+      TsqlAst.Expr text = parseExpr();
+      return new TsqlAst.ExecString(text);
+    }
+    String returnTarget = null;
+    if (checkAt() && lookaheadIs(1, "=")) {
+      returnTarget = atName();
+      expect("=");
+    }
+    String[] name = qualifiedName();
+    TsqlAst.ExecProc call = finishExecProc(name[1]);
+    call.database = name[0];
+    call.returnTarget = returnTarget;
+    return call;
   }
 
   private TsqlAst.Stmt parseCall() {
     bump();
-    String name = ident();
+    String[] name = qualifiedName();
     TsqlAst.ExecProc call = new TsqlAst.ExecProc();
-    call.name = name;
+    call.database = name[0];
+    call.name = name[1];
     if (check("(")) {
       bump();
       if (!check(")")) {
@@ -339,7 +479,7 @@ public final class TsqlParser {
     return call;
   }
 
-  private TsqlAst.Stmt finishExecProc(String name) {
+  private TsqlAst.ExecProc finishExecProc(String name) {
     TsqlAst.ExecProc call = new TsqlAst.ExecProc();
     call.name = name;
     while (!isEof() && !check(";") && !check("GO") && !boundaryKeyword()) {
@@ -432,8 +572,17 @@ public final class TsqlParser {
   }
 
   private TsqlAst.Expr parseAdd() {
-    TsqlAst.Expr e = parsePrimary();
+    TsqlAst.Expr e = parseMul();
     while (check("+") || check("-")) {
+      String op = bump().text;
+      e = new TsqlAst.Binary(op, e, parseMul());
+    }
+    return e;
+  }
+
+  private TsqlAst.Expr parseMul() {
+    TsqlAst.Expr e = parsePrimary();
+    while (check("*") || check("/") || check("%")) {
       String op = bump().text;
       e = new TsqlAst.Binary(op, e, parsePrimary());
     }
@@ -494,24 +643,73 @@ public final class TsqlParser {
       }
       return new TsqlAst.Literal(name, false);
     }
-    throw new ParseException("Expected expression at " + peekText());
+    throw error("Expected expression at " + peekText());
   }
 
   private String readRawSql() {
     StringBuilder sb = new StringBuilder();
     int depth = 0;
+    int caseDepth = 0;
+    Tok prev = null;
     while (!isEof()) {
       Tok t = peek();
-      if (depth == 0 && (t.text.equals(";") || t.text.equalsIgnoreCase("GO"))) break;
-      if (depth == 0 && boundaryKeyword() && sb.length() > 0) break;
-      if (t.text.equals("(")) depth++;
-      if (t.text.equals(")")) depth--;
+      if (t.kind != Kind.STRING && depth == 0
+          && (t.text.equals(";") || t.text.equalsIgnoreCase("GO"))) break;
+      boolean word = t.kind == Kind.IDENT;
+      if (word && t.text.equalsIgnoreCase("CASE")) caseDepth++;
+      else if (word && t.text.equalsIgnoreCase("END") && caseDepth > 0) caseDepth--;
+      else if (depth == 0 && caseDepth == 0 && sb.length() > 0 && startsTsqlStatement(prev, t)) {
+        break;
+      }
+      if (t.kind != Kind.STRING && t.text.equals("(")) depth++;
+      if (t.kind != Kind.STRING && t.text.equals(")")) depth--;
       if (sb.length() > 0) sb.append(t.leadingSpace ? ' ' : "");
       if (t.kind == Kind.STRING) sb.append('\'').append(t.text).append('\'');
       else sb.append(t.text);
+      if (word || t.kind == Kind.SYMBOL) prev = t;
       bump();
     }
     return sb.toString().trim();
+  }
+
+  private boolean startsTsqlStatement(Tok prev, Tok t) {
+    if (t.kind != Kind.IDENT) return false;
+    String word = t.text.toUpperCase(Locale.ROOT);
+    if (word.equals("SET")) return lookaheadKind(1) == Kind.AT;
+    if (word.equals("IF")) return !ddlIfExists(prev) && !inExpression(prev);
+    if (word.equals("CREATE")) return prev == null || !prev.text.equalsIgnoreCase("SHOW");
+    return word.equals("ELSE") || word.equals("END") || word.equals("BEGIN") || word.equals("WHILE")
+        || word.equals("DECLARE") || word.equals("EXEC") || word.equals("EXECUTE")
+        || word.equals("RETURN") || word.equals("BREAK") || word.equals("CONTINUE")
+        || word.equals("OPEN") || word.equals("FETCH") || word.equals("CLOSE")
+        || word.equals("DEALLOCATE") || word.equals("THROW");
+  }
+
+  private boolean ddlIfExists(Tok prev) {
+    if (prev == null || prev.kind != Kind.IDENT) return false;
+    String head = prev.text.toUpperCase(Locale.ROOT);
+    boolean name = head.equals("TABLE") || head.equals("VIEW") || head.equals("DATABASE")
+        || head.equals("SCHEMA") || head.equals("FUNCTION") || head.equals("COLUMN")
+        || head.equals("DROP") || head.equals("ADD") || head.equals("STATS");
+    if (!name) return false;
+    return lookaheadIs(1, "EXISTS") || (lookaheadIs(1, "NOT") && lookaheadIs(2, "EXISTS"));
+  }
+
+  private boolean inExpression(Tok prev) {
+    if (prev == null) return false;
+    String text = prev.text.toUpperCase(Locale.ROOT);
+    return text.equals("SELECT") || text.equals(",") || text.equals("(") || text.equals("=")
+        || text.equals("<") || text.equals(">") || text.equals("!") || text.equals("+")
+        || text.equals("-") || text.equals("*") || text.equals("/") || text.equals("%")
+        || text.equals("<=") || text.equals(">=") || text.equals("<>") || text.equals("!=")
+        || text.equals("AND") || text.equals("OR") || text.equals("NOT") || text.equals("WHEN")
+        || text.equals("THEN") || text.equals("ELSE") || text.equals("WHERE") || text.equals("ON")
+        || text.equals("BY") || text.equals("HAVING") || text.equals("IN") || text.equals("DISTINCT");
+  }
+
+  private Kind lookaheadKind(int n) {
+    if (p + n >= toks.size()) return Kind.EOF;
+    return toks.get(p + n).kind;
   }
 
   private void readRawBalanced() {
@@ -580,11 +778,17 @@ public final class TsqlParser {
   }
 
   private boolean check(String text) {
-    return !isEof() && toks.get(p).text.equalsIgnoreCase(text);
+    return !isEof() && toks.get(p).kind != Kind.STRING
+        && toks.get(p).text.equalsIgnoreCase(text);
   }
 
   private boolean lookaheadIs(int n, String text) {
-    return p + n < toks.size() && toks.get(p + n).text.equalsIgnoreCase(text);
+    return p + n < toks.size() && toks.get(p + n).kind != Kind.STRING
+        && toks.get(p + n).text.equalsIgnoreCase(text);
+  }
+
+  private boolean lookaheadIdent(int n) {
+    return p + n < toks.size() && toks.get(p + n).kind == Kind.IDENT;
   }
 
   private boolean checkAt() {
@@ -604,18 +808,18 @@ public final class TsqlParser {
   }
 
   private Tok bump() {
-    if (isEof()) throw new ParseException("Unexpected end of script");
+    if (isEof()) throw error("Unexpected end of script");
     return toks.get(p++);
   }
 
   private void expect(String text) {
-    if (!check(text)) throw new ParseException("Expected " + text + " at " + peekText());
+    if (!check(text)) throw error("Expected " + text + " at " + peekText());
     bump();
   }
 
   private String ident() {
     if (!checkIdent() && !isKeyword(peekText())) {
-      throw new ParseException("Expected identifier at " + peekText());
+      throw error("Expected identifier at " + peekText());
     }
     return bump().text;
   }
@@ -636,8 +840,9 @@ public final class TsqlParser {
   }
 
   private String atName() {
-    if (!checkAt()) throw new ParseException("Expected @name at " + peekText());
+    if (!checkAt()) throw error("Expected @name at " + peekText());
     String raw = bump().text;
+    if (raw.startsWith("@@")) return raw.toLowerCase(Locale.ROOT);
     while (raw.startsWith("@")) raw = raw.substring(1);
     return raw;
   }
@@ -648,11 +853,17 @@ public final class TsqlParser {
     final Kind kind;
     final String text;
     final boolean leadingSpace;
+    final int offset;
 
     Tok(Kind kind, String text, boolean leadingSpace) {
+      this(kind, text, leadingSpace, -1);
+    }
+
+    Tok(Kind kind, String text, boolean leadingSpace, int offset) {
       this.kind = kind;
       this.text = text;
       this.leadingSpace = leadingSpace;
+      this.offset = offset;
     }
   }
 
@@ -680,8 +891,8 @@ public final class TsqlParser {
         continue;
       }
       if (c == '\'') {
-        int j = SqlText.skipQuoted(sql, i);
-        out.add(new Tok(Kind.STRING, SqlText.impalaBody(sql, i, j), space));
+        int j = SqlText.skipSourceLiteral(sql, i);
+        out.add(new Tok(Kind.STRING, SqlText.impalaBody(sql, i, j), space, i));
         space = false;
         i = j;
         continue;
@@ -696,7 +907,7 @@ public final class TsqlParser {
           while (j < sql.length() && (Character.isLetterOrDigit(sql.charAt(j)) || sql.charAt(j) == '_')) j++;
           name = sql.substring(i, j);
         }
-        out.add(new Tok(Kind.AT, name, space));
+        out.add(new Tok(Kind.AT, name, space, i));
         space = false;
         i = j;
         continue;
@@ -704,7 +915,7 @@ public final class TsqlParser {
       if (Character.isDigit(c)) {
         int j = i + 1;
         while (j < sql.length() && (Character.isDigit(sql.charAt(j)) || sql.charAt(j) == '.')) j++;
-        out.add(new Tok(Kind.NUMBER, sql.substring(i, j), space));
+        out.add(new Tok(Kind.NUMBER, sql.substring(i, j), space, i));
         space = false;
         i = j;
         continue;
@@ -712,7 +923,7 @@ public final class TsqlParser {
       if (Character.isLetter(c) || c == '_') {
         int j = i + 1;
         while (j < sql.length() && (Character.isLetterOrDigit(sql.charAt(j)) || sql.charAt(j) == '_')) j++;
-        out.add(new Tok(Kind.IDENT, sql.substring(i, j), space));
+        out.add(new Tok(Kind.IDENT, sql.substring(i, j), space, i));
         space = false;
         i = j;
         continue;
@@ -720,13 +931,13 @@ public final class TsqlParser {
       if (i + 1 < sql.length()) {
         String two = sql.substring(i, i + 2);
         if (two.equals("!=") || two.equals("<>") || two.equals("<=") || two.equals(">=")) {
-          out.add(new Tok(Kind.SYMBOL, two, space));
+          out.add(new Tok(Kind.SYMBOL, two, space, i));
           space = false;
           i += 2;
           continue;
         }
       }
-      out.add(new Tok(Kind.SYMBOL, String.valueOf(c), space));
+      out.add(new Tok(Kind.SYMBOL, String.valueOf(c), space, i));
       space = false;
       i++;
     }

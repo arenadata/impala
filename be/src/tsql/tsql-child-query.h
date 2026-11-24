@@ -1,3 +1,20 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 // ADH-TSQL
 #pragma once
 
@@ -21,8 +38,7 @@ class ImpalaServer;
 // copies the parent query-option snapshot into the child.
 class TsqlChildQuery {
  public:
-  TsqlChildQuery(ClientRequestState* parent, ImpalaServer* server, const std::string& sql,
-      const std::string& effective_user);
+  TsqlChildQuery(ClientRequestState* parent, ImpalaServer* server, const std::string& sql);
 
   // Fetches up to max_rows. Returns an error if the statement fails or the cap is hit.
   Status Fetch(int max_rows, bool* hit_cap);
@@ -47,7 +63,6 @@ class TsqlChildQuery {
   ClientRequestState* parent_;
   ImpalaServer* server_;
   std::string sql_;
-  std::string effective_user_;
   // mutex, not a spinlock: Cancel() calls CancelOperation while holding it.
   std::mutex lock_;
   bool cancelled_ = false;
