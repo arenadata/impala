@@ -17,6 +17,7 @@
 
 package org.apache.impala.common;
 
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.io.Writer;
@@ -34,7 +35,10 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.impala.service.BackendConfig;
+import org.apache.impala.thrift.TGetHadoopConfigRequest;
+import org.apache.impala.thrift.TGetHadoopConfigResponse;
 import org.apache.impala.thrift.TGetJMXJsonResponse;
 import org.apache.impala.util.JMXJsonUtil;
 import org.apache.thrift.TBase;
@@ -377,6 +381,73 @@ public class JniUtil {
 
   public static byte[] getJMXJson() throws  ImpalaException {
     TGetJMXJsonResponse response = new TGetJMXJsonResponse(JMXJsonUtil.getJMXJson());
+    return serializeToThrift(response, protocolFactory_);
+  }
+
+  // Hadoop configuration (core-site.xml) for getHadoopPassword() and
+  // getExplicitHadoopConfig(), created on first use.
+  private static class HadoopConfHolder {
+    static final Configuration CONF = new Configuration();
+  }
+
+  /**
+   * Returns the secret value of the Hadoop configuration property named in the
+   * serialized TGetHadoopConfigRequest, as a serialized TGetHadoopConfigResponse whose
+   * 'value' is not set if the property is absent. Uses Configuration.getPassword(): the
+   * value comes from the credential providers of
+   * hadoop.security.credential.provider.path (e.g. a JCEKS store), or from core-site.xml
+   * itself. Used by the native S3 reader to take the fs.s3a.* keys of the S3A connector.
+   */
+  public static byte[] getHadoopPassword(byte[] serializedRequest)
+      throws ImpalaException {
+    TGetHadoopConfigRequest request = new TGetHadoopConfigRequest();
+    deserializeThrift(protocolFactory_, request, serializedRequest);
+    TGetHadoopConfigResponse response = new TGetHadoopConfigResponse();
+    try {
+      char[] value = HadoopConfHolder.CONF.getPassword(request.getName());
+      if (value != null) response.setValue(new String(value));
+    } catch (IOException e) {
+      throw new InternalException(String.format(
+          "Failed to read '%s' from the Hadoop configuration: %s", request.getName(),
+          e.getMessage()), e);
+    }
+    return serializeToThrift(response, protocolFactory_);
+  }
+
+  // Resource of Hadoop's built-in defaults (in the hadoop-common jar).
+  private static final String HADOOP_DEFAULTS_RESOURCE = "core-default.xml";
+
+  /**
+   * Returns the value of 'name' in 'conf' if it is set explicitly (in core-site.xml or
+   * another resource, or programmatically), or null if it is absent or comes only from
+   * Hadoop's built-in defaults (core-default.xml). Whitespace is trimmed; an empty value
+   * counts as absent.
+   */
+  public static String getExplicitHadoopConfig(Configuration conf, String name) {
+    String value = conf.getTrimmed(name);
+    if (value == null || value.isEmpty()) return null;
+    String[] sources = conf.getPropertySources(name);
+    if (sources != null && sources.length > 0
+        && HADOOP_DEFAULTS_RESOURCE.equals(sources[sources.length - 1])) {
+      return null;
+    }
+    return value;
+  }
+
+  /**
+   * Returns the value of the Hadoop configuration property named in the serialized
+   * TGetHadoopConfigRequest, as a serialized TGetHadoopConfigResponse whose 'value' is
+   * set only if the property is set explicitly (getExplicitHadoopConfig()), not just by
+   * Hadoop's defaults. Used by the native S3 reader to take the fs.s3a.* endpoint
+   * settings of the S3A connector.
+   */
+  public static byte[] getExplicitHadoopConfig(byte[] serializedRequest)
+      throws ImpalaException {
+    TGetHadoopConfigRequest request = new TGetHadoopConfigRequest();
+    deserializeThrift(protocolFactory_, request, serializedRequest);
+    TGetHadoopConfigResponse response = new TGetHadoopConfigResponse();
+    String value = getExplicitHadoopConfig(HadoopConfHolder.CONF, request.getName());
+    if (value != null) response.setValue(value);
     return serializeToThrift(response, protocolFactory_);
   }
 

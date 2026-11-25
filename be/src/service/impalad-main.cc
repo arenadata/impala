@@ -40,6 +40,7 @@
 #include "runtime/coordinator.h"
 #include "runtime/exec-env.h"
 #include "runtime/hbase-table.h"
+#include "runtime/io/s3-native-client.h"
 #include "service/fe-support.h"
 #include "service/impala-server.h"
 #include "util/common-metrics.h"
@@ -71,6 +72,7 @@ int ImpaladMain(int argc, char** argv) {
   ABORT_IF_ERROR(HiveUdfCall::InitEnv());
   ABORT_IF_ERROR(JniCatalogCacheUpdateIterator::InitJNI());
   InitFeSupport();
+  ABORT_IF_ERROR(InitS3NativeClient());
 
   ExecEnv exec_env;
   ABORT_IF_ERROR(exec_env.Init());

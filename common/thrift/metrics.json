@@ -802,6 +802,236 @@
     "key": "impala-server.io-mgr.remote-data-cache-total-bytes"
   },
   {
+    "description": "Total number of GET requests sent by the native S3 reader.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 GET Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-get-count"
+  },
+  {
+    "description": "Total number of bytes received by the native S3 reader.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 GET Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-get-bytes"
+  },
+  {
+    "description": "Total number of native S3 reads split into parallel parts (--s3_native_parallel_read_min_size).",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Parallel Read Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-parallel-read-count"
+  },
+  {
+    "description": "Total number of reads of small files served whole by the native S3 cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Whole File Cache Hit Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-whole-file-cache-hit-count"
+  },
+  {
+    "description": "Total number of bytes of small files served whole by the native S3 cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Whole File Cache Hit Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-whole-file-cache-hit-bytes"
+  },
+  {
+    "description": "Total number of small files read whole into the native S3 cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Whole File Cache Miss Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-whole-file-cache-miss-count"
+  },
+  {
+    "description": "Total number of files evicted from the native S3 file cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Evictions",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-evictions"
+  },
+  {
+    "description": "Total number of bytes of the native S3 file cache given back because the process was over or close to its memory limit.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Released Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-released-bytes"
+  },
+  {
+    "description": "Bytes of the native S3 file cache given back because the process headroom was below --s3_native_cache_min_headroom.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Released Headroom Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-released-headroom-bytes"
+  },
+  {
+    "description": "Bytes of the native S3 file cache given back because the process was over its memory limit.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Released Limit Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-released-limit-bytes"
+  },
+  {
+    "description": "Bytes of whole files and blocks that the native S3 file cache did not cache because the process headroom was low. Such misses are read without a cache entry: only the requested bytes of a whole file, blocks straight into the read buffer.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Skipped Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-skipped-bytes"
+  },
+  {
+    "description": "Bytes of blocks the native S3 reader handed to the remote data cache on local disk for writing (accepted by it; with asynchronous writes some can still be dropped later). Written and dropped bytes: impala-server.io-mgr.remote-data-cache-total-bytes, -num-writes, -dropped-bytes.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Data Cache Offered Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-data-cache-offered-bytes"
+  },
+  {
+    "description": "Total number of bytes that the admission filter of the native S3 file cache did not cache, because the entries they would have evicted were read at least as often.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Rejected Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-rejected-bytes"
+  },
+  {
+    "description": "Total number of files of the native S3 file cache moved to its protected segment.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Promotions",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-cache-promotions"
+  },
+  {
+    "description": "Current byte size of the native S3 file cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Total Bytes",
+    "units": "BYTES",
+    "kind": "GAUGE",
+    "key": "impala-server.io-mgr.s3-native-cache-total-bytes"
+  },
+  {
+    "description": "Current number of files in the native S3 file cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Cache Num Entries",
+    "units": "UNIT",
+    "kind": "GAUGE",
+    "key": "impala-server.io-mgr.s3-native-cache-num-entries"
+  },
+  {
+    "description": "Total number of blocks of large files served by the native S3 file cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Block Cache Hit Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-block-cache-hit-count"
+  },
+  {
+    "description": "Total number of bytes of large files served by the native S3 file cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Block Cache Hit Bytes",
+    "units": "BYTES",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-block-cache-hit-bytes"
+  },
+  {
+    "description": "Total number of blocks of large files fetched into the native S3 file cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Block Cache Miss Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-block-cache-miss-count"
+  },
+  {
+    "description": "Total wall time of the GET requests of the native S3 reader. A read split into parallel parts counts once.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 GET Time",
+    "units": "TIME_US",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-get-time-us"
+  },
+  {
+    "description": "Total number of native S3 reads of the end of a file, which scanners read for the file footer.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Footer Read Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-footer-read-count"
+  },
+  {
+    "description": "Total number of native S3 footer reads that sent a GET request (not served from the native S3 file cache).",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Footer Read Miss Count",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-footer-read-miss-count"
+  },
+  {
+    "description": "Total time of native S3 footer reads, including reads served from the cache.",
+    "contexts": [
+      "IMPALAD"
+    ],
+    "label": "Impala Server Io Mgr Native S3 Footer Read Time",
+    "units": "TIME_US",
+    "kind": "COUNTER",
+    "key": "impala-server.io-mgr.s3-native-footer-read-time-us"
+  },
+  {
     "description": "Current number of entries in the remote data cache.",
     "contexts": [
       "IMPALAD"
@@ -2197,6 +2427,163 @@
     "units": "NONE",
     "kind": "PROPERTY",
     "key": "statestore2-subscriber.statestore-active-status"
+  },
+  {
+    "description": "Whether the subscriber is connected to the second Statestore instance.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Connectivity",
+    "units": "NONE",
+    "kind": "PROPERTY",
+    "key": "statestore2-subscriber.connected"
+  },
+  {
+    "description": "Number of times that the Daemon detected a loss of connectivity to the second Statestore instance.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Connectivity Loss Count.",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "statestore2-subscriber.num-connection-failures"
+  },
+  {
+    "description": "The time (sec) between heartbeats from the second Statestore instance.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Heartbeat Interval Time",
+    "units": "TIME_S",
+    "kind": "STATS",
+    "key": "statestore2-subscriber.heartbeat-interval-time"
+  },
+  {
+    "description": "The amount of time the StateStore subscriber took to recover the connection to the second Statestore instance the last time it was lost.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Last Recovery Duration",
+    "units": "TIME_S",
+    "kind": "GAUGE",
+    "key": "statestore2-subscriber.last-recovery-duration"
+  },
+  {
+    "description": "The local time that the last recovery of the connection to the second Statestore instance happened.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Last Recovery Time",
+    "units": "NONE",
+    "kind": "PROPERTY",
+    "key": "statestore2-subscriber.last-recovery-time"
+  },
+  {
+    "description": "The most recent registration ID for this subscriber with the second Statestore instance. Set to 'N/A' if no registration has been completed",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Registration Id",
+    "units": "NONE",
+    "kind": "PROPERTY",
+    "key": "statestore2-subscriber.registration-id"
+  },
+  {
+    "description": "The most recent statestore ID for this subscriber with the second Statestore instance. Set to 'N/A' if no registration has been completed",
+    "contexts": [
+      "ADMISSIOND",
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Id",
+    "units": "NONE",
+    "kind": "PROPERTY",
+    "key": "statestore2-subscriber.statestore-id"
+  },
+  {
+    "description": "The number of RPCs received from the second Statestore instance for updating catalogd.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Number of UpdateCatalogd RPCs from Second Statestore",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "statestore2-subscriber.num-update-catalogd-rpc"
+  },
+  {
+    "description": "The number of RPCs received from the second Statestore instance for updating role of statestored.",
+    "contexts": [
+      "ADMISSIOND",
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Number of UpdateStatestoredRole RPCs from Second Statestore",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "statestore2-subscriber.num-update-statestored-role-rpc"
+  },
+  {
+    "description": "The number of Re-Registration Attempts to the second Statestore instance.",
+    "contexts": [
+      "ADMISSIOND",
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Number of Re-Registration Attempts to Second Statestore",
+    "units": "UNIT",
+    "kind": "COUNTER",
+    "key": "statestore2-subscriber.num-re-register-attempt"
+  },
+  {
+    "description": "Second Statestore Subscriber Topic $0 Processing Time",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Topic $0 Processing Time",
+    "units": "TIME_S",
+    "kind": "STATS",
+    "key": "statestore2-subscriber.topic-$0.processing-time-s"
+  },
+  {
+    "description": "Interval between updates from the second Statestore instance for Topic $0",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Topic $0 Update Interval",
+    "units": "TIME_S",
+    "kind": "STATS",
+    "key": "statestore2-subscriber.topic-$0.update-interval"
+  },
+  {
+    "description": "The time (sec) taken to process topic updates from the second Statestore instance.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Topic Update Duration",
+    "units": "TIME_S",
+    "kind": "STATS",
+    "key": "statestore2-subscriber.topic-update-duration"
+  },
+  {
+    "description": "The time (sec) between topic updates from the second Statestore instance.",
+    "contexts": [
+      "CATALOGSERVER",
+      "IMPALAD"
+    ],
+    "label": "Second Statestore Subscriber Topic Update Interval Time",
+    "units": "TIME_S",
+    "kind": "STATS",
+    "key": "statestore2-subscriber.topic-update-interval-time"
   },
   {
     "description": "The time (sec) spent sending heartbeat RPCs. Includes subscriber-side processing time and network transmission time.",
