@@ -501,6 +501,23 @@ class ImpalaShell(cmd.Cmd, object):
     args = ' '.join(tokens).strip()
     return args.rstrip(ImpalaShell.CMD_DELIM)
 
+  def _is_go_line(self, line):
+    """A T-SQL batch ends on a line that is only GO."""
+    return strip_comments(line).strip().upper() == 'GO'
+
+  def _batch_is_tsql(self, text):
+    """True when the batch starts with TSQL or LPSQL and must not be split on ';'."""
+    stripped = strip_comments(text).lstrip(u'\ufeff').strip()
+    if not stripped:
+      return False
+    return stripped.split(None, 1)[0].upper() in ('TSQL', 'LPSQL')
+
+  def _strip_trailing_go(self, cmd):
+    lines = cmd.splitlines()
+    while lines and self._is_go_line(lines[-1]):
+      lines.pop()
+    return '\n'.join(lines)
+
   def _shlex_split(self, line):
     """Reimplement shlex.split() so that escaped single quotes
     are actually escaped. shlex.split() only escapes double quotes
@@ -524,6 +541,14 @@ class ImpalaShell(cmd.Cmd, object):
     # ending with a delimiter:
     # select 1 + 1; -- this is a comment
     line = strip_comments(line).rstrip()
+    if self._is_go_line(line):
+      return True
+    accumulated = line
+    if self.partial_cmd:
+      accumulated = '%s\n%s' % (self.partial_cmd, line)
+    # ADH-TSQL. A procedure body contains semicolons. Buffer until a GO line.
+    if self._batch_is_tsql(accumulated):
+      return False
     if line.endswith(ImpalaShell.CMD_DELIM):
       try:
         # Look for an open quotation in the entire command, and not just the
@@ -622,6 +647,8 @@ class ImpalaShell(cmd.Cmd, object):
       self.prompt = self.cached_prompt
     else:  # Input has a delimiter and partial_cmd is empty
       completed_cmd = sqlparse.format(cmd)
+    # ADH-TSQL. The GO line is the batch terminator, not part of the statement.
+    completed_cmd = self._strip_trailing_go(completed_cmd)
     return completed_cmd
 
   def _new_impala_client(self):
@@ -694,7 +721,14 @@ class ImpalaShell(cmd.Cmd, object):
 
   def _signal_handler(self, signal, frame):
     """Handles query cancellation on a Ctrl+C event"""
-    if self.last_query_handle is None or self.last_query_handle.is_closed:
+    handle = self.last_query_handle
+    if handle is None or handle.is_closed:
+      # ADH-TSQL. ExecuteStatement has returned a handle, but the shell is still
+      # waiting for the procedure schema, so last_query_handle is not set yet.
+      current = self.imp_client.current_query_handle()
+      if current is not None and not current.is_closed:
+        handle = current
+    if handle is None or handle.is_closed:
       if self.partial_cmd:
         # Revert the prompt to its earlier state
         self.prompt = self.cached_prompt
@@ -712,8 +746,8 @@ class ImpalaShell(cmd.Cmd, object):
         new_imp_client = self._new_impala_client()
         new_imp_client.connect()
         try:
-          new_imp_client.cancel_query(self.last_query_handle)
-          new_imp_client.close_query(self.last_query_handle)
+          new_imp_client.cancel_query(handle)
+          new_imp_client.close_query(handle)
         finally:
           new_imp_client.close_connection()
         break
@@ -744,6 +778,9 @@ class ImpalaShell(cmd.Cmd, object):
     else:
       args = self.sanitise_input(args)  # python3
     if not args: return args
+    # ADH-TSQL. A prefixed batch contains semicolons. Send it whole; GO ends it.
+    if self._batch_is_tsql(args):
+      return args
     # Split args using sqlparse. If there are multiple queries present in user input,
     # the length of the returned query list will be greater than one.
     parsed_cmds = sqlparse.split(args)
@@ -1897,6 +1934,23 @@ Welcome to the Impala shell.
 
 def parse_query_text(query_text):
   """Parse query file text to extract queries"""
+  # ADH-TSQL. A line that is only GO ends a batch. sqlparse.split would cut a
+  # procedure body at the first semicolon and at CASE ... END.
+  if any(strip_comments(line).strip().upper() == 'GO' for line in query_text.splitlines()):
+    batches = []
+    current = []
+    for line in query_text.splitlines():
+      if strip_comments(line).strip().upper() == 'GO':
+        text = '\n'.join(current).strip()
+        if text:
+          batches.append(text)
+        current = []
+      else:
+        current.append(line)
+    text = '\n'.join(current).strip()
+    if text:
+      batches.append(text)
+    return batches
   query_list = sqlparse.split(query_text)
   # Remove trailing comments in the input, if any. We do this because sqlparse splits the
   # input at query boundaries and associates the query only with preceding comments

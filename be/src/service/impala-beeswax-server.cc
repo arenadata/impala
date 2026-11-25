@@ -247,6 +247,12 @@ void ImpalaServer::get_results_metadata(ResultsMetadata& results_metadata,
   QueryHandle query_handle;
   RAISE_IF_ERROR(GetActiveQueryHandle(query_id, &query_handle), SQLSTATE_GENERAL_ERROR);
 
+  // ADH-TSQL. The procedure schema is final only after the batch thread finishes.
+  if (query_handle->stmt_type() == TStmtType::TSQL) {
+    int64_t waited_us = 0;
+    query_handle->BlockOnWait(0, &waited_us);
+  }
+
   // Validate that query can be accessed by user.
   RAISE_IF_ERROR(CheckClientRequestSession(session.get(), query_handle->effective_user(),
       query_id), SQLSTATE_GENERAL_ERROR);

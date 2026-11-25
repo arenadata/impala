@@ -1028,6 +1028,13 @@ void ImpalaServer::GetResultSetMetadata(TGetResultSetMetadataResp& return_val,
   HS2_RETURN_IF_ERROR(
       return_val, GetActiveQueryHandle(query_id, &query_handle), SQLSTATE_GENERAL_ERROR);
 
+  // ADH-TSQL. A procedure's schema is the final client result, known only after
+  // the batch thread finishes. Fetch already waits; this RPC must too.
+  if (query_handle->stmt_type() == TStmtType::TSQL) {
+    int64_t waited_us = 0;
+    query_handle->BlockOnWait(0, &waited_us);
+  }
+
   ScopedSessionState session_handle(this);
   const TUniqueId session_id = query_handle->session_id();
   HS2_RETURN_IF_ERROR(return_val,

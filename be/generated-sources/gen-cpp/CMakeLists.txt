@@ -77,6 +77,7 @@ set(SRC_FILES
   Status_types.cpp
   SystemTables_types.cpp
   Types_types.cpp
+  Tsql_types.cpp
   Zip_types.cpp
 )
 

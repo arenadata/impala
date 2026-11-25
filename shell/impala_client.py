@@ -409,6 +409,10 @@ class ImpalaClient(object):
     that reflects whether the query was closed with close_query() or close_dml()"""
     raise NotImplementedError()
 
+  def current_query_handle(self):
+    """Handle of a statement whose execute RPC has not returned yet, or None."""
+    return None
+
   def get_query_id_str(self, last_query_handle):
     """Return the standard string representation of an Impala query ID, e.g.
     'd74d8ce632c9d4d0:75c5a51100000000'"""
@@ -895,6 +899,7 @@ class ImpalaHS2Client(ImpalaClient):
     handle = resp.operationHandle
 
     try:
+      handle.is_closed = False
       self._set_current_query_handle(handle)
       if handle.hasResultSet:
         def GetResultSetMetadata(req):
@@ -906,7 +911,6 @@ class ImpalaHS2Client(ImpalaClient):
         assert resp.schema is not None, resp
         # Attach the schema to the handle for convenience.
         handle.schema = resp.schema
-      handle.is_closed = False
       return handle
     finally:
       self._clear_current_query_handle()
@@ -917,6 +921,10 @@ class ImpalaHS2Client(ImpalaClient):
 
     guid_bytes = last_query_handle.operationId.guid
     return self._convert_id_to_str(guid_bytes)
+
+  def current_query_handle(self):
+    """The statement whose ExecuteStatement RPC is still in progress, if any."""
+    return self._current_query_handle
 
   def _set_current_query_handle(self, query_handle):
     self._current_query_handle = query_handle

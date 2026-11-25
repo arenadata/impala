@@ -17,6 +17,9 @@
 
 #include "service/client-request-state.h"
 
+#include "tsql/tsql-executor.h"
+#include "tsql/tsql-flags.h"
+
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
@@ -368,6 +371,25 @@ Status ClientRequestState::Exec() {
       DCHECK(exec_req.__isset.kill_query_request);
       LOG_AND_RETURN_IF_ERROR(ExecKillQueryRequest());
       break;
+    case TStmtType::TSQL: {
+      // ADH-TSQL. Return as soon as the batch thread is running so the client
+      // receives a handle. WaitInternal joins the thread. The final schema is
+      // published before that join returns, and GetResultSetMetadata waits for it.
+      DCHECK(exec_req.__isset.tsql_request);
+      if (!FLAGS_enable_tsql) {
+        return Status("T-SQL procedures are disabled (--enable_tsql=false)");
+      }
+      {
+        lock_guard<mutex> l(lock_);
+        if (is_cancelled_) return Status::CANCELLED;
+        tsql_executor_.reset(new TsqlExecutor(this, parent_server_));
+      }
+      RETURN_IF_ERROR(tsql_executor_->Admit());
+      UpdateNonErrorExecState(ExecState::RUNNING);
+      RETURN_IF_ERROR(Thread::Create("query-exec-state", "async-exec-thread",
+          &TsqlExecutor::Run, tsql_executor_.get(), &async_exec_thread_, true));
+      break;
+    }
     default:
       return Status(Substitute("Unknown exec request stmt type: $0", exec_req.stmt_type));
   }
@@ -1548,6 +1570,7 @@ Status ClientRequestState::FetchRowsInternal(const int32_t max_rows,
 }
 
 void ClientRequestState::Cancel(const Status* cause, bool wait_until_finalized) {
+  TsqlExecutor* tsql_executor = nullptr; // ADH-TSQL
   {
     lock_guard<mutex> lock(lock_);
     // If the query has reached a terminal state, no need to update the state.
@@ -1566,12 +1589,15 @@ void ClientRequestState::Cancel(const Status* cause, bool wait_until_finalized) 
       admission_control_client_->CancelAdmission();
       is_cancelled_ = true;
     }
+    tsql_executor = tsql_executor_.get(); // ADH-TSQL
   } // Release lock_ before doing cancellation work.
 
   // Cancel and close child queries before cancelling parent. 'lock_' should not be held
   // because a) ChildQuery::Cancel() calls back into ImpalaServer and b) cancellation
   // involves RPCs and can take quite some time.
   child_query_executor_->Cancel();
+  // ADH-TSQL. Pointer taken under lock_ so it is not read while Exec() assigns it.
+  if (tsql_executor != nullptr) tsql_executor->Cancel();
 
   // Ensure the parent query is cancelled if execution has started (if the query was not
   // started, cancellation is handled by the 'async-exec-thread' thread). 'lock_' should
@@ -1797,6 +1823,12 @@ void ClientRequestState::SetResultSet(const vector<string>& col1,
     (*request_result_set_.get())[i].colVals[1].__set_string_val(col2[i]);
     (*request_result_set_.get())[i].colVals[2].__set_string_val(col3[i]);
   }
+}
+
+void ClientRequestState::SetResultSet(const TResultSetMetadata& metadata,
+    vector<TResultRow> rows) {
+  result_metadata_ = metadata;
+  request_result_set_.reset(new vector<TResultRow>(std::move(rows)));
 }
 
 void ClientRequestState::SetResultSet(const vector<string>& col1,
