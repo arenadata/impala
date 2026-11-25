@@ -362,7 +362,7 @@ public class FileMetadataLoaderTest {
         MetastoreShim.getValidWriteIdListFromString(validWriteIdString);
     Path tablePath = new Path(path);
     FileMetadataLoader fml = new FileMetadataLoader(tablePath, /* recursive=*/true,
-        /* oldFds = */ Collections.emptyList(), hostIndex, new ValidReadTxnList(""),
+        /* oldFds = */ Collections.emptyList(), hostIndex, new ValidReadTxnList(),
         writeIds, format);
     fml.load();
     return fml;

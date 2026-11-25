@@ -31,7 +31,6 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hive.common.ValidReadTxnList;
 import org.apache.hadoop.hive.common.ValidWriteIdList;
-import org.apache.hadoop.hive.common.ValidReaderWriteIdList;
 import org.apache.hadoop.hive.metastore.api.MetaException;
 import org.apache.impala.catalog.CatalogException;
 import org.apache.impala.compat.MetastoreShim;
@@ -59,6 +58,12 @@ public class AcidUtilsTest {
     }).collect(Collectors.toList());
   }
 
+  private static ValidReadTxnList parseValidReadTxnList(String value) {
+    ValidReadTxnList txnList = new ValidReadTxnList();
+    txnList.readFromString(value);
+    return txnList;
+  }
+
   private void assertFiltering(String[] relPaths, String validWriteIdListStr,
       String[] expectedRelPaths) {
     assertFiltering(relPaths, "", validWriteIdListStr, expectedRelPaths);
@@ -73,7 +78,7 @@ public class AcidUtilsTest {
 
     try {
       assertThat(AcidUtils.filterFilesForAcidState(stats, BASE_PATH,
-          new ValidReadTxnList(validTxnListStr), writeIds, null),
+          parseValidReadTxnList(validTxnListStr), writeIds, null),
           Matchers.containsInAnyOrder(expectedStats.toArray()));
     } catch (CatalogException me) {
       //TODO: Remove try-catch once IMPALA-9042 is resolved.
@@ -89,7 +94,7 @@ public class AcidUtilsTest {
         validWriteIdListStr);
       List<FileStatus> stats = createMockStats(relPaths);
       AcidUtils.filterFilesForAcidState(
-          stats, BASE_PATH, new ValidReadTxnList(validTxnListStr), writeIds, null);
+          stats, BASE_PATH, parseValidReadTxnList(validTxnListStr), writeIds, null);
     } catch (Exception e) {
       String errorString = e.getMessage();
       Preconditions.checkNotNull(errorString, "Stack trace lost during exception.");
@@ -618,9 +623,9 @@ public class AcidUtilsTest {
   @Test
   public void testWriteIdListCompare() {
     ValidWriteIdList a =
-            new ValidReaderWriteIdList("default.test:1:1:1:");
+            MetastoreShim.getValidWriteIdListFromString("default.test:1:1:1:");
     ValidWriteIdList b =
-            new ValidReaderWriteIdList("default.test:1:9223372036854775807::");
+            MetastoreShim.getValidWriteIdListFromString("default.test:1:9223372036854775807::");
 
     // should return -1 since b is more recent
     assert(AcidUtils.compare(a, b) == -1);
