@@ -38,6 +38,7 @@ import org.apache.hadoop.hive.metastore.IMetaStoreClient;
 import org.apache.hadoop.hive.metastore.LockRequestBuilder;
 import org.apache.hadoop.hive.metastore.TableType;
 import org.apache.hadoop.hive.metastore.Warehouse;
+import org.apache.hadoop.hive.metastore.api.ColumnStatisticsData;
 import org.apache.hadoop.hive.metastore.api.Database;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.hadoop.hive.metastore.api.InvalidOperationException;
@@ -45,6 +46,7 @@ import org.apache.hadoop.hive.metastore.api.LockComponent;
 import org.apache.hadoop.hive.metastore.api.LockRequest;
 import org.apache.hadoop.hive.metastore.api.LockResponse;
 import org.apache.hadoop.hive.metastore.api.LockState;
+import org.apache.hadoop.hive.metastore.api.LongColumnStatsData;
 import org.apache.hadoop.hive.metastore.api.MetaException;
 import org.apache.hadoop.hive.metastore.api.NoSuchLockException;
 import org.apache.hadoop.hive.metastore.api.NoSuchTxnException;
@@ -86,6 +88,7 @@ import org.slf4j.LoggerFactory;
  */
 public class Hive3MetastoreShimBase {
   private static final Logger LOG = LoggerFactory.getLogger(Hive3MetastoreShimBase.class);
+  private static final short HIVE4_TIMESTAMP_STATS_FIELD_ID = 8;
 
   protected static final String EXTWRITE = "EXTWRITE";
   protected static final String EXTREAD = "EXTREAD";
@@ -100,6 +103,33 @@ public class Hive3MetastoreShimBase {
   // Virtual View
   protected static final String HIVESQL = "HIVESQL";
   protected static final long MAJOR_VERSION = 3;
+
+  /**
+   * Returns TIMESTAMP statistics in the representation used by Impala. In Hive 4 the
+   * Thrift-generated ColumnStatisticsData union has a dedicated TimestampColumnStatsData
+   * field, while Hive 3 and Impala use LongColumnStatsData.
+   */
+  public static LongColumnStatsData getCompatibleTimestampStats(
+      ColumnStatisticsData statsData) {
+    if (statsData.isSetLongStats()) return statsData.getLongStats();
+    if (statsData.getSetField() == null
+        || statsData.getSetField().getThriftFieldId()
+        != HIVE4_TIMESTAMP_STATS_FIELD_ID) {
+      return null;
+    }
+    // Access field 8 without referencing TimestampColumnStatsData so this class also
+    // compiles against Hive 3, whose generated union ends at field 7.
+    Object timestampStats = statsData.getFieldValue();
+    try {
+      long numNulls = (Long) timestampStats.getClass()
+          .getMethod("getNumNulls").invoke(timestampStats);
+      long numDVs = (Long) timestampStats.getClass()
+          .getMethod("getNumDVs").invoke(timestampStats);
+      return new LongColumnStatsData(numNulls, numDVs);
+    } catch (ReflectiveOperationException e) {
+      throw new IllegalStateException("Unable to read Hive 4 TIMESTAMP statistics", e);
+    }
+  }
   protected static boolean capabilitiestSet_ = false;
 
   // Max sleep interval during acquiring an ACID lock.

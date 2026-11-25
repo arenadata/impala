@@ -41,6 +41,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeMap;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.CatalogProperties;
@@ -115,6 +116,8 @@ import org.apache.impala.thrift.TIcebergFileFormat;
 import org.apache.impala.thrift.TIcebergPartitionField;
 import org.apache.impala.thrift.TIcebergPartitionSpec;
 import org.apache.impala.thrift.TIcebergPartitionTransformType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @SuppressWarnings("UnstableApiUsage")
 public class IcebergUtil {
@@ -125,6 +128,8 @@ public class IcebergUtil {
   @SuppressWarnings("unused")
   private static final int ICEBERG_EPOCH_HOUR = 0;
   public static final String HIVE_CATALOG = "hive.catalog";
+
+  private static final Logger LOG = LoggerFactory.getLogger(IcebergUtil.class);
 
   /**
    * Returns the corresponding catalog implementation for 'feTable'.
@@ -308,6 +313,15 @@ public class IcebergUtil {
   public static boolean isHiveCatalog(
       org.apache.hadoop.hive.metastore.api.Table msTable) {
     return isHiveCatalog(msTable.getParameters());
+  }
+
+  /**
+   * Returns true if commits of the Iceberg table 'msTable' update its HMS table: only
+   * synchronized tables of the HiveCatalog are integrated.
+   */
+  public static boolean isHmsIntegrated(
+      org.apache.hadoop.hive.metastore.api.Table msTable) {
+    return IcebergTable.isSynchronizedTable(msTable) && isHiveCatalog(msTable);
   }
 
   public static boolean isHiveCatalog(Map<String, String> props) {
@@ -651,6 +665,15 @@ public class IcebergUtil {
     if (timeTravelSpec == null) return table.snapshotId();
     TableScan scan = createScanAsOf(table, timeTravelSpec);
     return scan.snapshot().snapshotId();
+  }
+
+  /**
+   * True if a scan with 'timeTravelSpec' (null: no time travel) reads the snapshot that
+   * the file descriptors of 'table' were loaded for: they list the files of the scan.
+   */
+  public static boolean scansLoadedSnapshot(FeIcebergTable table,
+      TimeTravelSpec timeTravelSpec) {
+    return getSnapshotId(table, timeTravelSpec) == table.snapshotId();
   }
 
   private static TableScan createScanAsOf(FeIcebergTable table,
@@ -1355,5 +1378,125 @@ public class IcebergUtil {
       case TRUNCATE: return "iceberg_truncate_transform";
     }
     return "";
+  }
+
+  /**
+   * This is a helper class for converting the value of the
+   * 'impala.computeStatsSnapshotIds' table property to a Map representation and back.
+   *
+   * In the case of Iceberg tables, for each column with HMS stats, this property stores
+   * the snapshot id for which stats have been computed. It is a comma-separated list of
+   * values of the form "fieldIdRangeStart[-fieldIdRangeEndIncl]:snapshotId". The fieldId
+   * part may be a single value or a contiguous, inclusive range.
+   */
+  public static class ComputeStatsSnapshotPropertyConverter {
+    // The property can be set by hand, so a value expanding to more field ids than this
+    // is rejected as invalid before it is expanded.
+    public static final int MAX_FIELD_IDS = 100_000;
+
+    public static TreeMap<Integer, Long> stringToMap(String snapshotIds) {
+      TreeMap<Integer, Long> res = new TreeMap<Integer, Long>();
+      if (snapshotIds == null) return res;
+
+      String[] columns = snapshotIds.split(",");
+      long fieldIdCount = 0;
+
+      for (String column : columns) {
+        String[] colIdAndSnapshotId = column.split(":");
+        if (colIdAndSnapshotId.length != 2) {
+          return logAndReturnEmptyMap(snapshotIds);
+        }
+
+        try {
+          String colStr = colIdAndSnapshotId[0];
+          Long snapshotId = Long.parseLong(colIdAndSnapshotId[1]);
+
+          String[] colRange = colStr.split("-");
+          if (colRange.length == 1) {
+            int colId = Integer.parseInt(colRange[0]);
+            if (++fieldIdCount > MAX_FIELD_IDS) return logAndReturnEmptyMap(snapshotIds);
+            res.put(colId, snapshotId);
+          } else if (colRange.length == 2) {
+            int rangeStart = Integer.parseInt(colRange[0]);
+            int rangeEnd = Integer.parseInt(colRange[1]);
+            fieldIdCount += Math.max(0L, (long) rangeEnd - rangeStart + 1);
+            if (fieldIdCount > MAX_FIELD_IDS) return logAndReturnEmptyMap(snapshotIds);
+            // A long counter: an int one would overflow and never end at MAX_VALUE.
+            for (long colId = rangeStart; colId <= rangeEnd; ++colId) {
+              res.put((int) colId, snapshotId);
+            }
+          } else {
+            return logAndReturnEmptyMap(snapshotIds);
+          }
+        } catch (NumberFormatException e) {
+          return logAndReturnEmptyMap(snapshotIds);
+        }
+      }
+
+      return res;
+    }
+
+    public static String mapToString(TreeMap<Integer, Long> colAndSnapshotIds) {
+      ConversionState state = new ConversionState();
+
+      for (Map.Entry<Integer, Long> entry : colAndSnapshotIds.entrySet()) {
+        int col = entry.getKey();
+        long snapshotId = entry.getValue();
+
+        if (state.canContinueRange(col, snapshotId)) {
+          state.extendRange();
+        } else {
+          state.flushRange();
+          state.initNewRange(col, snapshotId);
+        }
+      }
+      state.flushRange();
+
+      return state.getResult();
+    }
+
+    private static TreeMap<Integer, Long> logAndReturnEmptyMap(String snapshotIdsStr) {
+      LOG.warn(String.format(
+          "Invalid value for table property '%s': \"%s\". Ignoring it.",
+          IcebergTable.COMPUTE_STATS_SNAPSHOT_IDS, snapshotIdsStr));
+      return new TreeMap<>();
+    }
+
+    private static class ConversionState {
+      // Intentionally not using -1 as that is the snapshot ID of empty tables.
+      private static final int INVALID = -10;
+      private int colRangeStart_ = INVALID;
+      private int lastCol_ = INVALID;
+      private long lastSnapshotId_ = INVALID;
+      private final StringBuilder sb_ = new StringBuilder();
+
+      private boolean canContinueRange(int col, long snapshotId) {
+        return lastCol_ != INVALID && lastSnapshotId_ != INVALID
+            && lastSnapshotId_ == snapshotId && (lastCol_ + 1 == col);
+      }
+
+      private void extendRange() {
+        ++lastCol_;
+      }
+
+      private void flushRange() {
+        if (colRangeStart_ != INVALID) {
+          sb_.append(colRangeStart_);
+          if (lastCol_ != colRangeStart_) sb_.append("-").append(lastCol_);
+          sb_.append(":").append(lastSnapshotId_);
+        }
+      }
+
+      private void initNewRange(int col, long snapshotId) {
+        if (colRangeStart_ != INVALID) sb_.append(",");
+        colRangeStart_ = col;
+        lastCol_ = col;
+        lastSnapshotId_ = snapshotId;
+      }
+
+      private String getResult() {
+        return sb_.toString();
+      }
+    }
   }
 }

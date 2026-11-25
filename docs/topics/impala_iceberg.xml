@@ -861,7 +861,8 @@ ORDER BY made_current_at;
     <title>Iceberg Puffin statistics</title>
     <conbody>
       <p>
-      Impala supports reading NDV (Number of Distinct Values) statistics from Puffin files.
+      Impala supports reading NDV (Number of Distinct Values) statistics from Puffin files
+      and writes them in <codeph>COMPUTE STATS</codeph>.
       For the Puffin specification, see <xref keyref="upstream_iceberg_puffin_site"/>.
       </p>
       <p>
@@ -870,10 +871,15 @@ ORDER BY made_current_at;
       come from different snapshots.
       </p>
       <p>
-      In case there are both HMS and Puffin stats for a column, the more recent one will
-      be used - for HMS stats we use the 'impala.lastComputeStatsTime' table property, and
-      for Puffin stats we use the snapshot timestamp to determine which one is more
-      recent.
+      In case there are both HMS and Puffin NDV stats for a column, the more recent one
+      will be used. For HMS stats we use the 'impala.computeStatsSnapshotIds' table
+      property which stores, for each column, the snapshot for which HMS stats were
+      calculated. We compare this with the snapshot of the Puffin stats to decide which
+      is more recent. A column without an entry in this property takes the Puffin NDV:
+      this is the case for stats computed by an Impala version that did not write the
+      property, and for stats set with <codeph>ALTER TABLE ... SET COLUMN STATS</codeph>.
+      Run <codeph>COMPUTE STATS</codeph> again after an upgrade, or disable reading Puffin
+      stats for the table.
       </p>
       <p>
       Reading Puffin stats is disabled by default; set the "--enable_reading_puffin_stats"
@@ -886,8 +892,9 @@ ORDER BY made_current_at;
       from the metadata.json file instead of the Puffin file to reduce file I/O.
       </p>
       <p>
-      Note that it is currently not possible to drop Puffin stats from Impala.
-      For this reason, it is possible to disable reading Puffin stats in two ways:
+      <codeph>DROP STATS</codeph> removes only the Puffin stats written by Impala, so
+      stats written by other engines stay registered. It is possible to disable reading
+      Puffin stats in two ways:
       <ul>
         <li>Globally, with the aforementioned
             <codeph>enable_reading_puffin_stats</codeph> startup flag - when it is set
@@ -898,7 +905,88 @@ ORDER BY made_current_at;
       </ul>
       </p>
       <p>
-      Note that Impala does not yet support writing Puffin statistics files.
+      <b>Writing Puffin stats.</b> <codeph>COMPUTE STATS</codeph> on an Iceberg table
+      computes the NDV of each column with a theta sketch that hashes the values the way
+      Iceberg serializes them (blob type <codeph>apache-datasketches-theta-v1</codeph>),
+      so the sketches can be merged with those of other engines, e.g. Trino and Spark.
+      The sketches are written to a Puffin file that is registered for the snapshot the
+      stats were computed for. Each blob has the "ndv" property and the
+      "impala.created-by" property that marks it as written by Impala. The NDV stored in
+      HMS is the estimate of the sketch. Like other engines, the sketch of a STRING column
+      does not count the empty string, so the NDV of such a column can be lower by one
+      than the NDV computed without Puffin stats.
+      </p>
+      <p>
+      Writing Puffin stats is enabled by default. It can be disabled in two ways; NDVs
+      are then computed as for other tables and stored in HMS only:
+      <ul>
+        <li>Globally, with the <codeph>enable_writing_puffin_stats</codeph> startup flag
+            of the coordinators. Set it to false while coordinators and catalogd run
+            different versions during an upgrade.</li>
+        <li>For specific tables, by setting the
+            <codeph>impala.iceberg_write_puffin_stats</codeph> table property to
+            "false".</li>
+      </ul>
+      <codeph>COMPUTE STATS</codeph> with <codeph>TABLESAMPLE</codeph> does not write
+      Puffin stats.
+      </p>
+      <p>
+      <codeph>DROP STATS</codeph> removes the HMS stats, the
+      'impala.computeStatsSnapshotIds' table property and the blobs written by Impala: a
+      statistics file that has only such blobs is unregistered, a file that also has blobs
+      of other engines is replaced by a copy without them. The Puffin files themselves are
+      not deleted.
+      </p>
+    </conbody>
+  </concept>
+
+  <concept id="iceberg_incremental_stats">
+    <title>Incremental statistics for Iceberg tables</title>
+    <conbody>
+      <p>
+      <codeph>COMPUTE INCREMENTAL STATS [db_name.]table_name [(column_list)]</codeph> on
+      an Iceberg table reads only the data files added after the snapshot that the stored
+      stats were computed for, and merges the result with the stored stats: the theta
+      sketches are united, the numbers of NULLs, true and false values are added up, the
+      maximum size is the larger one and the average size is weighted by the number of
+      values. The base of the NDV of a column can be a theta sketch written by any engine
+      for the current snapshot or one of its ancestors; the base of the other stats is the
+      last <codeph>COMPUTE STATS</codeph> or <codeph>COMPUTE INCREMENTAL STATS</codeph> of
+      Impala. Writing Puffin stats must be enabled.
+      </p>
+      <p>
+      If the stored stats cannot be used as a base, the stats of the whole table are
+      computed and a warning tells the reason:
+      <codeblock>
+COMPUTE INCREMENTAL STATS on Iceberg table db.t computes full statistics: &lt;reason&gt;.
+      </codeblock>
+      This happens, for example, on the first run or after <codeph>DROP STATS</codeph>,
+      for a new column or a column whose type changed, when the base snapshot is not an
+      ancestor of the current one (after a rollback or when it expired), when data files
+      added after the base were rewritten by a compaction, or when writing Puffin stats
+      is disabled.
+      </p>
+      <p>
+      If no data files were added and no rows were deleted since the stats were computed,
+      nothing is written and the result is
+      <codeblock>
+No new data files since the last COMPUTE STATS; statistics are up to date.
+      </codeblock>
+      </p>
+      <p>
+      Deleted rows are ignored: the NDV is an upper estimate that never exceeds the number
+      of rows of the table. The <codeph>impala.iceberg_incremental_stats_max_deleted_ratio</codeph>
+      table property (a number between 0 and 1, not set by default) makes
+      <codeph>COMPUTE INCREMENTAL STATS</codeph> compute the stats of the whole table when
+      the estimated ratio of the rows deleted since the base exceeds it. All rows of the
+      data files rewritten by a copy-on-write update count as deleted, so on such tables
+      the threshold is exceeded by almost any update.
+      </p>
+      <p>
+      The <codeph>PARTITION</codeph> clause of <codeph>COMPUTE INCREMENTAL STATS</codeph>
+      and <codeph>DROP INCREMENTAL STATS</codeph> is not supported for Iceberg tables.
+      The "Incremental stats" column of <codeph>SHOW TABLE STATS</codeph> shows whether
+      the table has stats that can serve as a base.
       </p>
     </conbody>
   </concept>

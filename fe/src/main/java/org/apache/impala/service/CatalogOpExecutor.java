@@ -1453,6 +1453,22 @@ public class CatalogOpExecutor {
       modification.validateInProgressModificationComplete();
     } catch (Exception ex) {
       modification.cancelInflightEventIfExist();
+      // The failed update or the reload after it left the cached HMS table behind HMS.
+      if (tbl instanceof IcebergTable
+          && params.getAlter_type() == TAlterTableType.UPDATE_STATS) {
+        IcebergStatsUpdater.syncCachedIds((IcebergTable) tbl, hmsWriter(catalogTimeline));
+      }
+      // The cached base statistics disagree with HMS: reload them so that the next
+      // analysis does not choose the same base again.
+      if (ex instanceof IcebergStatsBaseMismatchException) {
+        try {
+          loadTableMetadata(tbl, modification.newVersionNumber(), false, true,
+              "ALTER TABLE UPDATE_STATS", debugAction, catalogTimeline);
+        } catch (Exception e) {
+          LOG.warn("Failed to reload table {} after mismatched base statistics",
+              tbl.getFullName(), e);
+        }
+      }
       throw ex;
     } finally {
       context.stop();
@@ -1955,6 +1971,29 @@ public class CatalogOpExecutor {
       Reference<Long> numUpdatedPartitions, Reference<Long> numUpdatedColumns,
       MetaStoreClient msClient, TblTransaction tblTxn, EventSequence catalogTimeline)
       throws ImpalaException {
+    checkIcebergPuffinStatsTarget(table, params);
+    if (table instanceof IcebergTable && params.isSetIceberg_puffin_stats()) {
+      if (params.isSetTable_stats()) {
+        updateTableStats(params, msTbl);
+        Table.updateTimestampProperty(msTbl, HdfsTable.TBL_PROP_LAST_COMPUTE_STATS_TIME);
+      }
+      msTbl.getParameters().remove(StatsSetupConst.COLUMN_STATS_ACCURATE);
+      // The updater writes the column stats and the table properties itself.
+      long numColumns = new IcebergStatsUpdater().apply((IcebergTable) table, msTbl,
+          params, hmsWriter(catalogTimeline), catalogTimeline);
+      numUpdatedColumns.setRef(numColumns);
+      numUpdatedPartitions.setRef(params.isSetTable_stats() ? 1L : 0L);
+      return;
+    }
+    if (table instanceof IcebergTable) {
+      // Stats without Iceberg parameters do not describe the snapshot in the ids. Even
+      // without columns the updater takes the metadata location of the Iceberg commit
+      // that a failed HMS write may have left unseen by the cache.
+      new IcebergStatsUpdater().detachColumns((IcebergTable) table, msTbl,
+          params.isSetColumn_stats() ? params.getColumn_stats().keySet()
+              : Collections.emptySet(),
+          hmsWriter(catalogTimeline));
+    }
     // Update column stats.
     numUpdatedColumns.setRef(0L);
     if (params.isSetColumn_stats()) {
@@ -2012,6 +2051,11 @@ public class CatalogOpExecutor {
     }
   }
 
+  private IcebergStatsUpdater.HmsStatsWriter hmsWriter(EventSequence timeline) {
+    return new CatalogHmsStatsWriter(catalog_, timeline,
+        m -> applyAlterTable(m, false, null, timeline));
+  }
+
   /**
    * For Iceberg tables using HiveCatalog we must avoid updating the HMS table directly to
    * avoid overriding concurrent modifications to the table. See IMPALA-11583.
@@ -2026,6 +2070,7 @@ public class CatalogOpExecutor {
     String CATALOG_SERVICE_ID = MetastoreEventPropertyKey.CATALOG_SERVICE_ID.getKey();
     String CATALOG_VERSION    = MetastoreEventPropertyKey.CATALOG_VERSION.getKey();
     String COMPUTE_STATS_TIME = HdfsTable.TBL_PROP_LAST_COMPUTE_STATS_TIME;
+    String COMPUTE_STATS_SNAPSHOT_IDS = IcebergTable.COMPUTE_STATS_SNAPSHOT_IDS;
 
     Preconditions.checkState(msTbl.getParameters().containsKey(CATALOG_SERVICE_ID));
     Preconditions.checkState(msTbl.getParameters().containsKey(CATALOG_VERSION));
@@ -2035,6 +2080,10 @@ public class CatalogOpExecutor {
     props.put(CATALOG_VERSION,    msTbl.getParameters().get(CATALOG_VERSION));
     if (msTbl.getParameters().containsKey(COMPUTE_STATS_TIME)) {
       props.put(COMPUTE_STATS_TIME, msTbl.getParameters().get(COMPUTE_STATS_TIME));
+    }
+    if (msTbl.getParameters().containsKey(COMPUTE_STATS_SNAPSHOT_IDS)) {
+      props.put(COMPUTE_STATS_SNAPSHOT_IDS,
+          msTbl.getParameters().get(COMPUTE_STATS_SNAPSHOT_IDS));
     }
 
     org.apache.iceberg.Transaction iceTxn = IcebergUtil.getIcebergTransaction(iceTbl);
@@ -2727,11 +2776,29 @@ public class CatalogOpExecutor {
       catalog_.getLock().writeLock().unlock();
       modification.addCatalogServiceIdentifiersToTable();
       modification.registerInflightEvent();
+
       if (params.getPartition_set() == null) {
+        if (table instanceof IcebergTable) {
+          // Fails before anything in HMS is dropped.
+          new IcebergStatsUpdater().dropImpalaStatistics((IcebergTable) table,
+              table.getMetaStoreTable(), hmsWriter(catalogTimeline));
+        }
         // TODO: Report the number of updated partitions/columns to the user?
         // TODO: bulk alter the partitions.
         dropColumnStats(table, catalogTimeline);
-        dropTableStats(table, catalogTimeline);
+        org.apache.hadoop.hive.metastore.api.Table msTbl = table.getMetaStoreTable();
+        boolean isIntegratedIcebergTbl =
+            IcebergTable.isIcebergTable(msTbl) && isIcebergHmsIntegrationEnabled(msTbl);
+        if (isIntegratedIcebergTbl) {
+          org.apache.iceberg.Transaction iceTxn =
+              IcebergUtil.getIcebergTransaction((FeIcebergTable) table);
+          dropIntegratedIcebergTableStats(table, iceTxn);
+          IcebergCatalogOpExecutor.addCatalogVersionToTxn(
+              iceTxn, catalog_.getCatalogServiceId(), modification.newVersionNumber());
+          iceTxn.commitTransaction();
+        } else {
+          dropTableStats(table, catalogTimeline);
+        }
       } else {
         HdfsTable hdfsTbl = (HdfsTable) table;
         List<HdfsPartition> partitions =
@@ -2807,22 +2874,23 @@ public class CatalogOpExecutor {
   private int dropTableStats(Table table, EventSequence catalogTimeline)
       throws ImpalaException {
     Preconditions.checkState(table.isWriteLockedByCurrentThread());
-    // Delete the ROW_COUNT from the table (if it was set).
     org.apache.hadoop.hive.metastore.api.Table msTbl = table.getMetaStoreTable();
     boolean isIntegratedIcebergTbl =
         IcebergTable.isIcebergTable(msTbl) && isIcebergHmsIntegrationEnabled(msTbl);
-    if (isIntegratedIcebergTbl) {
-      // We shouldn't modify table-level stats of HMS-integrated Iceberg tables as these
-      // stats are managed by Iceberg.
-      return 0;
-    }
+    Preconditions.checkState(!isIntegratedIcebergTbl);
+    // Delete the ROW_COUNT from the table (if it was set).
     int numTargetedPartitions = 0;
     boolean droppedRowCount =
         msTbl.getParameters().remove(StatsSetupConst.ROW_COUNT) != null;
     boolean droppedTotalSize =
         msTbl.getParameters().remove(StatsSetupConst.TOTAL_SIZE) != null;
+    boolean droppedLastCompute =
+        msTbl.getParameters().remove(HdfsTable.TBL_PROP_LAST_COMPUTE_STATS_TIME) != null;
+    boolean droppedIcebergComputeStatsSnapshotIds =
+        msTbl.getParameters().remove(IcebergTable.COMPUTE_STATS_SNAPSHOT_IDS) != null;
 
-    if (droppedRowCount || droppedTotalSize) {
+    if (droppedRowCount || droppedTotalSize || droppedLastCompute
+        || droppedIcebergComputeStatsSnapshotIds) {
       applyAlterTable(msTbl, false, null, catalogTimeline);
       ++numTargetedPartitions;
     }
@@ -2864,6 +2932,22 @@ public class CatalogOpExecutor {
     bulkAlterPartitions(table, modifiedParts, null, UpdatePartitionMethod.IN_PLACE,
         catalogTimeline);
     return modifiedParts.size();
+  }
+
+  /**
+   * For integrated Iceberg tables we shouldn't modify table-level stats of HMS-integrated
+   * Iceberg tables as these stats are managed by Iceberg. Dropping only
+   * "impala.lastComputeStatsTime"
+   */
+  private void dropIntegratedIcebergTableStats(
+      Table table, org.apache.iceberg.Transaction iceTxn) throws ImpalaException {
+    org.apache.hadoop.hive.metastore.api.Table msTbl = table.getMetaStoreTable();
+    boolean isIntegratedIcebergTbl =
+        IcebergTable.isIcebergTable(msTbl) && isIcebergHmsIntegrationEnabled(msTbl);
+    Preconditions.checkState(isIntegratedIcebergTbl);
+    IcebergCatalogOpExecutor.unsetTblProperties(iceTxn,
+       Arrays.asList(HdfsTable.TBL_PROP_LAST_COMPUTE_STATS_TIME,
+           IcebergTable.COMPUTE_STATS_SNAPSHOT_IDS));
   }
 
   /**
@@ -3043,14 +3127,24 @@ public class CatalogOpExecutor {
     return KuduTable.isHMSIntegrationEnabledAndValidate(masterHosts, hmsUris);
   }
 
-  private boolean isIcebergHmsIntegrationEnabled(
+  /**
+   * Iceberg statistics parameters describe an Iceberg table of the analysis; the table
+   * may have been recreated as another kind since then.
+   */
+  static void checkIcebergPuffinStatsTarget(Table table,
+      TAlterTableUpdateStatsParams params) throws ImpalaRuntimeException {
+    if (params.isSetIceberg_puffin_stats() && !(table instanceof IcebergTable)) {
+      throw new ImpalaRuntimeException("Table " + table.getFullName()
+          + " was changed concurrently; run COMPUTE STATS again.");
+    }
+  }
+
+  static boolean isIcebergHmsIntegrationEnabled(
       org.apache.hadoop.hive.metastore.api.Table msTbl) throws ImpalaRuntimeException {
     // Check if Iceberg's integration with the Hive Metastore is enabled, and validate
     // the configuration.
     Preconditions.checkState(IcebergTable.isIcebergTable(msTbl));
-    // Only synchronized tables can be integrated.
-    if (!IcebergTable.isSynchronizedTable(msTbl)) return false;
-    return IcebergUtil.isHiveCatalog(msTbl);
+    return IcebergUtil.isHmsIntegrated(msTbl);
   }
 
   /**
@@ -3518,14 +3612,18 @@ public class CatalogOpExecutor {
     modification.addCatalogServiceIdentifiersToTable();
     try {
       FeIcebergTable iceTbl = (FeIcebergTable) table;
+      org.apache.iceberg.Transaction iceTxn = IcebergUtil.getIcebergTransaction(iceTbl);
       if (params.isDelete_stats()) {
         // TODO: The following methods could already generate events. Investigate if
         // calling modification.registerInflightEvent() here is necessary ahead of them.
         modification.registerInflightEvent();
         dropColumnStats(table, catalogTimeline);
-        dropTableStats(table, catalogTimeline);
+        if (isIcebergHmsIntegrationEnabled(table.getMetaStoreTable())) {
+          dropIntegratedIcebergTableStats(table, iceTxn);
+        } else {
+          dropTableStats(table, catalogTimeline);
+        }
       }
-      org.apache.iceberg.Transaction iceTxn = IcebergUtil.getIcebergTransaction(iceTbl);
       IcebergCatalogOpExecutor.truncateTable(iceTxn);
       if (isIcebergHmsIntegrationEnabled(iceTbl.getMetaStoreTable())) {
         modification.registerInflightEvent();

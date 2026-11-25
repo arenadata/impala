@@ -72,6 +72,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.List;
+import java.util.TreeMap;
 
 /**
  * Unit tests for Iceberg Utilities.
@@ -457,5 +458,133 @@ public class IcebergUtilTest {
       this.catalog = catalog;
       this.clazz = clazz;
     }
+  }
+
+  @Test
+  public void testComputeStatsProperty() {
+    String empty = "";
+    assertEquals(empty, computeStatsPropertyRoundTrip(empty));
+
+    String singleCols = "1:1234,2:1235,4:2345,5:2346";
+    assertEquals(singleCols, computeStatsPropertyRoundTrip(singleCols));
+
+    String simpleRanges = "1-4:1234,6-10:2345";
+    assertEquals(simpleRanges, computeStatsPropertyRoundTrip(simpleRanges));
+
+    String rangesToMerge = "1-4:1234,5-8:1234,10:2345";
+    String mergedRanges = "1-8:1234,10:2345";
+    assertEquals(mergedRanges, computeStatsPropertyRoundTrip(rangesToMerge));
+
+    // Fill a disjunct range
+    String disjunctRanges = "1-4:1234,6-8:1234,10:2345";
+    TreeMap<Integer, Long> disjunctRangesMap =
+        IcebergUtil.ComputeStatsSnapshotPropertyConverter.stringToMap(disjunctRanges);
+    disjunctRangesMap.put(5, 1234L);
+    String completedRange = "1-8:1234,10:2345";
+    assertEquals(completedRange,
+        IcebergUtil.ComputeStatsSnapshotPropertyConverter.mapToString(disjunctRangesMap));
+
+    // Split a range
+    String rangeToSplit = "1-8:1234,10:2345";
+    TreeMap<Integer, Long> rangeToSplitMap =
+        IcebergUtil.ComputeStatsSnapshotPropertyConverter.stringToMap(rangeToSplit);
+    rangeToSplitMap.put(4, 2345L);
+    String splitRanges = "1-3:1234,4:2345,5-8:1234,10:2345";
+    assertEquals(splitRanges,
+        IcebergUtil.ComputeStatsSnapshotPropertyConverter.mapToString(rangeToSplitMap));
+
+    // Invalid properties yield empty maps
+    TreeMap<Long, Long> emptyMap = new TreeMap<>();
+    String invalid1 = "1:";
+    assertEquals(emptyMap,
+        IcebergUtil.ComputeStatsSnapshotPropertyConverter.stringToMap(invalid1));
+
+    // Spaces are not allowed
+    String invalid2 = "1:1234, 2:2345";
+    assertEquals(emptyMap,
+        IcebergUtil.ComputeStatsSnapshotPropertyConverter.stringToMap(invalid2));
+
+    String invalid3 = ":1234";
+    assertEquals(emptyMap,
+        IcebergUtil.ComputeStatsSnapshotPropertyConverter.stringToMap(invalid3));
+
+    String invalid4 = "1-3-5:1234";
+    assertEquals(emptyMap,
+        IcebergUtil.ComputeStatsSnapshotPropertyConverter.stringToMap(invalid4));
+  }
+
+  /**
+   * The checks that fail fast without the limit come first: without it the huge ranges
+   * below exhaust the heap or never terminate.
+   */
+  @Test
+  public void computeStatsPropertyLimitsFieldIds() {
+    assertEquals(0, parsedFieldIdCount("1-100001:5"));
+    assertEquals(0, parsedFieldIdCount("1-60000:5,70001-130000:5"));
+    assertEquals(0, parsedFieldIdCount("1-99999:5,100000:6,100001:7"));
+
+    TreeMap<Integer, Long> atLimit =
+        IcebergUtil.ComputeStatsSnapshotPropertyConverter.stringToMap("1-100000:5");
+    assertEquals(100000, atLimit.size());
+    assertEquals(Integer.valueOf(1), atLimit.firstKey());
+    assertEquals(Integer.valueOf(100000), atLimit.lastKey());
+    assertEquals(100000, parsedFieldIdCount("1:4,2-99999:5,100000:6"));
+
+    assertEquals(0, parsedFieldIdCount("1-2000000000:5"));
+    assertEquals(0, parsedFieldIdCount("0-2147483647:5"));
+
+    TreeMap<Integer, Long> upToIntMax = IcebergUtil.ComputeStatsSnapshotPropertyConverter
+        .stringToMap("2147483640-2147483647:5");
+    assertEquals(8, upToIntMax.size());
+    assertEquals(Integer.valueOf(2147483640), upToIntMax.firstKey());
+    assertEquals(Integer.valueOf(Integer.MAX_VALUE), upToIntMax.lastKey());
+    assertEquals(Long.valueOf(5), upToIntMax.get(Integer.MAX_VALUE));
+    assertEquals(1, parsedFieldIdCount("2147483647-2147483647:5"));
+
+    // A reversed range adds nothing but still parses.
+    TreeMap<Integer, Long> reversed =
+        IcebergUtil.ComputeStatsSnapshotPropertyConverter.stringToMap("5-3:7,9:8");
+    assertEquals(1, reversed.size());
+    assertEquals(Long.valueOf(8), reversed.get(9));
+  }
+
+  @Test
+  public void computeStatsPropertyMapRoundTrip() {
+    List<TreeMap<Integer, Long>> maps = new ArrayList<>();
+    maps.add(new TreeMap<>());
+
+    TreeMap<Integer, Long> mixed = new TreeMap<>();
+    mixed.put(1, 7716L);
+    mixed.put(2, 7716L);
+    mixed.put(3, 7716L);
+    mixed.put(5, 7716L);
+    mixed.put(6, -1L);
+    mixed.put(7, 8000L);
+    mixed.put(8, 7716L);
+    mixed.put(Integer.MAX_VALUE - 1, -1L);
+    maps.add(mixed);
+
+    TreeMap<Integer, Long> fullLimit = new TreeMap<>();
+    for (int fieldId = 1; fieldId <= 100000; ++fieldId) {
+      fullLimit.put(fieldId, fieldId % 3 == 0 ? 42L : 43L);
+    }
+    maps.add(fullLimit);
+
+    for (TreeMap<Integer, Long> map : maps) {
+      String property =
+          IcebergUtil.ComputeStatsSnapshotPropertyConverter.mapToString(map);
+      assertEquals(map,
+          IcebergUtil.ComputeStatsSnapshotPropertyConverter.stringToMap(property));
+    }
+  }
+
+  private int parsedFieldIdCount(String property) {
+    return IcebergUtil.ComputeStatsSnapshotPropertyConverter.stringToMap(property).size();
+  }
+
+  private String computeStatsPropertyRoundTrip(String property) {
+    TreeMap<Integer, Long> map =
+        IcebergUtil.ComputeStatsSnapshotPropertyConverter.stringToMap(property);
+    return IcebergUtil.ComputeStatsSnapshotPropertyConverter.mapToString(map);
   }
 }

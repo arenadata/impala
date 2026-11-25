@@ -75,13 +75,6 @@ drop stats ice_alltypes;
 STRING
 ====
 ---- QUERY
-alter table ice_alltypes unset tblproperties('impala.lastComputeStatsTime');
----- RESULTS
-'Updated table.'
----- TYPES
-STRING
-====
----- QUERY
 # Table-level stats are not affected by DROP STATS.
 describe formatted ice_alltypes;
 ---- RESULTS: VERIFY_IS_SUBSET
@@ -260,18 +253,12 @@ drop stats ice_alltypes_ht;
 STRING
 ====
 ---- QUERY
-alter table ice_alltypes_ht unset tblproperties('impala.lastComputeStatsTime');
----- RESULTS
-'Updated table.'
----- TYPES
-STRING
-====
----- QUERY
 # Table-level stats are dropped for non-HMS integrated Iceberg tables.
 describe formatted ice_alltypes_ht;
 ---- RESULTS: VERIFY_IS_NOT_IN
 '','numRows             ','2                   '
 row_regex:'','impala.lastComputeStatsTime','\d+\s+'
+row_regex:'','totalSize           ','\d+\s+'
 ---- TYPES
 STRING, STRING, STRING
 ====
@@ -400,5 +387,225 @@ STRING, STRING, BIGINT, BIGINT, BIGINT, DOUBLE, BIGINT, BIGINT
 ---- QUERY
 COMPUTE INCREMENTAL STATS ice_alltypes_part PARTITION (i=1);
 ---- CATCH
-COMPUTE INCREMENTAL ... PARTITION not supported for Iceberg table
+COMPUTE INCREMENTAL STATS ... PARTITION not supported for Iceberg table
+---- QUERY
+DROP INCREMENTAL STATS ice_alltypes_part PARTITION (i=1);
+---- CATCH
+DROP INCREMENTAL STATS ... PARTITION not supported for Iceberg table
+====
+
+---- QUERY
+# Tests for 'impala.computeStatsSnapshotIds'.
+create table test_ice (
+  i INT,
+  b BIGINT,
+  s STRING
+) stored as iceberg;
+compute stats test_ice;
+describe formatted test_ice;
+---- RESULTS: VERIFY_IS_SUBSET
+# For a table that contains no snapshot, the snapshot ids are -1.
+row_regex:'','impala.computeStatsSnapshotIds','1-3:-1\s*'
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+# Create a new snapshot, compute stats, and verify that the snapshot id is the same for
+# all columns.
+insert into test_ice values (1, 1, "one"), (1, 2, "two");
+compute stats test_ice;
+describe formatted test_ice;
+---- RESULTS: VERIFY_IS_SUBSET
+row_regex:'','impala.computeStatsSnapshotIds','1-3:(\d+)\s*'
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+# Compute stats for only the first and third columns, verify that they have the same
+# snapshot id.
+insert into test_ice values (10, 10, "ten");
+compute stats test_ice(i, s);
+describe formatted test_ice;
+---- RESULTS: VERIFY_IS_SUBSET
+row_regex:'','impala.computeStatsSnapshotIds','1:(\d+),2:(\d+),3:\1\s*'
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+# Compute stats for only the second and third columns, verify that they have the same
+# snapshot id.
+insert into test_ice values (100, 100, "hundred");
+compute stats test_ice(b, s);
+describe formatted test_ice;
+---- RESULTS: VERIFY_IS_SUBSET
+row_regex:'','impala.computeStatsSnapshotIds','1:(\d+),2-3:(\d+)\s*'
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+drop stats test_ice;
+describe formatted test_ice;
+---- RESULTS: VERIFY_IS_NOT_IN
+row_regex:'','impala.computeStatsSnapshotIds','.*'
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+# Tests for Puffin NDV statistics written by COMPUTE STATS.
+# COMPUTE STATS writes theta sketches of the current snapshot to a Puffin file. The NDV
+# in HMS is the estimate of the sketch: exact for small sets, nulls are not counted.
+create table ice_puffin (i int, s string, d date) stored as iceberg;
+insert into ice_puffin values (1, 'a', '2024-01-01'), (2, 'b', '2024-01-01'),
+    (2, 'c', NULL);
+compute stats ice_puffin;
+show column stats ice_puffin;
+---- RESULTS
+'i','INT',2,0,4,4,-1,-1
+'s','STRING',3,0,1,1,-1,-1
+'d','DATE',1,1,4,4,-1,-1
+---- TYPES
+STRING, STRING, BIGINT, BIGINT, BIGINT, DOUBLE, BIGINT, BIGINT
+====
+---- QUERY
+describe formatted ice_puffin;
+---- RESULTS: VERIFY_IS_SUBSET
+row_regex:'','impala.computeStatsSnapshotIds','1-3:(\d+)\s*'
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+# The snapshot ids with Puffin statistics make an incremental base.
+show table stats ice_puffin
+---- LABELS
+#ROWS, #Files, Size, Bytes Cached, Cache Replication, Format, Incremental stats, Location, EC Policy
+---- RESULTS: VERIFY_IS_EQUAL
+3,1,regex:'.*B','NOT CACHED','NOT CACHED','PARQUET','true','$NAMENODE/test-warehouse/$DATABASE.db/ice_puffin','$ERASURECODE_POLICY'
+---- TYPES
+BIGINT,BIGINT,STRING,STRING,STRING,STRING,STRING,STRING,STRING
+====
+---- QUERY
+# With 'impala.iceberg_write_puffin_stats'='false' COMPUTE STATS computes NDV() without
+# Puffin statistics. The snapshot ids are still written, but they make no incremental
+# base.
+alter table ice_puffin set tblproperties('impala.iceberg_write_puffin_stats'='false');
+insert into ice_puffin values (3, 'd', '2024-01-02');
+compute stats ice_puffin;
+show column stats ice_puffin;
+---- RESULTS
+'i','INT',3,0,4,4,-1,-1
+'s','STRING',4,0,1,1,-1,-1
+'d','DATE',2,1,4,4,-1,-1
+---- TYPES
+STRING, STRING, BIGINT, BIGINT, BIGINT, DOUBLE, BIGINT, BIGINT
+====
+---- QUERY
+describe formatted ice_puffin;
+---- RESULTS: VERIFY_IS_SUBSET
+row_regex:'','impala.computeStatsSnapshotIds','1-3:(\d+)\s*'
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+show table stats ice_puffin
+---- LABELS
+#ROWS, #Files, Size, Bytes Cached, Cache Replication, Format, Incremental stats, Location, EC Policy
+---- RESULTS: VERIFY_IS_EQUAL
+4,2,regex:'.*B','NOT CACHED','NOT CACHED','PARQUET','false','$NAMENODE/test-warehouse/$DATABASE.db/ice_puffin','$ERASURECODE_POLICY'
+---- TYPES
+BIGINT,BIGINT,STRING,STRING,STRING,STRING,STRING,STRING,STRING
+====
+---- QUERY
+# DROP STATS removes the Puffin statistics of Impala, the snapshot ids and the column
+# stats.
+alter table ice_puffin unset tblproperties('impala.iceberg_write_puffin_stats');
+compute stats ice_puffin;
+drop stats ice_puffin;
+show column stats ice_puffin;
+---- RESULTS
+'i','INT',-1,-1,4,4,-1,-1
+'s','STRING',-1,-1,-1,-1,-1,-1
+'d','DATE',-1,-1,4,4,-1,-1
+---- TYPES
+STRING, STRING, BIGINT, BIGINT, BIGINT, DOUBLE, BIGINT, BIGINT
+====
+---- QUERY
+describe formatted ice_puffin;
+---- RESULTS: VERIFY_IS_NOT_IN
+row_regex:'','impala.computeStatsSnapshotIds','.*'
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+show table stats ice_puffin
+---- LABELS
+#ROWS, #Files, Size, Bytes Cached, Cache Replication, Format, Incremental stats, Location, EC Policy
+---- RESULTS: VERIFY_IS_EQUAL
+4,2,regex:'.*B','NOT CACHED','NOT CACHED','PARQUET','false','$NAMENODE/test-warehouse/$DATABASE.db/ice_puffin','$ERASURECODE_POLICY'
+---- TYPES
+BIGINT,BIGINT,STRING,STRING,STRING,STRING,STRING,STRING,STRING
+====
+---- HIVE_QUERY
+# Impala cannot write TIMESTAMPTZ columns. The two values fall on the same local time
+# in Europe/Budapest: the end of summer time repeats the hour from 02:00.
+use $DATABASE;
+CREATE TABLE ice_puffin_tstz (i int, ts TIMESTAMP WITH LOCAL TIME ZONE)
+STORED BY ICEBERG;
+INSERT INTO ice_puffin_tstz VALUES
+    (1, CAST('2021-10-31 00:15:00 UTC' AS TIMESTAMP WITH LOCAL TIME ZONE)),
+    (2, CAST('2021-10-31 01:15:00 UTC' AS TIMESTAMP WITH LOCAL TIME ZONE));
+====
+---- QUERY
+SET TIMEZONE='Europe/Budapest';
+invalidate metadata ice_puffin_tstz;
+select count(distinct ts) from ice_puffin_tstz;
+---- RESULTS
+1
+---- TYPES
+BIGINT
+====
+---- QUERY
+# COMPUTE STATS hashes TIMESTAMPTZ values for the sketches in UTC, whatever the session
+# time zone is: the values stay distinct.
+SET TIMEZONE='Europe/Budapest';
+compute stats ice_puffin_tstz;
+show column stats ice_puffin_tstz;
+---- RESULTS
+'i','INT',2,0,4,4,-1,-1
+'ts','TIMESTAMP',2,0,16,16,-1,-1
+---- TYPES
+STRING, STRING, BIGINT, BIGINT, BIGINT, DOUBLE, BIGINT, BIGINT
+====
+---- QUERY
+describe formatted ice_puffin_tstz;
+---- RESULTS: VERIFY_IS_SUBSET
+row_regex:'','impala.computeStatsSnapshotIds','1-2:(\d+)\s*'
+---- TYPES
+STRING,STRING,STRING
+====
+---- QUERY
+# The column stats child query returns the theta sketches of all columns in one row. With
+# 80 columns of more than 4096 distinct values the row is larger than the largest page of
+# the result spooling buffer; the result of a statement that returns one row is not
+# spooled.
+create table ice_puffin_wide stored as iceberg as
+select id c0, id + 1 c1, id + 2 c2, id + 3 c3, id + 4 c4, id + 5 c5, id + 6 c6,
+    id + 7 c7, id + 8 c8, id + 9 c9, id + 10 c10, id + 11 c11, id + 12 c12,
+    id + 13 c13, id + 14 c14, id + 15 c15, id + 16 c16, id + 17 c17, id + 18 c18,
+    id + 19 c19, id + 20 c20, id + 21 c21, id + 22 c22, id + 23 c23, id + 24 c24,
+    id + 25 c25, id + 26 c26, id + 27 c27, id + 28 c28, id + 29 c29, id + 30 c30,
+    id + 31 c31, id + 32 c32, id + 33 c33, id + 34 c34, id + 35 c35, id + 36 c36,
+    id + 37 c37, id + 38 c38, id + 39 c39, id + 40 c40, id + 41 c41, id + 42 c42,
+    id + 43 c43, id + 44 c44, id + 45 c45, id + 46 c46, id + 47 c47, id + 48 c48,
+    id + 49 c49, id + 50 c50, id + 51 c51, id + 52 c52, id + 53 c53, id + 54 c54,
+    id + 55 c55, id + 56 c56, id + 57 c57, id + 58 c58, id + 59 c59, id + 60 c60,
+    id + 61 c61, id + 62 c62, id + 63 c63, id + 64 c64, id + 65 c65, id + 66 c66,
+    id + 67 c67, id + 68 c68, id + 69 c69, id + 70 c70, id + 71 c71, id + 72 c72,
+    id + 73 c73, id + 74 c74, id + 75 c75, id + 76 c76, id + 77 c77, id + 78 c78,
+    id + 79 c79
+from functional.alltypes;
+compute stats ice_puffin_wide;
+---- RESULTS
+'Updated 1 partition(s) and 80 column(s).'
+---- TYPES
+STRING
 ====

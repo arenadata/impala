@@ -360,6 +360,55 @@ struct TAlterTableOrViewSetOwnerParams {
   3: optional string server_name
 }
 
+// How COMPUTE STATS on an Iceberg table computes and stores NDV.
+enum TIcebergStatsMode {
+  // Theta sketches over all data files, written to a Puffin file.
+  FULL = 0
+  // Theta sketches over the files added since the previous Puffin NDV base.
+  INCREMENTAL = 1
+  // NDV() aggregate, no Puffin file.
+  LEGACY = 2
+}
+
+// NDV base of one column: the Puffin blob an incremental computation continues from.
+struct TIcebergNdvBase {
+  // Iceberg field id of the column.
+  1: required i32 field_id
+
+  // Snapshot id of the blob (the calculated snapshot or its ancestor), not of the files.
+  2: required i64 snapshot_id
+
+  // Path of the statistics file that contains the blob.
+  3: required string stats_file_path
+}
+
+// Iceberg-specific part of COMPUTE STATS, set by the frontend and passed on to catalogd.
+struct TIcebergPuffinStatsParams {
+  1: required TIcebergStatsMode mode
+
+  // Snapshot id the statistics are calculated for.
+  2: required i64 calc_snapshot_id
+
+  // Snapshot of the previous metrics base. Only for INCREMENTAL.
+  3: optional i64 metrics_base_snapshot_id
+
+  // One entry per theta column. Only for INCREMENTAL.
+  4: optional list<TIcebergNdvBase> ndv_bases
+
+  // Field ids of the theta columns, in the order of the theta query or metrics tail.
+  5: optional list<i32> theta_field_ids
+
+  // Field id -> compact theta sketch. Filled in by the backend. Binary because Java
+  // Thrift decodes 'string' as UTF-8 and corrupts the bytes.
+  6: optional map<i32, binary> theta_sketches
+
+  // Column name in column_stats -> Iceberg field id at analysis time.
+  7: required map<string, i32> column_field_ids
+
+  // True if the statistics come from a sample. Only for LEGACY.
+  8: optional bool sampled
+}
+
 // Parameters for updating the table and/or column statistics
 // of a table. Used by ALTER TABLE SET COLUMN STATS, and internally by
 // a COMPUTE STATS command.
@@ -383,6 +432,10 @@ struct TAlterTableUpdateStatsParams {
 
   // If true, this is the result of an incremental stats computation
   6: optional bool is_incremental
+
+  // Iceberg Puffin statistics: copy of TComputeStatsParams.iceberg_puffin_stats with
+  // theta_sketches filled in by the backend.
+  8: optional TIcebergPuffinStatsParams iceberg_puffin_stats
 }
 
 // Parameters for ALTER TABLE SET [PARTITION partitionSet] CACHED|UNCACHED
@@ -697,6 +750,16 @@ struct TComputeStatsParams {
   // Sum of file sizes in the table. Only set for tables of type HDFS_TABLE and if
   // is_incremental is false.
   9: optional i64 total_file_bytes
+
+  // Query for the theta sketches of the new files. Only for INCREMENTAL when the
+  // metrics base differs from the calculated snapshot.
+  11: optional string iceberg_theta_query
+
+  // Set for Iceberg tables in all three modes.
+  12: optional TIcebergPuffinStatsParams iceberg_puffin_stats
+
+  // Returned to the user instead of running child queries when there is nothing to do.
+  13: optional string no_child_queries_message
 }
 
 // Parameters for CREATE/DROP ROLE

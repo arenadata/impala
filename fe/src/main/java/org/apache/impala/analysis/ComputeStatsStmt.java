@@ -21,6 +21,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -29,6 +30,9 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
+import org.apache.impala.analysis.IcebergStatsPlan.MetricColumn;
+import org.apache.impala.analysis.IcebergStatsPlan.Mode;
+import org.apache.impala.analysis.IcebergStatsPlan.NdvBase;
 import org.apache.impala.authorization.Privilege;
 import org.apache.impala.catalog.Column;
 import org.apache.impala.catalog.FeCatalogUtils;
@@ -52,6 +56,9 @@ import org.apache.impala.service.FrontendProfile;
 import org.apache.impala.thrift.TComputeStatsParams;
 import org.apache.impala.thrift.TErrorCode;
 import org.apache.impala.thrift.TGetPartitionStatsResponse;
+import org.apache.impala.thrift.TIcebergNdvBase;
+import org.apache.impala.thrift.TIcebergPuffinStatsParams;
+import org.apache.impala.thrift.TIcebergStatsMode;
 import org.apache.impala.thrift.TPartitionStats;
 import org.apache.impala.thrift.TTableName;
 import org.apache.impala.thrift.TUnit;
@@ -115,6 +122,9 @@ import com.google.common.collect.Sets;
 public class ComputeStatsStmt extends StatementBase {
   private static final Logger LOG = Logger.getLogger(ComputeStatsStmt.class);
 
+  private static final String NO_NEW_FILES_MESSAGE = "No new data files since the last "
+      + "COMPUTE STATS; statistics are up to date.";
+
   private static String AVRO_SCHEMA_MSG_PREFIX = "Cannot COMPUTE STATS on Avro table " +
       "'%s' because its column definitions do not match those in the Avro schema.";
   private static String AVRO_SCHEMA_MSG_SUFFIX = "Please re-create the table with " +
@@ -161,6 +171,10 @@ public class ComputeStatsStmt extends StatementBase {
   // Set during analysis.
   protected String columnStatsQueryStr_;
 
+  // Query for the theta sketches of an incremental computation of an Iceberg table whose
+  // NDV base differs from the metrics base. Set during analysis.
+  private String icebergThetaQueryStr_;
+
   // If true, stats will be gathered incrementally per-partition.
   private boolean isIncremental_;
 
@@ -194,6 +208,10 @@ public class ComputeStatsStmt extends StatementBase {
   // schema, it must be of a type that can be analyzed, and cannot refer to a partitioning
   // column for HDFS tables. If the set is null, no columns are restricted.
   private Set<Column> validatedColumnWhitelist_;
+
+  // Set during analysis of Iceberg tables: the snapshot all child queries read and how
+  // they compute statistics.
+  private IcebergStatsPlan icebergStatsPlan_;
 
   /**
    * Should only be constructed via static creation functions.
@@ -238,14 +256,29 @@ public class ComputeStatsStmt extends StatementBase {
     return new ComputeStatsStmt(tableName, null, true, partitionSet, columns);
   }
 
-  private List<String> getBaseColumnStatsQuerySelectList(Analyzer analyzer) {
-    List<String> columnStatsSelectList = new ArrayList<>();
+  /**
+   * Columns the column stats query computes metrics for, in table order.
+   */
+  private List<Column> getMetricColumns() {
     // For Hdfs tables, exclude partition columns from stats gathering because Hive
     // cannot store them as part of the non-partition column stats. For HBase tables,
     // include the single clustering column (the row key).
     int startColIdx = (table_ instanceof FeHBaseTable) ? 0 :
         table_.getNumClusteringCols();
+    List<Column> res = new ArrayList<>();
+    for (int i = startColIdx; i < table_.getColumns().size(); ++i) {
+      Column c = table_.getColumns().get(i);
+      if (validatedColumnWhitelist_ != null && !validatedColumnWhitelist_.contains(c)) {
+        continue;
+      }
+      if (ignoreColumn(c)) continue;
+      res.add(c);
+    }
+    return res;
+  }
 
+  private List<String> getBaseColumnStatsQuerySelectList(Analyzer analyzer) {
+    List<String> columnStatsSelectList = new ArrayList<>();
     // Verify that the table is Parquet.
     boolean computeMinMax = analyzer.getQueryCtx()
                                 .getClient_request()
@@ -253,85 +286,146 @@ public class ComputeStatsStmt extends StatementBase {
                                 .isCompute_column_minmax_stats()
         && hasAtLeastOneParquetPartition();
 
-    for (int i = startColIdx; i < table_.getColumns().size(); ++i) {
-      Column c = table_.getColumns().get(i);
-      if (validatedColumnWhitelist_ != null && !validatedColumnWhitelist_.contains(c)) {
-        continue;
+    if (icebergStatsPlan_ == null) {
+      for (Column c : getMetricColumns()) {
+        addColumnStatsExprs(columnStatsSelectList, c, ToSqlUtils.getIdentSql(c.getName()),
+            computeMinMax);
       }
-      if (ignoreColumn(c)) continue;
-
-      String colRefSql = ToSqlUtils.getIdentSql(c.getName());
-
-      if (c.getType().isBinary()) {
-        // NDV is not calculated for BINARY columns (similarly to Hive).
-        columnStatsSelectList.add("NULL AS " + colRefSql);
-      } else {
-        // NDV approximation function. Add explicit alias for later identification when
-        // updating the Metastore.
-        if (isIncremental_) {
-          columnStatsSelectList.add("NDV_NO_FINALIZE(" + colRefSql + ") AS " + colRefSql);
-        } else if (isSampling()) {
-          columnStatsSelectList.add(String.format("SAMPLED_NDV(%s, %.10f) AS %s",
-              colRefSql, effectiveSamplePerc_, colRefSql));
-        } else {
-          // Regular (non-incremental) compute stats without sampling.
-          columnStatsSelectList.add("NDV(" + colRefSql + ") AS " + colRefSql);
-        }
-      }
-
-      // Count the number of NULL values.
-      columnStatsSelectList.add("COUNT(CASE WHEN " + colRefSql +
-          " IS NULL THEN 1 ELSE NULL END)");
-
-      // For STRING columns also compute the max and avg string length.
-      Type type = c.getType();
-      if (type.isStringType()) {
-        columnStatsSelectList.add("MAX(length(" + colRefSql + "))");
-        columnStatsSelectList.add("AVG(length(" + colRefSql + "))");
-      } else {
-        // For non-STRING columns we use the fixed size of the type.
-        // We store the same information for all types to avoid having to
-        // treat STRING columns specially in the BE CatalogOpExecutor.
-        Integer typeSize = type.getPrimitiveType().getSlotSize();
-        columnStatsSelectList.add(typeSize.toString());
-        columnStatsSelectList.add("CAST(" + typeSize.toString() + " as DOUBLE)");
-      }
-
-      if (isIncremental_) {
-        // Need the count in order to properly combine per-partition column stats
-        columnStatsSelectList.add("COUNT(" + colRefSql + ")");
-      }
-
-      // For boolean column, compute the numTrue and numFalse
-      if (type.isBoolean()) {
-        columnStatsSelectList.add(
-            "COUNT(CASE WHEN " + colRefSql + " = TRUE THEN 1 ELSE NULL END)");
-        columnStatsSelectList.add(
-            "COUNT(CASE WHEN " + colRefSql + " = FALSE THEN 1 ELSE NULL END)");
-      } else {
-        columnStatsSelectList.add("NULL");
-        columnStatsSelectList.add("NULL");
-      }
-
-      // Finally, compute the min and max. NULLs in the column are ignored unless
-      // all values are NULL in which case a NULL value will be produced.
-      //
-      // Do it only for INTEGERS, DOUBLES, DECIMAL and DATE types as they can be
-      // stored in LongColumnStatsData, DoubleColumnStatsData,
-      // DecimalColumnStatsData or DateColumnStatsData in HMS.
-      String min_expr = null;
-      String max_expr = null;
-      if (computeMinMax && MetaStoreUtil.canStoreMinmaxInHMS(type)) {
-        min_expr = "MIN(" + colRefSql + ")";
-        max_expr = "MAX(" + colRefSql + ")";
-      } else  {
-        min_expr = "NULL";
-        max_expr = "NULL";
-      }
-      columnStatsSelectList.add(min_expr);
-      columnStatsSelectList.add(max_expr);
+      return columnStatsSelectList;
     }
+    for (MetricColumn mc : icebergStatsPlan_.metricColumns()) {
+      addColumnStatsExprs(columnStatsSelectList, mc.col(), mc.sourceSql(), computeMinMax);
+    }
+    // The backend takes the sketches from the columns after the metrics of all columns.
+    if (hasIcebergThetaTail()) columnStatsSelectList.addAll(getIcebergThetaSelectList());
     return columnStatsSelectList;
+  }
+
+  /** Theta sketch expressions of the Iceberg plan in the order of its theta field ids. */
+  private List<String> getIcebergThetaSelectList() {
+    Map<Integer, String> sourceSqlByFieldId = new HashMap<>();
+    for (MetricColumn mc : icebergStatsPlan_.metricColumns()) {
+      sourceSqlByFieldId.put(mc.fieldId(), mc.sourceSql());
+    }
+    List<String> res = new ArrayList<>();
+    for (int fieldId : icebergStatsPlan_.thetaFieldIds()) {
+      res.add("ds_theta_sketch_iceberg(" + sourceSqlByFieldId.get(fieldId)
+          + ") AS theta_" + fieldId);
+    }
+    return res;
+  }
+
+  /** Whether the column stats query also returns the theta sketches. */
+  private boolean hasIcebergThetaTail() {
+    switch (icebergStatsPlan_.mode()) {
+      case FULL: return true;
+      case INCREMENTAL: return isIcebergNdvBaseMetricsBase();
+      default: return false;
+    }
+  }
+
+  private boolean isIcebergNdvBaseMetricsBase() {
+    return icebergStatsPlan_.bn() != null
+        && icebergStatsPlan_.bn().equals(icebergStatsPlan_.bh());
+  }
+
+  private static String addedFilesAfterHint(long base) {
+    return " /* +ICEBERG_ADDED_FILES_AFTER(" + base + ") */";
+  }
+
+  private void checkIncrementalIcebergPlan() {
+    Preconditions.checkState(icebergStatsPlan_.bh() != null,
+        "incremental plan of table %s has no metrics base", table_.getFullName());
+    Preconditions.checkState(icebergStatsPlan_.ndvBases().keySet().equals(
+        new HashSet<>(icebergStatsPlan_.thetaFieldIds())),
+        "NDV bases of fields %s of table %s do not match theta field ids %s",
+        icebergStatsPlan_.ndvBases().keySet(), table_.getFullName(),
+        icebergStatsPlan_.thetaFieldIds());
+    Preconditions.checkState(
+        (icebergStatsPlan_.bn() == null) == icebergStatsPlan_.thetaFieldIds().isEmpty(),
+        "NDV base snapshot of table %s does not match theta field ids %s",
+        table_.getFullName(), icebergStatsPlan_.thetaFieldIds());
+  }
+
+  /**
+   * Adds the metric expressions of column 'c' that read the column as 'colRefSql' and are
+   * labeled by its name.
+   */
+  private void addColumnStatsExprs(List<String> columnStatsSelectList, Column c,
+      String colRefSql, boolean computeMinMax) {
+    String alias = ToSqlUtils.getIdentSql(c.getName());
+
+    if (icebergStatsPlan_ != null && icebergStatsPlan_.mode() != Mode.LEGACY) {
+      // NDV comes from the theta sketches; the count of non-NULL values bounds it.
+      columnStatsSelectList.add("COUNT(" + colRefSql + ") AS " + alias);
+    } else if (c.getType().isBinary()) {
+      // NDV is not calculated for BINARY columns (similarly to Hive).
+      columnStatsSelectList.add("NULL AS " + alias);
+    } else {
+      // NDV approximation function. Add explicit alias for later identification when
+      // updating the Metastore.
+      if (isIncremental_) {
+        columnStatsSelectList.add("NDV_NO_FINALIZE(" + colRefSql + ") AS " + alias);
+      } else if (isSampling()) {
+        columnStatsSelectList.add(String.format("SAMPLED_NDV(%s, %.10f) AS %s",
+            colRefSql, effectiveSamplePerc_, alias));
+      } else {
+        // Regular (non-incremental) compute stats without sampling.
+        columnStatsSelectList.add("NDV(" + colRefSql + ") AS " + alias);
+      }
+    }
+
+    // Count the number of NULL values.
+    columnStatsSelectList.add("COUNT(CASE WHEN " + colRefSql +
+        " IS NULL THEN 1 ELSE NULL END)");
+
+    // For STRING columns also compute the max and avg string length.
+    Type type = c.getType();
+    if (type.isStringType()) {
+      columnStatsSelectList.add("MAX(length(" + colRefSql + "))");
+      columnStatsSelectList.add("AVG(length(" + colRefSql + "))");
+    } else {
+      // For non-STRING columns we use the fixed size of the type.
+      // We store the same information for all types to avoid having to
+      // treat STRING columns specially in the BE CatalogOpExecutor.
+      Integer typeSize = type.getPrimitiveType().getSlotSize();
+      columnStatsSelectList.add(typeSize.toString());
+      columnStatsSelectList.add("CAST(" + typeSize.toString() + " as DOUBLE)");
+    }
+
+    if (isIncremental_) {
+      // Need the count in order to properly combine per-partition column stats
+      columnStatsSelectList.add("COUNT(" + colRefSql + ")");
+    }
+
+    // For boolean column, compute the numTrue and numFalse
+    if (type.isBoolean()) {
+      columnStatsSelectList.add(
+          "COUNT(CASE WHEN " + colRefSql + " = TRUE THEN 1 ELSE NULL END)");
+      columnStatsSelectList.add(
+          "COUNT(CASE WHEN " + colRefSql + " = FALSE THEN 1 ELSE NULL END)");
+    } else {
+      columnStatsSelectList.add("NULL");
+      columnStatsSelectList.add("NULL");
+    }
+
+    // Finally, compute the min and max. NULLs in the column are ignored unless
+    // all values are NULL in which case a NULL value will be produced.
+    //
+    // Do it only for INTEGERS, DOUBLES, DECIMAL and DATE types as they can be
+    // stored in LongColumnStatsData, DoubleColumnStatsData,
+    // DecimalColumnStatsData or DateColumnStatsData in HMS.
+    String min_expr = null;
+    String max_expr = null;
+    if (computeMinMax && MetaStoreUtil.canStoreMinmaxInHMS(type)) {
+      min_expr = "MIN(" + colRefSql + ")";
+      max_expr = "MAX(" + colRefSql + ")";
+    } else  {
+      min_expr = "NULL";
+      max_expr = "NULL";
+    }
+    columnStatsSelectList.add(min_expr);
+    columnStatsSelectList.add(max_expr);
   }
 
   /**
@@ -408,19 +502,20 @@ public class ComputeStatsStmt extends StatementBase {
           "COMPUTE STATS not supported for system table: %s", tableName_));
     }
     table_ = analyzer.getTable(tableName_, Privilege.ALTER, Privilege.SELECT);
+    boolean incrementalRequested = isIncremental_;
 
     if (!(table_ instanceof FeFsTable)) {
       if (partitionSet_ != null) {
-        throw new AnalysisException("COMPUTE INCREMENTAL ... PARTITION not supported " +
-            "for non-HDFS table " + tableName_);
+        throw new AnalysisException("COMPUTE INCREMENTAL STATS ... PARTITION " +
+            "not supported for non-filesystem-based table " + tableName_);
       }
       isIncremental_ = false;
     }
 
     if (table_ instanceof FeIcebergTable) {
       if (partitionSet_ != null) {
-        throw new AnalysisException("COMPUTE INCREMENTAL ... PARTITION not supported " +
-            "for Iceberg table " + tableName_);
+        throw new AnalysisException("COMPUTE INCREMENTAL STATS ... PARTITION " +
+            "not supported for Iceberg table " + tableName_);
       }
       isIncremental_ = false;
     }
@@ -611,6 +706,38 @@ public class ComputeStatsStmt extends StatementBase {
 
     // Tablesample clause to be used for all child queries.
     String tableSampleSql = analyzeTableSampleClause(analyzer);
+    String tableRefSql = tableName_.toSql();
+    if (table_ instanceof FeIcebergTable) {
+      icebergStatsPlan_ = IcebergStatsBaseResolver.resolve((FeIcebergTable) table_,
+          getMetricColumns(), incrementalRequested, isSampling());
+      for (String warning : icebergStatsPlan_.warnings()) analyzer.addWarning(warning);
+      addToProfile(icebergStatsPlan_);
+      if (icebergStatsPlan_.mode() == Mode.NOOP) {
+        tableStatsQueryStr_ = null;
+        columnStatsQueryStr_ = null;
+        icebergThetaQueryStr_ = null;
+        return;
+      }
+      // Child queries are analyzed anew and would otherwise read the snapshot that is
+      // current then.
+      if (icebergStatsPlan_.s1() != -1) {
+        tableRefSql += " FOR SYSTEM_VERSION AS OF " + icebergStatsPlan_.s1();
+      }
+    }
+    tableRefSql += tableSampleSql;
+    // The table stats query counts the live rows of the whole snapshot.
+    String columnStatsRefSql = tableRefSql;
+    icebergThetaQueryStr_ = null;
+    if (icebergStatsPlan_ != null && icebergStatsPlan_.mode() == Mode.INCREMENTAL) {
+      checkIncrementalIcebergPlan();
+      columnStatsRefSql += addedFilesAfterHint(icebergStatsPlan_.bh());
+      if (icebergStatsPlan_.bn() != null && !isIcebergNdvBaseMetricsBase()) {
+        icebergThetaQueryStr_ = "SELECT "
+            + Joiner.on(", ").join(getIcebergThetaSelectList()) + " FROM "
+            + tableRefSql + addedFilesAfterHint(icebergStatsPlan_.bn());
+        if (LOG.isTraceEnabled()) LOG.trace("Theta query: " + icebergThetaQueryStr_);
+      }
+    }
 
     // Query for getting the per-partition row count and the total row count.
     StringBuilder tableStatsQueryBuilder = new StringBuilder("SELECT ");
@@ -631,7 +758,7 @@ public class ComputeStatsStmt extends StatementBase {
       tableStatsSelectList.addAll(groupByCols);
     }
     tableStatsQueryBuilder.append(Joiner.on(", ").join(tableStatsSelectList));
-    tableStatsQueryBuilder.append(" FROM " + tableName_.toSql() + tableSampleSql);
+    tableStatsQueryBuilder.append(" FROM " + tableRefSql);
 
     // Query for getting the per-column NDVs and number of NULLs.
     List<String> columnStatsSelectList = getBaseColumnStatsQuerySelectList(analyzer);
@@ -640,7 +767,7 @@ public class ComputeStatsStmt extends StatementBase {
 
     StringBuilder columnStatsQueryBuilder = new StringBuilder("SELECT ");
     columnStatsQueryBuilder.append(Joiner.on(", ").join(columnStatsSelectList));
-    columnStatsQueryBuilder.append(" FROM " + tableName_.toSql() + tableSampleSql);
+    columnStatsQueryBuilder.append(" FROM " + columnStatsRefSql);
 
     // Add the WHERE clause to filter out partitions that we don't want to compute
     // incremental stats for. While this is a win in most situations, we would like to
@@ -779,6 +906,14 @@ public class ComputeStatsStmt extends StatementBase {
     } finally {
       recordFetchMetrics(numCompressedBytes, totalPartitions, numPartitionsWithStats, sw);
     }
+  }
+
+  private static void addToProfile(IcebergStatsPlan plan) {
+    FrontendProfile profile = FrontendProfile.getCurrentOrNull();
+    if (profile == null) return;
+    plan.profileInfo().forEach(profile::addInfoString);
+    plan.profileCounters().forEach(
+        (name, value) -> profile.addToCounter(name, TUnit.UNIT, value));
   }
 
   /**
@@ -957,12 +1092,20 @@ public class ComputeStatsStmt extends StatementBase {
    * column stats. Columns with an invalid/unsupported/complex type are ignored.
    * For example, complex types in an HBase-backed table will appear as invalid types.
    */
-  private boolean ignoreColumn(Column c) {
+  static boolean ignoreColumn(Column c) {
     Type t = c.getType();
     return !t.isValid() || !t.isSupported() || t.isComplexType();
   }
 
   public double getEffectiveSamplingPerc() { return effectiveSamplePerc_; }
+
+  @Override
+  public void reset() {
+    super.reset();
+    tableStatsQueryStr_ = null;
+    columnStatsQueryStr_ = null;
+    icebergThetaQueryStr_ = null;
+  }
 
   /**
    * For testing.
@@ -1073,6 +1216,48 @@ public class ComputeStatsStmt extends StatementBase {
     if (table_ instanceof FeFsTable) {
       params.setTotal_file_bytes(((FeFsTable)table_).getTotalHdfsBytes());
     }
+
+    if (table_ instanceof FeIcebergTable) {
+      Preconditions.checkState(icebergStatsPlan_ != null);
+      if (icebergStatsPlan_.mode() == Mode.NOOP) {
+        params.setNo_child_queries_message(NO_NEW_FILES_MESSAGE);
+        return params;
+      }
+      if (icebergThetaQueryStr_ != null) {
+        params.setIceberg_theta_query(icebergThetaQueryStr_);
+      }
+      params.setIceberg_puffin_stats(icebergPuffinStatsToThrift());
+    }
     return params;
+  }
+
+  private TIcebergPuffinStatsParams icebergPuffinStatsToThrift() {
+    Preconditions.checkState(icebergStatsPlan_.mode() != Mode.NOOP);
+    TIcebergPuffinStatsParams res = new TIcebergPuffinStatsParams();
+    res.setMode(TIcebergStatsMode.valueOf(icebergStatsPlan_.mode().name()));
+    res.setCalc_snapshot_id(icebergStatsPlan_.s1());
+    Map<String, Integer> columnFieldIds = new HashMap<>();
+    for (MetricColumn mc : icebergStatsPlan_.metricColumns()) {
+      // The backend keys column stats by the result labels, which are in lower case.
+      columnFieldIds.put(mc.col().getName().toLowerCase(), mc.fieldId());
+    }
+    res.setColumn_field_ids(columnFieldIds);
+    if (icebergStatsPlan_.mode() == Mode.LEGACY) {
+      res.setSampled(isSampling());
+    } else {
+      res.setTheta_field_ids(new ArrayList<>(icebergStatsPlan_.thetaFieldIds()));
+    }
+    if (icebergStatsPlan_.mode() == Mode.INCREMENTAL) {
+      res.setMetrics_base_snapshot_id(icebergStatsPlan_.bh());
+      List<TIcebergNdvBase> ndvBases = new ArrayList<>();
+      for (int fieldId : icebergStatsPlan_.thetaFieldIds()) {
+        NdvBase base = icebergStatsPlan_.ndvBases().get(fieldId);
+        Preconditions.checkState(base != null, "no NDV base of field %s", fieldId);
+        ndvBases.add(new TIcebergNdvBase(
+            fieldId, base.blobSnapshotId(), base.statsFilePath()));
+      }
+      res.setNdv_bases(ndvBases);
+    }
+    return res;
   }
 }

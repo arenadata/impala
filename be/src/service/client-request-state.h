@@ -1001,4 +1001,24 @@ class ClientRequestState {
   Status TryKillQueryRemotely(
       const TUniqueId& query_id, const KillQueryRequestPB& request);
 };
+
+/// One child query of COMPUTE STATS. 'utc' runs it with TIMEZONE=UTC.
+struct ComputeStatsChildQuery {
+  std::string query;
+  std::string profile_name;
+  bool utc = false;
+};
+
+/// Child queries to run for 'params', in execution order. Without queries
+/// 'no_queries_message' is the result and nothing is sent to catalogd. The indices
+/// locate the result of each query in 'queries', -1 if the query is absent.
+struct ComputeStatsChildQueries {
+  std::vector<ComputeStatsChildQuery> queries;
+  int table_index = -1;
+  int col_stats_index = -1;
+  int theta_index = -1;
+  std::string no_queries_message;
+};
+
+ComputeStatsChildQueries BuildComputeStatsChildQueries(const TComputeStatsParams& params);
 }

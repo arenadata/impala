@@ -155,10 +155,27 @@ Status CatalogOpExecutor::Exec(const TCatalogOpRequest& request) {
   }
 }
 
-Status CatalogOpExecutor::ExecComputeStats(const TCatalogServiceRequestHeader& header,
-    const TCatalogOpRequest& compute_stats_request,
-    const TTableSchema& tbl_stats_schema, const TRowSet& tbl_stats_data,
-    const TTableSchema& col_stats_schema, const TRowSet& col_stats_data) {
+namespace {
+
+/// Number of theta sketch columns at the end of the column stats query result. A separate
+/// theta query carries the sketches instead of the tail.
+int IcebergThetaTailSize(const TComputeStatsParams& params) {
+  if (!params.__isset.iceberg_puffin_stats || params.__isset.iceberg_theta_query) {
+    return 0;
+  }
+  return params.iceberg_puffin_stats.theta_field_ids.size();
+}
+
+Status IcebergColStatsShapeError(int rows, int columns, int expected_columns) {
+  return Status(Substitute("Iceberg column stats query returned $0 row(s) and $1 "
+      "column(s), expected 1 row and $2 column(s)", rows, columns, expected_columns));
+}
+
+} // namespace
+
+TCatalogOpRequest CatalogOpExecutor::BuildUpdateStatsRequest(
+    const TCatalogServiceRequestHeader& header,
+    const TCatalogOpRequest& compute_stats_request) {
   // Create a new DDL request to alter the table's statistics.
   TCatalogOpRequest catalog_op_req;
   catalog_op_req.__isset.ddl_params = true;
@@ -183,6 +200,27 @@ Status CatalogOpExecutor::ExecComputeStats(const TCatalogServiceRequestHeader& h
   update_stats_params.__set_expect_all_partitions(
       compute_stats_params.expect_all_partitions);
   update_stats_params.__set_is_incremental(compute_stats_params.is_incremental);
+  if (compute_stats_params.__isset.iceberg_puffin_stats) {
+    update_stats_params.__set_iceberg_puffin_stats(
+        compute_stats_params.iceberg_puffin_stats);
+  }
+  return catalog_op_req;
+}
+
+Status CatalogOpExecutor::ExecComputeStats(const TCatalogServiceRequestHeader& header,
+    const TCatalogOpRequest& compute_stats_request,
+    const TTableSchema& tbl_stats_schema, const TRowSet& tbl_stats_data,
+    const TTableSchema& col_stats_schema, const TRowSet& col_stats_data,
+    const TTableSchema* theta_stats_schema, const TRowSet* theta_stats_data) {
+  const TComputeStatsParams& compute_stats_params =
+      compute_stats_request.ddl_params.compute_stats_params;
+  int col_stats_end;
+  RETURN_IF_ERROR(ValidateIcebergColStatsResult(
+      compute_stats_params, col_stats_schema, col_stats_data, &col_stats_end));
+  TCatalogOpRequest catalog_op_req =
+      BuildUpdateStatsRequest(header, compute_stats_request);
+  TAlterTableUpdateStatsParams& update_stats_params =
+      catalog_op_req.ddl_params.alter_table_params.update_stats_params;
 
   // Fill the alteration request based on the child-query results.
   SetTableStats(tbl_stats_schema, tbl_stats_data,
@@ -202,8 +240,20 @@ Status CatalogOpExecutor::ExecComputeStats(const TCatalogServiceRequestHeader& h
           compute_stats_params.expected_partitions,
           col_stats_data, compute_stats_params.num_partition_cols, &update_stats_params);
     } else {
-      SetColumnStats(col_stats_schema, col_stats_data, &update_stats_params);
+      SetColumnStats(
+          col_stats_schema, col_stats_data, &update_stats_params, col_stats_end);
     }
+  }
+  if (IcebergThetaTailSize(compute_stats_params) > 0) {
+    RETURN_IF_ERROR(SetIcebergThetaSketches(col_stats_schema, col_stats_data,
+        col_stats_end, &update_stats_params.iceberg_puffin_stats));
+  }
+  if (compute_stats_params.__isset.iceberg_theta_query) {
+    if (theta_stats_schema == nullptr || theta_stats_data == nullptr) {
+      return Status("Theta sketch query result is missing");
+    }
+    RETURN_IF_ERROR(SetIcebergThetaQuerySketches(*theta_stats_schema, *theta_stats_data,
+        &update_stats_params.iceberg_puffin_stats));
   }
 
   // Execute the 'alter table update stats' request.
@@ -313,8 +363,67 @@ void CatalogOpExecutor::SetTableStats(const TTableSchema& tbl_stats_schema,
   params->__isset.table_stats = true;
 }
 
+map<string, string> CatalogOpExecutor::IcebergColStatsQueryOptions(
+    const TComputeStatsParams& params) {
+  if (IcebergThetaTailSize(params) == 0) return {};
+  return {{"TIMEZONE", "UTC"}};
+}
+
+Status CatalogOpExecutor::ValidateIcebergColStatsResult(const TComputeStatsParams& params,
+    const TTableSchema& col_stats_schema, const TRowSet& col_stats_data, int* end) {
+  int num_columns = col_stats_schema.columns.size();
+  *end = num_columns;
+  if (!params.__isset.iceberg_puffin_stats) return Status::OK();
+  int num_theta = IcebergThetaTailSize(params);
+  if (num_columns == 0 && num_theta == 0) return Status::OK();
+  int num_metrics = 8 * params.iceberg_puffin_stats.column_field_ids.size();
+  int expected = num_metrics + num_theta;
+  int num_rows = col_stats_data.rows.size();
+  if (num_rows != 1 || num_columns != expected
+      || col_stats_data.rows[0].colVals.size() != expected) {
+    return IcebergColStatsShapeError(num_rows, num_columns, expected);
+  }
+  *end = num_metrics;
+  return Status::OK();
+}
+
+Status CatalogOpExecutor::SetIcebergThetaSketches(const TTableSchema& col_stats_schema,
+    const TRowSet& col_stats_data, int begin, TIcebergPuffinStatsParams* params) {
+  const vector<int32_t>& field_ids = params->theta_field_ids;
+  int expected = begin + field_ids.size();
+  int num_rows = col_stats_data.rows.size();
+  if (num_rows != 1 || col_stats_data.rows[0].colVals.size() != expected) {
+    return IcebergColStatsShapeError(
+        num_rows, col_stats_schema.columns.size(), expected);
+  }
+  const TRow& row = col_stats_data.rows[0];
+  for (int i = 0; i < field_ids.size(); ++i) {
+    const TStringValue& sketch = row.colVals[begin + i].stringVal;
+    params->theta_sketches[field_ids[i]] = sketch.__isset.value ? sketch.value : string();
+  }
+  params->__isset.theta_sketches = true;
+  return Status::OK();
+}
+
+Status CatalogOpExecutor::SetIcebergThetaQuerySketches(
+    const TTableSchema& theta_stats_schema, const TRowSet& theta_stats_data,
+    TIcebergPuffinStatsParams* params) {
+  int expected = params->theta_field_ids.size();
+  int num_columns = theta_stats_schema.columns.size();
+  if (num_columns != expected) {
+    return Status(Substitute(
+        "Theta sketch query returned $0 columns, expected $1", num_columns, expected));
+  }
+  int num_rows = theta_stats_data.rows.size();
+  if (num_rows != 1) {
+    return Status(
+        Substitute("Theta sketch query returned $0 rows, expected 1", num_rows));
+  }
+  return SetIcebergThetaSketches(theta_stats_schema, theta_stats_data, 0, params);
+}
+
 void CatalogOpExecutor::SetColumnStats(const TTableSchema& col_stats_schema,
-    const TRowSet& col_stats_data, TAlterTableUpdateStatsParams* params) {
+    const TRowSet& col_stats_data, TAlterTableUpdateStatsParams* params, int end) {
   // Expect exactly one result row.
   DCHECK_EQ(1, col_stats_data.rows.size());
   const TRow& col_stats_row = col_stats_data.rows[0];
@@ -324,7 +433,7 @@ void CatalogOpExecutor::SetColumnStats(const TTableSchema& col_stats_schema,
   // col_stats_row, respectively. Positions i + 2 and i + 3 contain the max/avg
   // length for string columns. Positions i+4 and i+5 contain the numTrues/numFalses
   // (-1 for non-string columns). Positions i+6 and i+7 contain the min and the max.
-  for (int i = 0; i < col_stats_row.colVals.size(); i += 8) {
+  for (int i = 0; i < end; i += 8) {
     TColumnStats col_stats;
     col_stats.__set_num_distinct_values(col_stats_row.colVals[i].i64Val.value);
     col_stats.__set_num_nulls(col_stats_row.colVals[i + 1].i64Val.value);

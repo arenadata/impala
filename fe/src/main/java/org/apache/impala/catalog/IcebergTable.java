@@ -22,10 +22,10 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import org.apache.hadoop.hive.metastore.IMetaStoreClient;
 import org.apache.hadoop.hive.metastore.TableType;
 import org.apache.hadoop.hive.metastore.api.hive_metastoreConstants;
@@ -57,6 +57,8 @@ import org.apache.impala.thrift.TTableType;
 import org.apache.impala.util.EventSequence;
 import org.apache.impala.util.IcebergSchemaConverter;
 import org.apache.impala.util.IcebergUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Representation of an Iceberg table in the catalog cache.
@@ -82,6 +84,8 @@ import org.apache.impala.util.IcebergUtil;
  * 'impala.iceberg_read_puffin_stats' to false.
  */
 public class IcebergTable extends Table implements FeIcebergTable {
+  private static final Logger LOG = LoggerFactory.getLogger(IcebergTable.class);
+
   // Alias to the string key that identifies the storage handler for Iceberg tables.
   public static final String KEY_STORAGE_HANDLER =
       hive_metastoreConstants.META_TABLE_STORAGE;
@@ -112,6 +116,16 @@ public class IcebergTable extends Table implements FeIcebergTable {
 
   public static final String ICEBERG_DISABLE_READING_PUFFIN_STATS =
       "impala.iceberg_read_puffin_stats";
+
+  // Table property that can be used to store for each column the snapshot id for which
+  // stats are stored in HMS (i.e. not Puffin stats).
+  public static final String COMPUTE_STATS_SNAPSHOT_IDS =
+      "impala.computeStatsSnapshotIds";
+
+  // Table property: "false" (case-insensitive) makes COMPUTE STATS use NDV() and write
+  // no Puffin file. Any other value, or no property, leaves Puffin writing enabled.
+  public static final String ICEBERG_WRITE_PUFFIN_STATS =
+      "impala.iceberg_write_puffin_stats";
 
   // Internal Iceberg table property that specifies the absolute path of the current
   // table metadata. This property is only valid for tables in 'hive.catalog'.
@@ -451,8 +465,10 @@ public class IcebergTable extends Table implements FeIcebergTable {
         partitionStats_ = Utils.loadPartitionStats(this, icebergFiles);
         setIcebergTableStats();
         loadAllColumnStats(msClient, catalogTimeline);
-        applyPuffinNdvStats(catalogTimeline);
+        // After setAvroSchema: it rebuilds the columns of 'hdfsTable_' and reloads
+        // their stats from HMS, which would drop the Puffin NDVs set there.
         setAvroSchema(msClient, msTbl, fileStore_, catalogTimeline);
+        applyPuffinNdvStats(catalogTimeline);
 
         // We no longer need to keep Iceberg's content files in memory.
         hdfsTable_.setIcebergFiles(null);
@@ -485,12 +501,11 @@ public class IcebergTable extends Table implements FeIcebergTable {
     if (!BackendConfig.INSTANCE.enableReadingPuffinStats()) return;
     if (!isPuffinStatsReadingEnabledForTable()) return;
 
-    long hmsStatsTimestampMs = getLastComputeStatsTimeMs();
-    Set<Integer> fieldIdsWithHmsStats = collectFieldIdsWithNdvStats();
+    Map<Integer, Long> fieldIdsWithHmsStats = getComputeStatsSnapshotMap(msTable_);
 
     Map<Integer, PuffinStatsLoader.PuffinStatsRecord> puffinNdvs =
         PuffinStatsLoader.loadPuffinStats(icebergApiTable_, getFullName(),
-            hmsStatsTimestampMs, fieldIdsWithHmsStats);
+            fieldIdsWithHmsStats);
     for (Map.Entry<Integer, PuffinStatsLoader.PuffinStatsRecord> entry
         : puffinNdvs.entrySet()) {
       int fieldId = entry.getKey();
@@ -511,18 +526,19 @@ public class IcebergTable extends Table implements FeIcebergTable {
         // mode: in local catalog mode, the catalog sends the stats in HMS objects, so
         // NDVs for unsupported types would be lost.
         if (ColumnStats.supportsNdv(colType)) {
-          // Only use the value from Puffin if it is more recent than the HMS stat value
-          // or if the latter doesn't exist.
-          if (!col.getStats().hasNumDistinctValues()
-              || snapshot.timestampMillis() >= hmsStatsTimestampMs) {
-            col.getStats().setNumDistinctValues(ndv);
-
-            // In local catalog mode, the stats sent from the catalog are those of
-            // 'hdfsTable_', not those of this class.
-            Column hdfsTableCol = hdfsTable_.getColumn(col.getName());
-            Preconditions.checkNotNull(hdfsTableCol);
-            hdfsTableCol.getStats().setNumDistinctValues(ndv);
+          // In local catalog mode, the stats sent from the catalog are those of
+          // 'hdfsTable_', not those of this class, so both copies must agree.
+          // The Avro load path takes the columns of 'hdfsTable_' from HMS, which may
+          // lag behind the Iceberg schema if another engine changed it.
+          Column hdfsTableCol = hdfsTable_.getColumn(col.getName());
+          if (hdfsTableCol == null) {
+            LOG.warn("Ignoring Puffin NDV of column {} of table {}: the column is "
+                + "missing from the HMS schema of the table.", col.getName(),
+                getFullName());
+            continue;
           }
+          col.getStats().setNumDistinctValues(ndv);
+          hdfsTableCol.getStats().setNumDistinctValues(ndv);
         }
       }
     }
@@ -536,26 +552,6 @@ public class IcebergTable extends Table implements FeIcebergTable {
     String val = msTable_.getParameters().get(ICEBERG_DISABLE_READING_PUFFIN_STATS);
     if (val == null) return true;
     return Boolean.parseBoolean(val);
-  }
-
-  private long getLastComputeStatsTimeMs() {
-    String val = msTable_.getParameters().get(Table.TBL_PROP_LAST_COMPUTE_STATS_TIME);
-    try {
-      return Long.parseLong(val) * 1000;
-    } catch (Exception e) {
-      return -1;
-    }
-  }
-
-  private Set<Integer> collectFieldIdsWithNdvStats() {
-    Set<Integer> res = new HashSet<>();
-    for (Column col : colsByPos_) {
-      if (col.getStats().hasNumDistinctValues()) {
-        IcebergColumn iCol = (IcebergColumn) col;
-        res.add(iCol.getFieldId());
-      }
-    }
-    return res;
   }
 
   /**
@@ -747,4 +743,13 @@ public class IcebergTable extends Table implements FeIcebergTable {
   public IcebergContentFileStore getContentFileStore() {
     return fileStore_;
   }
+
+  private TreeMap<Integer, Long> getComputeStatsSnapshotMap(
+      org.apache.hadoop.hive.metastore.api.Table msTbl) {
+    String snapshotIds = msTbl.getParameters().get(
+        IcebergTable.COMPUTE_STATS_SNAPSHOT_IDS);
+
+    return IcebergUtil.ComputeStatsSnapshotPropertyConverter.stringToMap(snapshotIds);
+  }
+
 }
