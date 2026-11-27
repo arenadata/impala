@@ -316,4 +316,34 @@ struct TBackendGflags {
   142: required bool enable_reading_puffin_stats
 
   143: required string injected_group_members_debug_only
+
+  // ADH-9920: Arrow Flight SQL endpoint (FlightSqlConfig) and the impalad TLS, Kerberos
+  // and LDAP flags it reuses.
+  144: required i32 flight_sql_port
+
+  145: required string flight_sql_auth_methods
+
+  146: required i64 flight_sql_memory_limit_bytes
+
+  147: required i32 hs2_port
+
+  148: required string keytab_file
+
+  149: required string ssl_server_certificate
+
+  150: required string ssl_private_key
+
+  151: required string ssl_client_ca_certificate
+
+  152: required bool enable_ldap_auth
+
+  153: required string ldap_uri
+
+  154: required string ldap_bind_pattern
+
+  155: required bool ldap_tls
+
+  156: required string ldap_ca_certificate
+
+  157: required bool ldap_passwords_in_clear_ok
 }

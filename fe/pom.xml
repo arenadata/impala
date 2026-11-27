@@ -500,6 +500,22 @@ under the License.
       <version>${project.version}</version>
     </dependency>
 
+    <!-- Arrow Flight SQL endpoint of the coordinator (org.apache.impala.service.flight).
+         Shaded jar: gRPC, netty, protobuf, Guava and Jackson inside are relocated; the
+         remaining transitive dependencies (slf4j, annotation jars, netty-tcnative) are
+         not wanted on the impalad classpath. -->
+    <dependency>
+      <groupId>org.apache.impala</groupId>
+      <artifactId>impala-arrow-flight</artifactId>
+      <version>${project.version}</version>
+      <exclusions>
+        <exclusion>
+          <groupId>*</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
     <!-- Needed for reading Iceberg Puffin files. -->
     <dependency>
       <groupId>org.apache.datasketches</groupId>
@@ -760,6 +776,9 @@ under the License.
 
   <properties>
     <buildOutputDirectory>${project.build.directory}/classes</buildOutputDirectory>
+    <!-- Set by jacoco:prepare-agent; empty when tests run without it (surefire:test in
+         docker/ci/run-unit-tests.sh), so that it adds nothing to surefire's argLine -->
+    <surefireJacocoArg></surefireJacocoArg>
   </properties>
 
   <build>
@@ -779,6 +798,14 @@ under the License.
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>
         <version>3.3.0</version>
+        <configuration>
+          <archive>
+            <manifest>
+              <!-- Implementation-Version: reported by the Flight SQL endpoint -->
+              <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+            </manifest>
+          </archive>
+        </configuration>
       <executions>
         <execution>
           <goals>
@@ -833,6 +860,32 @@ under the License.
         <artifactId>maven-dependency-plugin</artifactId>
         <version>3.5.0</version>
         <executions>
+          <!-- Arrow Flight SQL JDBC drivers for ImpalaFlightJdbcDriverTest. Each version
+               is loaded in its own class loader (the jars bundle their Arrow), so they
+               are copied instead of being test dependencies. -->
+          <execution>
+            <id>copy-flight-sql-jdbc-drivers</id>
+            <phase>process-test-resources</phase>
+            <goals>
+              <goal>copy</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}/flight-jdbc</outputDirectory>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>org.apache.arrow</groupId>
+                  <artifactId>flight-sql-jdbc-driver</artifactId>
+                  <version>16.0.0</version>
+                </artifactItem>
+                <artifactItem>
+                  <groupId>org.apache.arrow</groupId>
+                  <artifactId>flight-sql-jdbc-driver</artifactId>
+                  <version>19.0.0</version>
+                </artifactItem>
+              </artifactItems>
+              <silent>true</silent>
+            </configuration>
+          </execution>
           <!-- TODO(todd): consider removing this execution or moving it to
                some kind of 'dist' profile. No need to copy all of these jars
                on every build of the FE! -->
@@ -885,7 +938,9 @@ under the License.
           <trimStackTrace>false</trimStackTrace>
           <reportsDirectory>${surefire.reports.dir}</reportsDirectory>
           <redirectTestOutputToFile>true</redirectTestOutputToFile>
-          <argLine>${surefireJacocoArg}</argLine>
+          <!-- Arrow (Flight SQL tests) reads java.nio.Buffer.address; impalad gets the
+               same flag from impala-env.sh -->
+          <argLine>${surefireJacocoArg} --add-opens=java.base/java.nio=ALL-UNNAMED</argLine>
           <groups>${testcase.groups}</groups>
           <environmentVariables>
             <!-- Set LD_LIBRARY_PATH and LD_PRELOAD to pick up libraries required for

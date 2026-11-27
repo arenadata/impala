@@ -51,6 +51,8 @@ import org.apache.impala.common.JniUtil;
 import org.apache.impala.common.TransactionException;
 import org.apache.impala.hooks.QueryCompleteContext;
 import org.apache.impala.service.Frontend.PlanCtx;
+import org.apache.impala.service.flight.FlightSqlConfig;
+import org.apache.impala.service.flight.ImpalaFlightSqlServer;
 import org.apache.impala.thrift.TBackendGflags;
 import org.apache.impala.thrift.TBuildTestDescriptorTableParams;
 import org.apache.impala.thrift.TCatalogObject;
@@ -151,6 +153,11 @@ public class JniFrontend {
       final AuthorizationFactory authzFactory =
           AuthorizationUtil.authzFactoryFrom(BackendConfig.INSTANCE);
       frontend_ = new Frontend(authzFactory, isBackendTest);
+      // Arrow Flight SQL endpoint, off unless --flight_sql_port is set; a failure to
+      // start is logged and does not stop impalad.
+      if (!isBackendTest) {
+        ImpalaFlightSqlServer.startIfConfigured(FlightSqlConfig.fromBackend(cfg));
+      }
     } else {
       // Avoid instantiating Frontend in executor only impalads.
       frontend_ = null;

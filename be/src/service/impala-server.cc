@@ -147,6 +147,18 @@ DEFINE_int32(hs2_port, 21050, "port on which HiveServer2 client requests are ser
     "If 0 or less, the HiveServer2 server is not started.");
 DEFINE_int32(hs2_http_port, 28000, "port on which HiveServer2 HTTP(s) client "
     "requests are served. If 0 or less, the HiveServer2 http server is not started.");
+// ADH-9920: Arrow Flight SQL endpoint, served by the frontend (FlightSqlConfig.java).
+// TLS, Kerberos and LDAP come from the HS2 flags; statements run through --hs2_port.
+DEFINE_int32(flight_sql_port, 0, "Port of the Arrow Flight SQL endpoint on coordinators. "
+    "If 0 or less, the endpoint is not started. Uses TLS when --ssl_server_certificate "
+    "is set; statements run on this impalad's --hs2_port as the Flight user.");
+DEFINE_string(flight_sql_auth_methods, "", "Comma-separated login methods of the Arrow "
+    "Flight SQL endpoint: kerberos (SPNEGO with HTTP/_HOST from --keytab_file), ldap "
+    "(--ldap_uri and --ldap_bind_pattern; used even when --enable_ldap_auth is off). "
+    "If empty, the methods of HiveServer2: kerberos when --principal is set, ldap when "
+    "--enable_ldap_auth is set.");
+DEFINE_int64(flight_sql_memory_limit_bytes, 256L << 20, "Memory limit of the Arrow "
+    "Flight SQL endpoint for result batches being sent to clients.");
 DEFINE_int32(external_fe_port, 0, "port on which External Frontend requests are served. "
     "If 0 or less, the External Frontend server is not started. Careful consideration "
     "must be taken when enabling due to the fact that this port is currently always "
