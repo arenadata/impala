@@ -46,7 +46,6 @@ import org.apache.directory.server.core.api.DirectoryService;
 import org.apache.directory.server.core.factory.DSAnnotationProcessor;
 import org.apache.directory.server.factory.ServerAnnotationProcessor;
 import org.apache.directory.server.ldap.LdapServer;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.kerby.kerberos.kerb.server.SimpleKdcServer;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.Extension;
@@ -144,28 +143,26 @@ public final class FlightSqlTestServer {
     resources_.add(hs2);
     FlightTestData.install(hs2);
 
-    Configuration conf = new Configuration(false);
-    conf.set(ImpalaFlightSqlServer.BIND_HOST, "127.0.0.1");
-    conf.setInt(ImpalaFlightSqlServer.PORT, 0);
-    conf.set(LoopbackConfig.HOST, "127.0.0.1");
-    conf.setInt(LoopbackConfig.PORT, hs2.port);
-    conf.setBoolean(LoopbackConfig.SSL, false);
-    conf.set(LoopbackConfig.IMPERSONATION, "doas");
+    FlightSqlConfig conf = new FlightSqlConfig();
+    conf.bindHost = "127.0.0.1";
+    conf.port = 0;
+    conf.loopbackHost = "127.0.0.1";
+    conf.loopbackPort = hs2.port;
+    conf.loopbackSsl = false;
+    conf.loopbackDoAs = true;
     // short, so that tests of expiry wait seconds: idle prepared statements are dropped
     // after PREPARED_IDLE_S by a reaper running every TICKET_TTL_S / 4 (here 5 s)
-    conf.setInt(ImpalaFlightSqlServer.PREPARED_IDLE_S, PREPARED_IDLE_S);
-    conf.setInt(ImpalaFlightSqlServer.TICKET_TTL_S, TICKET_TTL_S);
+    conf.preparedIdleMs = PREPARED_IDLE_S * 1000L;
+    conf.ticketTtlMs = TICKET_TTL_S * 1000L;
     info.put("prepared_idle_s", PREPARED_IDLE_S);
     info.put("reaper_period_s", TICKET_TTL_S / 4);
-
-    conf.setBoolean(ImpalaFlightSqlServer.SSL_ENABLED, tls);
     info.put("tls", tls);
     if (tls) {
       File cert = new File(workDir, "server.pem");
       File key = new File(workDir, "server.key");
       selfSignedCertificate(cert, key);
-      conf.set(ImpalaFlightSqlServer.SSL_CERTIFICATE, cert.getPath());
-      conf.set(ImpalaFlightSqlServer.SSL_PRIVATE_KEY, key.getPath());
+      conf.sslCertificate = cert.getPath();
+      conf.sslPrivateKey = key.getPath();
       info.put("ca", cert.getPath());
     }
 
@@ -173,23 +170,24 @@ public final class FlightSqlTestServer {
     if (auth.equals("ldap") || auth.equals("all")) {
       methods.add("ldap");
       int port = startLdap();
-      conf.set(LdapAuthenticator.URI, "ldap://localhost:" + port);
-      conf.set(LdapAuthenticator.BIND_PATTERN, "cn=#UID,ou=Users,dc=myorg,dc=com");
-      conf.setBoolean(LdapAuthenticator.ALLOW_CLEARTEXT, true);
+      conf.ldapUri = "ldap://localhost:" + port;
+      conf.ldapBindPattern = "cn=#UID,ou=Users,dc=myorg,dc=com";
+      conf.ldapAllowCleartext = true;
       info.put("ldap_users", LDAP_USERS);
     }
     if (auth.equals("kerberos") || auth.equals("all")) {
       methods.add("kerberos");
       info.putAll(startKdc(workDir));
-      conf.set(SpnegoValidator.PRINCIPAL, "HTTP/_HOST@" + REALM);
-      conf.set(SpnegoValidator.KEYTAB, new File(workDir, "service.keytab").getPath());
+      conf.spnegoPrincipal = "HTTP/_HOST@" + REALM;
+      conf.spnegoKeytab = new File(workDir, "service.keytab").getPath();
     }
     if (methods.isEmpty()) methods.add("none");
-    conf.set(ImpalaFlightAuthenticator.METHODS, String.join(",", methods));
+    conf.authMethods = String.join(",", methods);
     info.put("auth", methods);
     info.put("user_header", ImpalaFlightAuthenticator.USER_HEADER);
 
-    server_ = ImpalaFlightSqlServer.start(conf, HOST);
+    conf.hostname = HOST;
+    server_ = ImpalaFlightSqlServer.start(conf);
     info.put("host", HOST);
     info.put("port", server_.getPort());
     info.put("data", FlightTestData.describe());

@@ -35,7 +35,7 @@ final class LoopbackLogin {
 
   LoopbackLogin(LoopbackConfig config) throws IOException {
     Preconditions.checkArgument(new File(config.keytab).canRead(), "%s: cannot read %s",
-        LoopbackConfig.KEYTAB, config.keytab);
+        "--keytab_file", config.keytab);
     ugi_ = UserGroupInformation.loginUserFromKeytabAndReturnUGI(
         config.principal, config.keytab);
   }

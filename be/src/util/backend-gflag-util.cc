@@ -132,6 +132,20 @@ DECLARE_int32(dbcp_max_wait_millis_for_conn);
 DECLARE_int32(dbcp_data_source_idle_timeout_s);
 DECLARE_bool(enable_catalogd_ha);
 DECLARE_string(injected_group_members_debug_only);
+DECLARE_int32(flight_sql_port);
+DECLARE_string(flight_sql_auth_methods);
+DECLARE_int64(flight_sql_memory_limit_bytes);
+DECLARE_int32(hs2_port);
+DECLARE_string(keytab_file);
+DECLARE_string(ssl_server_certificate);
+DECLARE_string(ssl_private_key);
+DECLARE_string(ssl_client_ca_certificate);
+DECLARE_bool(enable_ldap_auth);
+DECLARE_string(ldap_uri);
+DECLARE_string(ldap_bind_pattern);
+DECLARE_bool(ldap_tls);
+DECLARE_string(ldap_ca_certificate);
+DECLARE_bool(ldap_passwords_in_clear_ok);
 
 // HS2 SAML2.0 configuration
 // Defined here because TAG_FLAG caused issues in global-flags.cc
@@ -502,6 +516,20 @@ Status PopulateThriftBackendGflags(TBackendGflags& cfg) {
   cfg.__set_data_stream_sender_buffer_size_used_by_planner(
       FLAGS_data_stream_sender_buffer_size_used_by_planner);
   cfg.__set_injected_group_members_debug_only(FLAGS_injected_group_members_debug_only);
+  cfg.__set_flight_sql_port(FLAGS_flight_sql_port);
+  cfg.__set_flight_sql_auth_methods(FLAGS_flight_sql_auth_methods);
+  cfg.__set_flight_sql_memory_limit_bytes(FLAGS_flight_sql_memory_limit_bytes);
+  cfg.__set_hs2_port(FLAGS_hs2_port);
+  cfg.__set_keytab_file(FLAGS_keytab_file);
+  cfg.__set_ssl_server_certificate(FLAGS_ssl_server_certificate);
+  cfg.__set_ssl_private_key(FLAGS_ssl_private_key);
+  cfg.__set_ssl_client_ca_certificate(FLAGS_ssl_client_ca_certificate);
+  cfg.__set_enable_ldap_auth(FLAGS_enable_ldap_auth);
+  cfg.__set_ldap_uri(FLAGS_ldap_uri);
+  cfg.__set_ldap_bind_pattern(FLAGS_ldap_bind_pattern);
+  cfg.__set_ldap_tls(FLAGS_ldap_tls);
+  cfg.__set_ldap_ca_certificate(FLAGS_ldap_ca_certificate);
+  cfg.__set_ldap_passwords_in_clear_ok(FLAGS_ldap_passwords_in_clear_ok);
 #ifdef NDEBUG
   cfg.__set_is_release_build(true);
 #else

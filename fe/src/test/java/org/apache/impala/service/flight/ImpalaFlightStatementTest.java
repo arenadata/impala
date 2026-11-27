@@ -41,7 +41,6 @@ import org.apache.arrow.flight.sql.FlightSqlClient;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.types.pojo.ArrowType;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hive.service.rpc.thrift.TColumn;
 import org.apache.hive.service.rpc.thrift.TI32Column;
 import org.apache.hive.service.rpc.thrift.TTypeId;
@@ -68,17 +67,16 @@ public class ImpalaFlightStatementTest {
   @Before
   public void setUp() throws Exception {
     hs2_ = new FakeHs2();
-    Configuration conf = new Configuration(false);
-    conf.set(ImpalaFlightSqlServer.BIND_HOST, "127.0.0.1");
-    conf.setInt(ImpalaFlightSqlServer.PORT, 0);
-    conf.setBoolean(ImpalaFlightSqlServer.SSL_ENABLED, false);
-    conf.set(ImpalaFlightAuthenticator.METHODS, "none");
-    conf.setInt(ImpalaFlightSqlServer.FETCH_ROWS, 2);
-    conf.set(LoopbackConfig.HOST, "127.0.0.1");
-    conf.setInt(LoopbackConfig.PORT, hs2_.port);
-    conf.setBoolean(LoopbackConfig.SSL, false);
-    conf.set(LoopbackConfig.IMPERSONATION, "doas");
-    server_ = ImpalaFlightSqlServer.start(conf, "localhost");
+    FlightSqlConfig conf = new FlightSqlConfig();
+    conf.bindHost = "127.0.0.1";
+    conf.port = 0;
+    conf.authMethods = "none";
+    conf.fetchRows = 2;
+    conf.loopbackHost = "127.0.0.1";
+    conf.loopbackPort = hs2_.port;
+    conf.loopbackSsl = false;
+    conf.loopbackDoAs = true;
+    server_ = ImpalaFlightSqlServer.start(conf);
     allocator_ = new RootAllocator();
     sql_ = ImpalaFlightSqlServerTest.clientFor(allocator_, server_);
   }
@@ -250,8 +248,8 @@ public class ImpalaFlightStatementTest {
 
   @Test
   public void testUnfetchedStatementsExpire() throws Exception {
-    try (LoopbackSessions sessions = LoopbackSessions.create(new LoopbackConfig(
-        loopbackConf(), "localhost", ""));
+    try (LoopbackSessions sessions =
+             LoopbackSessions.create(new LoopbackConfig(loopbackConf()));
          QueryRegistry registry = new QueryRegistry(sessions, 1000)) {
       LoopbackSession s = sessions.borrow("alice");
       registry.register("alice", s, s.execute("select 1"), null);
@@ -264,12 +262,12 @@ public class ImpalaFlightStatementTest {
     }
   }
 
-  private Configuration loopbackConf() {
-    Configuration conf = new Configuration(false);
-    conf.set(LoopbackConfig.HOST, "127.0.0.1");
-    conf.setInt(LoopbackConfig.PORT, hs2_.port);
-    conf.setBoolean(LoopbackConfig.SSL, false);
-    conf.set(LoopbackConfig.IMPERSONATION, "doas");
+  private FlightSqlConfig loopbackConf() {
+    FlightSqlConfig conf = new FlightSqlConfig();
+    conf.loopbackHost = "127.0.0.1";
+    conf.loopbackPort = hs2_.port;
+    conf.loopbackSsl = false;
+    conf.loopbackDoAs = true;
     return conf;
   }
 }

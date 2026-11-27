@@ -69,7 +69,7 @@ final class LoopbackSessions implements AutoCloseable {
     LoopbackLogin login = config.kerberos() ? new LoopbackLogin(config) : null;
     SSLSocketFactory tls = config.ssl
         ? TlsUtil.socketFactoryTrusting(new File(config.caCertificate),
-              LoopbackConfig.CA_CERTIFICATE)
+              "HS2 loopback CA (--ssl_client_ca_certificate or the system CA list)")
         : null;
     LOG.info("HS2 loopback: {}:{} ({}{}, {})", config.host, config.port,
         tls != null ? "TLS" : "plaintext",

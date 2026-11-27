@@ -31,7 +31,6 @@ import javax.naming.ldap.StartTlsRequest;
 import javax.naming.ldap.StartTlsResponse;
 import javax.net.ssl.SSLSocketFactory;
 
-import org.apache.hadoop.conf.Configuration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,23 +42,14 @@ import com.google.common.base.Preconditions;
  * from a pattern (like impalad's --ldap_bind_pattern), e.g.
  * {@code uid=#UID,cn=users,cn=accounts,dc=example,dc=com}. No service account is needed.
  *
- * The password must not cross the network in clear text: use StartTLS
- * ({@value #STARTTLS}, optionally with the CA of the directory in
- * {@value #CA_CERTIFICATE}) or an ldaps:// URI (JVM truststore), or allow clear text
- * explicitly with {@value #ALLOW_CLEARTEXT} (tests, development).
+ * The password must not cross the network in clear text: use StartTLS (--ldap_tls on an
+ * ldap:// URI, trusting --ldap_ca_certificate or the JVM truststore) or an ldaps:// URI
+ * (JVM truststore), or allow clear text with --ldap_passwords_in_clear_ok (tests,
+ * development). These are impalad's LDAP flags, used even when --enable_ldap_auth is
+ * off for HS2. Only simple bind with --ldap_bind_pattern is supported.
  */
 public class LdapAuthenticator {
   private static final Logger LOG = LoggerFactory.getLogger(LdapAuthenticator.class);
-
-  public static final String URI = "impala.flight-sql.ldap.uri";
-  public static final String BIND_PATTERN = "impala.flight-sql.ldap.bind-pattern";
-  public static final String STARTTLS = "impala.flight-sql.ldap.starttls";
-  public static final String CA_CERTIFICATE = "impala.flight-sql.ldap.ca-certificate";
-  public static final String ALLOW_CLEARTEXT =
-      "impala.flight-sql.ldap.allow-cleartext-passwords";
-  public static final String CONNECT_TIMEOUT_MS =
-      "impala.flight-sql.ldap.connect-timeout-ms";
-  public static final String READ_TIMEOUT_MS = "impala.flight-sql.ldap.read-timeout-ms";
 
   static final String UID = "#UID";
 
@@ -70,29 +60,30 @@ public class LdapAuthenticator {
   private final int connectTimeoutMs_;
   private final int readTimeoutMs_;
 
-  public LdapAuthenticator(Configuration conf) throws IOException {
-    uri_ = conf.getTrimmed(URI, "");
-    bindPattern_ = conf.getTrimmed(BIND_PATTERN, "");
-    Preconditions.checkArgument(!uri_.isEmpty(), "%s must be set for LDAP", URI);
+  public LdapAuthenticator(FlightSqlConfig config) throws IOException {
+    uri_ = config.ldapUri;
+    bindPattern_ = config.ldapBindPattern;
+    Preconditions.checkArgument(!uri_.isEmpty(), "--ldap_uri must be set for LDAP");
     Preconditions.checkArgument(bindPattern_.contains(UID),
-        "%s must be set for LDAP and contain %s", BIND_PATTERN, UID);
+        "--ldap_bind_pattern must be set for LDAP and contain %s (Flight SQL supports "
+            + "only simple bind)", UID);
     boolean ldaps = uri_.toLowerCase(Locale.ROOT).startsWith("ldaps://");
-    startTls_ = conf.getBoolean(STARTTLS, false);
-    Preconditions.checkArgument(!(ldaps && startTls_),
-        "%s cannot be used with an ldaps:// URI", STARTTLS);
-    boolean cleartextOk = conf.getBoolean(ALLOW_CLEARTEXT, false);
-    Preconditions.checkArgument(ldaps || startTls_ || cleartextOk,
-        "LDAP passwords would be sent in clear text: use an ldaps:// %s, set %s, "
-            + "or set %s", URI, STARTTLS, ALLOW_CLEARTEXT);
-    String ca = conf.getTrimmed(CA_CERTIFICATE, "");
-    Preconditions.checkArgument(ca.isEmpty() || startTls_,
-        "%s is only used with %s (ldaps:// uses the JVM truststore)", CA_CERTIFICATE,
-        STARTTLS);
+    // as impalad: --ldap_tls means StartTLS on ldap://, ldaps:// is TLS already
+    startTls_ = config.ldapTls && !ldaps;
+    Preconditions.checkArgument(ldaps || startTls_ || config.ldapAllowCleartext,
+        "LDAP passwords would be sent in clear text: use an ldaps:// --ldap_uri, set "
+            + "--ldap_tls, or set --ldap_passwords_in_clear_ok");
+    String ca = config.ldapCaCertificate;
+    if (ldaps && !ca.isEmpty()) {
+      LOG.warn("Flight SQL uses the JVM truststore for {}, not --ldap_ca_certificate",
+          uri_);
+    }
     startTlsFactory_ = !startTls_ ? null
         : ca.isEmpty() ? (SSLSocketFactory) SSLSocketFactory.getDefault()
-                       : TlsUtil.socketFactoryTrusting(new File(ca), CA_CERTIFICATE);
-    connectTimeoutMs_ = conf.getInt(CONNECT_TIMEOUT_MS, 5000);
-    readTimeoutMs_ = conf.getInt(READ_TIMEOUT_MS, 10000);
+                       : TlsUtil.socketFactoryTrusting(new File(ca),
+                             "--ldap_ca_certificate");
+    connectTimeoutMs_ = config.ldapConnectTimeoutMs;
+    readTimeoutMs_ = config.ldapReadTimeoutMs;
   }
 
   /** The bind DN for a user name, the name escaped as an RDN value (RFC 4514). */

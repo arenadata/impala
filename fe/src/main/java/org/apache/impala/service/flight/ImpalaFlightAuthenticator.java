@@ -31,7 +31,6 @@ import org.apache.arrow.flight.auth2.Auth2Constants;
 import org.apache.arrow.flight.auth2.AuthUtilities;
 import org.apache.arrow.flight.auth2.CallHeaderAuthenticator;
 import org.apache.arrow.flight.auth2.GeneratedBearerTokenAuthenticator;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.authentication.util.KerberosName;
 import org.apache.impala.authorization.User;
 import org.apache.impala.common.InternalException;
@@ -52,21 +51,19 @@ import com.google.common.base.Splitter;
  *   auth_to_local rules, as for HiveServer2</li>
  *   <li>after either, the response carries {@code authorization: Bearer <token>}
  *   ({@link GeneratedBearerTokenAuthenticator}), valid on this coordinator for
- *   {@value #TOKEN_TTL_MINUTES} minutes after its last use</li>
+ *   {@link FlightSqlConfig#tokenTtlMinutes} minutes after its last use</li>
  * </ul>
- * {@value #METHODS} lists the enabled methods: {@code kerberos}, {@code ldap}, or
- * {@code none} alone (no authentication: user from the {@code x-user-name} header or
- * "anonymous"; development only). Not set means misconfigured: the endpoint does not
+ * --flight_sql_auth_methods (default: those of HS2) lists the enabled methods:
+ * {@code kerberos}, {@code ldap}, or {@code none} alone (no authentication: user from
+ * the {@code x-user-name} header or "anonymous"; development only). With no method the
+ * endpoint does not
  * start. Every failure is reported as UNAUTHENTICATED.
  */
 public class ImpalaFlightAuthenticator implements CallHeaderAuthenticator {
   private static final Logger LOG =
       LoggerFactory.getLogger(ImpalaFlightAuthenticator.class);
 
-  public static final String METHODS = "impala.flight-sql.auth.methods";
-  public static final String TOKEN_TTL_MINUTES =
-      "impala.flight-sql.auth.token-ttl-minutes";
-  static final int DEFAULT_TOKEN_TTL_MINUTES = 120;
+  static final String METHODS = FlightSqlConfig.AUTH_METHODS_FLAG;
 
   static final String NEGOTIATE_PREFIX = "Negotiate ";
   static final String USER_HEADER = "x-user-name";
@@ -79,30 +76,39 @@ public class ImpalaFlightAuthenticator implements CallHeaderAuthenticator {
   private final SpnegoValidator spnego_;
 
   /** The authenticator for the endpoint: this one wrapped for bearer tokens. */
-  public static CallHeaderAuthenticator create(Configuration conf, String hostname)
+  public static CallHeaderAuthenticator create(FlightSqlConfig config)
       throws IOException {
-    ImpalaFlightAuthenticator auth = new ImpalaFlightAuthenticator(conf, hostname);
+    ImpalaFlightAuthenticator auth = new ImpalaFlightAuthenticator(config);
     if (auth.methods_.contains(Method.NONE)) return auth;
-    int ttl = conf.getInt(TOKEN_TTL_MINUTES, DEFAULT_TOKEN_TTL_MINUTES);
-    Preconditions.checkArgument(ttl > 0, "%s must be positive", TOKEN_TTL_MINUTES);
+    int ttl = config.tokenTtlMinutes;
+    Preconditions.checkArgument(ttl > 0, "token lifetime must be positive");
     return new GeneratedBearerTokenAuthenticator(auth, ttl);
   }
 
   @VisibleForTesting
-  ImpalaFlightAuthenticator(Configuration conf, String hostname) throws IOException {
-    methods_ = parseMethods(conf.getTrimmed(METHODS, ""));
-    ldap_ = methods_.contains(Method.LDAP) ? new LdapAuthenticator(conf) : null;
+  ImpalaFlightAuthenticator(FlightSqlConfig config) throws IOException {
+    methods_ = parseMethods(config.authMethods);
+    // as HS2: passwords only over TLS unless --ldap_passwords_in_clear_ok
+    Preconditions.checkArgument(!methods_.contains(Method.LDAP) || config.tls()
+        || config.ldapAllowCleartext,
+        "LDAP passwords would reach Flight SQL in clear text: set "
+            + "--ssl_server_certificate and --ssl_private_key, or "
+            + "--ldap_passwords_in_clear_ok");
+    ldap_ = methods_.contains(Method.LDAP) ? new LdapAuthenticator(config) : null;
     spnego_ = methods_.contains(Method.KERBEROS)
-        ? new SpnegoValidator(conf, hostname) : null;
+        ? new SpnegoValidator(config) : null;
     if (spnego_ != null && !KerberosName.hasRulesBeenSet()) {
       // BackendConfig sets the cluster's auth_to_local rules when enabled
       KerberosName.setRules("DEFAULT");
     }
   }
 
+  static final String NO_METHOD = "no authentication method for Flight SQL: impalad "
+      + "has neither --principal nor --enable_ldap_auth, and " + METHODS + " is not set";
+
   static Set<Method> parseMethods(String value) {
     Preconditions.checkArgument(!value.isEmpty(),
-        "%s must be set (kerberos, ldap or none)", METHODS);
+        NO_METHOD);
     Set<Method> methods = EnumSet.noneOf(Method.class);
     for (String m : Splitter.on(',').trimResults().omitEmptyStrings().split(value)) {
       try {
@@ -113,7 +119,7 @@ public class ImpalaFlightAuthenticator implements CallHeaderAuthenticator {
       }
     }
     Preconditions.checkArgument(!methods.isEmpty(),
-        "%s must be set (kerberos, ldap or none)", METHODS);
+        NO_METHOD);
     Preconditions.checkArgument(!methods.contains(Method.NONE) || methods.size() == 1,
         "%s: none cannot be combined with other methods", METHODS);
     return methods;

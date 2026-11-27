@@ -40,19 +40,18 @@ import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.UInt4Vector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.complex.DenseUnionVector;
-import org.apache.hadoop.conf.Configuration;
+import org.apache.impala.thrift.TBackendGflags;
 import org.junit.Test;
 
 public class ImpalaFlightSqlServerTest {
 
-  private static Configuration plaintextOnLoopback() {
-    Configuration conf = new Configuration(false);
-    conf.set(ImpalaFlightSqlServer.BIND_HOST, "127.0.0.1");
-    conf.setInt(ImpalaFlightSqlServer.PORT, 0);
-    conf.setBoolean(ImpalaFlightSqlServer.SSL_ENABLED, false);
-    conf.set(ImpalaFlightAuthenticator.METHODS, "none");
+  private static FlightSqlConfig plaintextOnLoopback() {
+    FlightSqlConfig conf = new FlightSqlConfig();
+    conf.bindHost = "127.0.0.1";
+    conf.port = 0;
+    conf.authMethods = "none";
     // no HS2 behind these tests; avoid reading the system CA bundle
-    conf.setBoolean(LoopbackConfig.SSL, false);
+    conf.loopbackSsl = false;
     return conf;
   }
 
@@ -79,7 +78,7 @@ public class ImpalaFlightSqlServerTest {
   }
 
   private static ImpalaFlightSqlServer startPlaintext() throws Exception {
-    return ImpalaFlightSqlServer.start(plaintextOnLoopback(), "localhost");
+    return ImpalaFlightSqlServer.start(plaintextOnLoopback());
   }
 
   @Test
@@ -127,65 +126,128 @@ public class ImpalaFlightSqlServerTest {
 
   @Test
   public void testDisabledWithoutPort() {
-    ImpalaFlightSqlServer.startIfConfigured(new Configuration(false), "localhost", "");
+    ImpalaFlightSqlServer.startIfConfigured(new FlightSqlConfig());
     assertNull(ImpalaFlightSqlServer.running());
   }
 
   @Test
   public void testTlsRequiresCertificateAndKey() throws Exception {
-    Configuration conf = plaintextOnLoopback();
-    conf.setBoolean(ImpalaFlightSqlServer.SSL_ENABLED, true);
-    try {
-      ImpalaFlightSqlServer.start(conf, "localhost").close();
-      fail("TLS without a certificate should be rejected");
-    } catch (IllegalArgumentException e) {
-      assertTrue(e.getMessage(),
-          e.getMessage().contains(ImpalaFlightSqlServer.SSL_CERTIFICATE));
-    }
+    FlightSqlConfig conf = plaintextOnLoopback();
+    conf.sslPrivateKey = "/nonexistent/server.key";
+    assertStartRejected(conf, "--ssl_server_certificate must be set");
+    conf.sslCertificate = "/nonexistent/server.pem";
+    assertStartRejected(conf, "--ssl_server_certificate: cannot read");
   }
 
   /** The endpoint does not start without authentication settings. */
   @Test
   public void testAuthenticationIsRequired() throws Exception {
-    assertStartRejected(without(plaintextOnLoopback(), ImpalaFlightAuthenticator.METHODS),
-        ImpalaFlightAuthenticator.METHODS);
-    Configuration conf = plaintextOnLoopback();
-    conf.set(ImpalaFlightAuthenticator.METHODS, "ldap");
-    assertStartRejected(conf, LdapAuthenticator.URI);
-    conf.set(ImpalaFlightAuthenticator.METHODS, "kerberos");
-    assertStartRejected(conf, SpnegoValidator.PRINCIPAL);
-    conf.set(ImpalaFlightAuthenticator.METHODS, "kerberos,none");
+    FlightSqlConfig conf = plaintextOnLoopback();
+    conf.authMethods = "";
+    assertStartRejected(conf, "no authentication method");
+    conf.ldapAllowCleartext = true;
+    conf.authMethods = "ldap";
+    assertStartRejected(conf, "--ldap_uri");
+    conf.authMethods = "kerberos";
+    assertStartRejected(conf, "--principal");
+    conf.authMethods = "kerberos,none";
     assertStartRejected(conf, "none cannot be combined");
-    conf.set(ImpalaFlightAuthenticator.METHODS, "password");
+    conf.authMethods = "password";
     assertStartRejected(conf, "unknown method 'password'");
   }
 
   /** LDAP passwords in clear text need an explicit opt-in. */
   @Test
   public void testLdapRequiresTlsOrOptIn() throws Exception {
-    Configuration conf = plaintextOnLoopback();
-    conf.set(ImpalaFlightAuthenticator.METHODS, "ldap");
-    conf.set(LdapAuthenticator.URI, "ldap://localhost:1");
-    conf.set(LdapAuthenticator.BIND_PATTERN, "uid=#UID,dc=example,dc=com");
-    assertStartRejected(conf, LdapAuthenticator.ALLOW_CLEARTEXT);
-    conf.setBoolean(LdapAuthenticator.STARTTLS, true);
-    ImpalaFlightSqlServer.start(conf, "localhost").close();
-    conf.setBoolean(LdapAuthenticator.STARTTLS, false);
-    conf.setBoolean(LdapAuthenticator.ALLOW_CLEARTEXT, true);
-    ImpalaFlightSqlServer.start(conf, "localhost").close();
-    conf.set(LdapAuthenticator.BIND_PATTERN, "uid=someone,dc=example,dc=com");
+    FlightSqlConfig conf = plaintextOnLoopback();
+    conf.authMethods = "ldap";
+    conf.ldapUri = "ldap://localhost:1";
+    conf.ldapBindPattern = "uid=#UID,dc=example,dc=com";
+    // plaintext Flight endpoint
+    assertStartRejected(conf, "--ldap_passwords_in_clear_ok");
+    conf.ldapTls = true;
+    assertStartRejected(conf, "reach Flight SQL in clear text");
+    conf.ldapAllowCleartext = true;
+    ImpalaFlightSqlServer.start(conf).close();
+    conf.ldapTls = false;
+    ImpalaFlightSqlServer.start(conf).close();
+    conf.ldapBindPattern = "uid=someone,dc=example,dc=com";
     assertStartRejected(conf, LdapAuthenticator.UID);
   }
 
-  private static Configuration without(Configuration conf, String key) {
-    conf.unset(key);
-    return conf;
+  /** impalad's flags: the three Flight flags plus the HS2 TLS, Kerberos, LDAP ones. */
+  @Test
+  public void testConfigFromBackendFlags() {
+    TBackendGflags cfg = new TBackendGflags();
+    cfg.hostname = "coord.example.com";
+    cfg.flight_sql_port = 21060;
+    cfg.flight_sql_auth_methods = "";
+    cfg.flight_sql_memory_limit_bytes = 1L << 30;
+    cfg.principal = "impala/_HOST@EXAMPLE.COM";
+    cfg.keytab_file = "/etc/impala.keytab";
+    cfg.hs2_port = 21050;
+    cfg.ssl_server_certificate = "/etc/host.pem";
+    cfg.ssl_private_key = "/etc/host.key";
+    cfg.ssl_client_ca_certificate = "";
+    cfg.enable_ldap_auth = false;
+    cfg.ldap_uri = "ldap://ipa.example.com";
+    cfg.ldap_bind_pattern = "uid=#UID,dc=example,dc=com";
+    cfg.ldap_tls = true;
+    cfg.ldap_ca_certificate = "/etc/ipa/ca.crt";
+    cfg.ldap_passwords_in_clear_ok = false;
+    FlightSqlConfig c = FlightSqlConfig.fromBackend(cfg);
+    assertEquals(21060, c.port);
+    assertEquals(1L << 30, c.memoryLimitBytes);
+    // as HS2: Kerberos only, LDAP is off for HS2
+    assertEquals("kerberos", c.authMethods);
+    assertTrue(c.tls());
+    assertEquals("/etc/host.pem", c.sslCertificate);
+    assertEquals("HTTP/_HOST@EXAMPLE.COM", c.spnegoPrincipal);
+    assertEquals("/etc/impala.keytab", c.spnegoKeytab);
+    assertEquals("coord.example.com", c.hostname);
+    assertEquals("ldap://ipa.example.com", c.ldapUri);
+    assertTrue(c.ldapTls);
+    assertEquals("/etc/ipa/ca.crt", c.ldapCaCertificate);
+    assertEquals("coord.example.com", c.loopbackHost);
+    assertEquals(21050, c.loopbackPort);
+    assertTrue(c.loopbackSsl);
+    assertEquals(FlightSqlConfig.SYSTEM_CA_CERTIFICATES, c.loopbackCaCertificate);
+    assertEquals("impala/_HOST@EXAMPLE.COM", c.loopbackPrincipal);
+    assertEquals("/etc/impala.keytab", c.loopbackKeytab);
+    assertNull(c.loopbackDoAs);
+
+    cfg.flight_sql_auth_methods = " kerberos,ldap ";
+    cfg.ssl_client_ca_certificate = "/etc/ca.pem";
+    c = FlightSqlConfig.fromBackend(cfg);
+    assertEquals("kerberos,ldap", c.authMethods);
+    assertEquals("/etc/ca.pem", c.loopbackCaCertificate);
+
+    // no TLS, no Kerberos: plaintext loopback, nothing to log in with by default
+    cfg.flight_sql_auth_methods = "";
+    cfg.principal = "";
+    cfg.ssl_server_certificate = "";
+    cfg.ssl_private_key = "";
+    c = FlightSqlConfig.fromBackend(cfg);
+    assertEquals("", c.authMethods);
+    assertEquals("", c.spnegoPrincipal);
+    assertTrue(!c.tls() && !c.loopbackSsl);
+    cfg.enable_ldap_auth = true;
+    assertEquals("ldap", FlightSqlConfig.fromBackend(cfg).authMethods);
   }
 
-  private static void assertStartRejected(Configuration conf, String messagePart)
+  @Test
+  public void testDefaultAuthMethodsFollowHs2() {
+    assertEquals("", FlightSqlConfig.authMethods("", "", false));
+    assertEquals("kerberos", FlightSqlConfig.authMethods("", "impala/h@R", false));
+    assertEquals("ldap", FlightSqlConfig.authMethods("  ", "", true));
+    assertEquals("kerberos,ldap", FlightSqlConfig.authMethods("", "impala/h@R", true));
+    assertEquals("ldap", FlightSqlConfig.authMethods("ldap", "impala/h@R", false));
+  }
+
+  private static void assertStartRejected(FlightSqlConfig conf, String messagePart)
       throws Exception {
     try {
-      ImpalaFlightSqlServer.start(conf, "localhost").close();
+      ImpalaFlightSqlServer.start(conf).close();
       fail("start should be rejected: " + messagePart);
     } catch (IllegalArgumentException e) {
       assertTrue(e.getMessage(), e.getMessage().contains(messagePart));

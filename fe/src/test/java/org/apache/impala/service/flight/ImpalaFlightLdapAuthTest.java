@@ -43,7 +43,6 @@ import org.apache.directory.server.core.annotations.ApplyLdifFiles;
 import org.apache.directory.server.core.annotations.CreateDS;
 import org.apache.directory.server.core.annotations.CreatePartition;
 import org.apache.directory.server.core.integ.CreateLdapServerRule;
-import org.apache.hadoop.conf.Configuration;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.ClassRule;
@@ -69,25 +68,24 @@ public class ImpalaFlightLdapAuthTest {
   private FlightClient client_;
   private FlightSqlClient sql_;
 
-  static Configuration ldapConf(String uri) {
-    Configuration conf = new Configuration(false);
-    conf.set(ImpalaFlightSqlServer.BIND_HOST, "127.0.0.1");
-    conf.setInt(ImpalaFlightSqlServer.PORT, 0);
-    conf.setBoolean(ImpalaFlightSqlServer.SSL_ENABLED, false);
-    conf.set(ImpalaFlightAuthenticator.METHODS, "ldap");
+  static FlightSqlConfig ldapConf(String uri) {
+    FlightSqlConfig conf = new FlightSqlConfig();
+    conf.bindHost = "127.0.0.1";
+    conf.port = 0;
+    conf.authMethods = "ldap";
     // no HS2 behind these tests; avoid reading the system CA bundle
-    conf.setBoolean(LoopbackConfig.SSL, false);
-    conf.set(LdapAuthenticator.URI, uri);
-    conf.set(LdapAuthenticator.BIND_PATTERN, "cn=#UID,ou=Users,dc=myorg,dc=com");
+    conf.loopbackSsl = false;
+    conf.ldapUri = uri;
+    conf.ldapBindPattern = "cn=#UID,ou=Users,dc=myorg,dc=com";
     // the test directory has no TLS
-    conf.setBoolean(LdapAuthenticator.ALLOW_CLEARTEXT, true);
+    conf.ldapAllowCleartext = true;
     return conf;
   }
 
   @Before
   public void setUp() throws Exception {
     server_ = ImpalaFlightSqlServer.start(ldapConf(
-        "ldap://localhost:" + serverRule.getLdapServer().getPort()), "localhost");
+        "ldap://localhost:" + serverRule.getLdapServer().getPort()));
     allocator_ = new RootAllocator();
     client_ = FlightClient.builder(allocator_,
         Location.forGrpcInsecure("127.0.0.1", server_.getPort())).build();
@@ -161,7 +159,7 @@ public class ImpalaFlightLdapAuthTest {
   @Test
   public void testDirectoryDown() throws Exception {
     try (ImpalaFlightSqlServer server =
-             ImpalaFlightSqlServer.start(ldapConf("ldap://127.0.0.1:1"), "localhost");
+             ImpalaFlightSqlServer.start(ldapConf("ldap://127.0.0.1:1"));
          FlightSqlClient sql = ImpalaFlightSqlServerTest.clientFor(allocator_, server)) {
       serverName(sql, basic(USER, PASSWORD));
       fail("expected UNAUTHENTICATED");

@@ -51,7 +51,6 @@ import org.apache.arrow.vector.ipc.ReadChannel;
 import org.apache.arrow.vector.ipc.message.MessageSerializer;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Schema;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hive.service.rpc.thrift.TGetCrossReferenceReq;
 import org.apache.hive.service.rpc.thrift.TGetPrimaryKeysReq;
 import org.apache.hive.service.rpc.thrift.TGetSchemasReq;
@@ -78,16 +77,15 @@ public class ImpalaFlightMetadataTest {
   @Before
   public void setUp() throws Exception {
     hs2_ = new FakeHs2();
-    Configuration conf = new Configuration(false);
-    conf.set(ImpalaFlightSqlServer.BIND_HOST, "127.0.0.1");
-    conf.setInt(ImpalaFlightSqlServer.PORT, 0);
-    conf.setBoolean(ImpalaFlightSqlServer.SSL_ENABLED, false);
-    conf.set(ImpalaFlightAuthenticator.METHODS, "none");
-    conf.set(LoopbackConfig.HOST, "127.0.0.1");
-    conf.setInt(LoopbackConfig.PORT, hs2_.port);
-    conf.setBoolean(LoopbackConfig.SSL, false);
-    conf.set(LoopbackConfig.IMPERSONATION, "doas");
-    server_ = ImpalaFlightSqlServer.start(conf, "localhost");
+    FlightSqlConfig conf = new FlightSqlConfig();
+    conf.bindHost = "127.0.0.1";
+    conf.port = 0;
+    conf.authMethods = "none";
+    conf.loopbackHost = "127.0.0.1";
+    conf.loopbackPort = hs2_.port;
+    conf.loopbackSsl = false;
+    conf.loopbackDoAs = true;
+    server_ = ImpalaFlightSqlServer.start(conf);
     allocator_ = new RootAllocator();
     sql_ = ImpalaFlightSqlServerTest.clientFor(allocator_, server_);
   }

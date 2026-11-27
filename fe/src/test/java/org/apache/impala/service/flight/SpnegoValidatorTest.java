@@ -45,7 +45,6 @@ import org.apache.arrow.flight.grpc.CredentialCallOption;
 import org.apache.arrow.flight.sql.FlightSqlClient;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.kerby.kerberos.kerb.server.SimpleKdcServer;
 import org.ietf.jgss.GSSContext;
 import org.ietf.jgss.GSSManager;
@@ -100,16 +99,16 @@ public class SpnegoValidatorTest {
     kdc_.stop();
   }
 
-  private static Configuration kerberosConf() {
-    Configuration conf = new Configuration(false);
-    conf.set(ImpalaFlightSqlServer.BIND_HOST, "127.0.0.1");
-    conf.setInt(ImpalaFlightSqlServer.PORT, 0);
-    conf.setBoolean(ImpalaFlightSqlServer.SSL_ENABLED, false);
-    conf.set(ImpalaFlightAuthenticator.METHODS, "kerberos");
+  private static FlightSqlConfig kerberosConf() {
+    FlightSqlConfig conf = new FlightSqlConfig();
+    conf.bindHost = "127.0.0.1";
+    conf.port = 0;
+    conf.authMethods = "kerberos";
     // no HS2 behind these tests; avoid reading the system CA bundle
-    conf.setBoolean(LoopbackConfig.SSL, false);
-    conf.set(SpnegoValidator.PRINCIPAL, "HTTP/_HOST@" + REALM);
-    conf.set(SpnegoValidator.KEYTAB, serviceKeytab_.getPath());
+    conf.loopbackSsl = false;
+    conf.spnegoPrincipal = "HTTP/_HOST@" + REALM;
+    conf.spnegoKeytab = serviceKeytab_.getPath();
+    conf.hostname = HOST;
     return conf;
   }
 
@@ -159,14 +158,14 @@ public class SpnegoValidatorTest {
 
   @Test
   public void testValidateReturnsClientPrincipal() throws Exception {
-    SpnegoValidator validator = new SpnegoValidator(kerberosConf(), HOST);
+    SpnegoValidator validator = new SpnegoValidator(kerberosConf());
     assertEquals(SERVICE, validator.getPrincipal());
     assertEquals(CLIENT, validator.validate(clientToken()));
   }
 
   @Test
   public void testInvalidTokensAreRejected() throws Exception {
-    SpnegoValidator validator = new SpnegoValidator(kerberosConf(), HOST);
+    SpnegoValidator validator = new SpnegoValidator(kerberosConf());
     for (String token : new String[] {"%%%", "YWJjZGVm"}) {
       try {
         validator.validate(token);
@@ -179,10 +178,10 @@ public class SpnegoValidatorTest {
 
   @Test
   public void testWrongServicePrincipalIsRejected() throws Exception {
-    Configuration conf = kerberosConf();
-    conf.set(SpnegoValidator.PRINCIPAL, "HTTP/otherhost@" + REALM);
+    FlightSqlConfig conf = kerberosConf();
+    conf.spnegoPrincipal = "HTTP/otherhost@" + REALM;
     try {
-      new SpnegoValidator(conf, HOST);
+      new SpnegoValidator(conf);
       fail("keytab has no key for HTTP/otherhost");
     } catch (IllegalArgumentException e) {
       assertTrue(e.getMessage(), e.getMessage().contains("no key for"));
@@ -193,7 +192,7 @@ public class SpnegoValidatorTest {
   public void testNegotiateLoginThroughEndpoint() throws Exception {
     ClientIncomingAuthHeaderMiddleware.Factory bearer =
         new ClientIncomingAuthHeaderMiddleware.Factory(new ClientBearerHeaderHandler());
-    try (ImpalaFlightSqlServer server = ImpalaFlightSqlServer.start(kerberosConf(), HOST);
+    try (ImpalaFlightSqlServer server = ImpalaFlightSqlServer.start(kerberosConf());
          BufferAllocator allocator = new RootAllocator();
          FlightSqlClient sql = new FlightSqlClient(FlightClient.builder(allocator,
              Location.forGrpcInsecure("127.0.0.1", server.getPort()))

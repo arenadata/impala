@@ -27,7 +27,6 @@ import javax.security.auth.Subject;
 import javax.security.auth.kerberos.KerberosPrincipal;
 import javax.security.auth.kerberos.KeyTab;
 
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.SecurityUtil;
 import org.ietf.jgss.GSSContext;
 import org.ietf.jgss.GSSCredential;
@@ -39,14 +38,11 @@ import com.google.common.base.Preconditions;
 
 /**
  * Validates single-round SPNEGO tokens ({@code authorization: Negotiate <base64>}) with
- * the service key of {@value #PRINCIPAL} from {@value #KEYTAB}, e.g. the HTTP/_HOST entry
- * of the impala keytab. Returns the client principal; no reply token is sent (clients
- * get a bearer token instead). Same approach as Kyuubi's SparkConnectKerberosValidator.
+ * the service key of the HTTP principal ({@code HTTP/_HOST@<realm of --principal>}) from
+ * --keytab_file. Returns the client principal; no reply token is sent (clients get a
+ * bearer token instead). Same approach as Kyuubi's SparkConnectKerberosValidator.
  */
 public class SpnegoValidator {
-  public static final String PRINCIPAL = "impala.flight-sql.spnego.principal";
-  public static final String KEYTAB = "impala.flight-sql.spnego.keytab";
-
   private static final Oid SPNEGO = oid("1.3.6.1.5.5.2");
   private static final Oid KRB5 = oid("1.2.840.113554.1.2.2");
   private static final Oid KRB5_PRINCIPAL_NAME = oid("1.2.840.113554.1.2.2.1");
@@ -55,21 +51,23 @@ public class SpnegoValidator {
   private final Subject subject_;
   private final GSSManager gss_ = GSSManager.getInstance();
 
-  /** 'hostname' replaces _HOST in the configured principal. */
-  public SpnegoValidator(Configuration conf, String hostname) throws IOException {
-    String configured = conf.getTrimmed(PRINCIPAL, "");
-    String keytab = conf.getTrimmed(KEYTAB, "");
-    Preconditions.checkArgument(!configured.isEmpty(), "%s must be set for Kerberos",
-        PRINCIPAL);
-    Preconditions.checkArgument(!keytab.isEmpty(), "%s must be set for Kerberos", KEYTAB);
+  /** The coordinator's FQDN replaces _HOST in the principal. */
+  public SpnegoValidator(FlightSqlConfig config) throws IOException {
+    String configured = config.spnegoPrincipal;
+    String keytab = config.spnegoKeytab;
+    Preconditions.checkArgument(!configured.isEmpty(),
+        "--principal must be set for Kerberos");
+    Preconditions.checkArgument(!keytab.isEmpty(),
+        "--keytab_file must be set for Kerberos");
     File keytabFile = new File(keytab);
-    Preconditions.checkArgument(keytabFile.canRead(), "%s: cannot read %s", KEYTAB,
+    Preconditions.checkArgument(keytabFile.canRead(), "--keytab_file: cannot read %s",
         keytab);
+    String hostname = config.hostname;
     principal_ = SecurityUtil.getServerPrincipal(configured, hostname);
     KerberosPrincipal kp = new KerberosPrincipal(principal_);
     KeyTab kt = KeyTab.getInstance(kp, keytabFile);
-    Preconditions.checkArgument(kt.getKeys(kp).length > 0, "%s: no key for %s in %s",
-        KEYTAB, principal_, keytab);
+    Preconditions.checkArgument(kt.getKeys(kp).length > 0,
+        "--keytab_file: no key for %s in %s", principal_, keytab);
     subject_ = new Subject();
     subject_.getPrincipals().add(kp);
     subject_.getPrivateCredentials().add(kt);

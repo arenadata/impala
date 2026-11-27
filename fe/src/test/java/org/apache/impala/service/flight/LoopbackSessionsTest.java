@@ -23,7 +23,6 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hive.service.rpc.thrift.TOpenSessionReq;
 import org.junit.After;
 import org.junit.Before;
@@ -40,19 +39,19 @@ public class LoopbackSessionsTest {
   @After
   public void tearDown() { hs2_.close(); }
 
-  private Configuration conf(String impersonation) {
-    Configuration conf = new Configuration(false);
-    conf.set(LoopbackConfig.HOST, "127.0.0.1");
-    conf.setInt(LoopbackConfig.PORT, hs2_.port);
-    conf.setBoolean(LoopbackConfig.SSL, false);
-    conf.set(LoopbackConfig.IMPERSONATION, impersonation);
-    conf.setInt(LoopbackConfig.MAX_SESSIONS_PER_USER, 2);
+  private FlightSqlConfig conf(String impersonation) {
+    FlightSqlConfig conf = new FlightSqlConfig();
+    conf.loopbackHost = "127.0.0.1";
+    conf.loopbackPort = hs2_.port;
+    conf.loopbackSsl = false;
+    conf.loopbackDoAs = "doas".equals(impersonation);
+    conf.loopbackMaxSessionsPerUser = 2;
     return conf;
   }
 
   private LoopbackSessions sessions(String impersonation) throws Exception {
     return LoopbackSessions.create(
-        new LoopbackConfig(conf(impersonation), "localhost", ""));
+        new LoopbackConfig(conf(impersonation)));
   }
 
   @Test
@@ -71,8 +70,9 @@ public class LoopbackSessionsTest {
   @Test
   public void testUsernameModeWithoutKerberos() throws Exception {
     // the default without a principal
-    LoopbackConfig config = new LoopbackConfig(
-        without(conf("doas"), LoopbackConfig.IMPERSONATION), "localhost", "");
+    FlightSqlConfig conf = conf("doas");
+    conf.loopbackDoAs = null;
+    LoopbackConfig config = new LoopbackConfig(conf);
     assertFalse(config.doAs);
     try (LoopbackSessions sessions = LoopbackSessions.create(config)) {
       LoopbackSession s = sessions.borrow("bob");
@@ -162,10 +162,5 @@ public class LoopbackSessionsTest {
       assertEquals(0, sessions.openSessions("alice"));
       assertEquals(0, sessions.idleSessions("alice"));
     }
-  }
-
-  private static Configuration without(Configuration conf, String key) {
-    conf.unset(key);
-    return conf;
   }
 }
